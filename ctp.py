@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Corpus runner: cregit over every project in manifest.tsv.
+"""ctp — cregit-token-pipeline runner. Runs cregit over every project in manifest.tsv.
 
-    ./corpus_runner.py run [--jobs 2] [--retries 1] [--only jq,zstd]
-    ./corpus_runner.py status
+    ./ctp.py run [--jobs 2] [--retries 1] [--only jq,zstd]
+    ./ctp.py status
+    ./ctp.py db
 
 Per project: pipeline (devenv shell) -> validate -> stamp. Idempotent — a
 validated project is skipped; a failed/interrupted one resumes via blobExec's
@@ -270,7 +271,7 @@ def _lock_held(lockfile: Path) -> bool:
 
 
 def cmd_db(args: argparse.Namespace) -> int:
-    """Rebuild corpus.duckdb (derived index over stamps/metrics/parquets)."""
+    """Rebuild ctp.duckdb (derived index over stamps/metrics/parquets)."""
     _ENV.update(capture_devenv_env())
     return subprocess.run(["python3", str(CORPUS / "consolidate.py")],
                           cwd=CREGIT, env=_ENV).returncode
@@ -287,11 +288,11 @@ def main() -> int:
     run_p.add_argument("--manifest", default="manifest.tsv")
     run_p.set_defaults(fn=cmd_run)
 
-    st_p = sub.add_parser("status", help="one-screen corpus status")
+    st_p = sub.add_parser("status", help="one-screen pipeline status")
     st_p.add_argument("--manifest", default="manifest.tsv")
     st_p.set_defaults(fn=cmd_status)
 
-    db_p = sub.add_parser("db", help="rebuild corpus.duckdb (tracking table + unified tokens view)")
+    db_p = sub.add_parser("db", help="rebuild ctp.duckdb (tracking table + unified tokens view)")
     db_p.set_defaults(fn=cmd_db)
 
     args = ap.parse_args()

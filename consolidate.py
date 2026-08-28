@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build corpus.duckdb: project tracking table + unified token view.
+"""Build ctp.duckdb: project tracking table + unified token view.
 
 Derived index, NOT authority — ground truth stays manifest.tsv + validated
 stamps + metrics.tsv. Safe to rerun any time. Run inside devenv (needs duckdb).
@@ -15,7 +15,7 @@ _cfg = configparser.ConfigParser()
 _cfg.read(CORPUS / "pipeline.cfg")
 OUT = (CORPUS / Path(_cfg.get("paths", "output_dir",
        fallback="../cregit-workspace/corpus-files")).expanduser()).resolve()
-DB = CORPUS / "corpus.duckdb"
+DB = CORPUS / "ctp.duckdb"
 
 
 def lock_held(lockfile: Path) -> bool:
@@ -77,7 +77,7 @@ def main() -> None:
     else:
         total = 0
 
-    print(f"corpus.duckdb rebuilt: {DB}")
+    print(f"ctp.duckdb rebuilt: {DB}")
     for state in ("DONE", "RUNNING", "FAILED", "QUEUED"):
         n = sum(1 for p in projects if p[4] == state)
         if n:

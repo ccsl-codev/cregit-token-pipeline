@@ -9,14 +9,22 @@ Built for a study of corporate knowledge concentration in FLOSS codebases
 Stdlib Python only; DuckDB is required inside the cregit environment for
 validation and consolidation.
 
+## Background
+
+This pipeline generalizes the single-repository setup of the earlier
+[cbsoft-vem2026-corporate-truck-factor](https://github.com/EllianCarlos/cbsoft-vem2026-corporate-truck-factor)
+work, which ran cregit over one repository (the Linux kernel) with hand-rolled
+scripts. This project turns the same token-level method into a repeatable
+multi-project pipeline.
+
 ## Quickstart
 
 ```
 # 1. point pipeline.cfg at your cregit checkout and an output directory
 # 2. list projects in manifest.tsv (name, url, category, file_filter, size_class)
-./corpus_runner.py run --jobs 3        # run everything not yet validated
-./corpus_runner.py status              # one-screen progress view
-./corpus_runner.py db                  # rebuild corpus.duckdb (tracking + tokens view)
+./ctp.py run --jobs 3        # run everything not yet validated
+./ctp.py status              # one-screen progress view
+./ctp.py db                  # rebuild ctp.duckdb (tracking + tokens view)
 ```
 
 Each project runs cregit's `run_pipeline_process.sh` (clone → tokenize via
@@ -28,20 +36,20 @@ ones are retried on the next pass.
 ## Architecture
 
 ```
-manifest.tsv ──► corpus_runner.py run ──► <out>/<name>/<name>-dataset.parquet
+manifest.tsv ──► ctp.py run ──► <out>/<name>/<name>-dataset.parquet
                    │  (ThreadPool, per-project flock,        + logs/ per attempt
                    │   disk floor, retry passes)
                    ├──► validate.py  (row count / schema gate → .validated stamp)
                    └──► metrics.tsv  (append-only ledger: one row per phase attempt)
 
-corpus_runner.py db ──► corpus.duckdb
+ctp.py db ──► ctp.duckdb
                           ├─ projects       (state per project: DONE/RUNNING/FAILED/QUEUED)
                           ├─ phase_metrics  (the timing ledger, SQL-queryable)
                           └─ tokens (view)  (all validated parquets unified,
                                              + category/size_class columns)
 ```
 
-Ground truth is always the files (stamps, manifest, ledger); `corpus.duckdb`
+Ground truth is always the files (stamps, manifest, ledger); `ctp.duckdb`
 is a derived index, rebuilt on demand — the runner never dual-writes state.
 
 ## Observability
