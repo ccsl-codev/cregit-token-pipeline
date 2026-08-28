@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
-corpus.duckdb
+ctp.duckdb
 runs.log
 metrics.tsv
 smoke-*.log
