@@ -9,6 +9,14 @@ Built for a study of corporate knowledge concentration in FLOSS codebases
 Stdlib Python only; DuckDB is required inside the cregit environment for
 validation and consolidation.
 
+## Background
+
+This pipeline generalizes the single-repository setup of the earlier
+[cbsoft-vem2026-corporate-truck-factor](https://github.com/EllianCarlos/cbsoft-vem2026-corporate-truck-factor)
+work, which ran cregit over one repository (the Linux kernel) with hand-rolled
+scripts. This project turns the same token-level method into a repeatable
+multi-project pipeline.
+
 ## Quickstart
 
 ```

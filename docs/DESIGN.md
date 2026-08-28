@@ -29,7 +29,7 @@ touch cregit internals except two small flags (§4).
 
 ```mermaid
 flowchart TD
-    M[projects.yaml<br/>corpus manifest] --> SCHED[Scheduler<br/>corpus_runner.py + corpus.db]
+    M[manifest.tsv<br/>corpus manifest] --> SCHED[Scheduler<br/>ctp.py run]
     SCHED -->|slot S/M/L| P1[Project pipeline<br/>run_pipeline_process.sh]
     P1 --> V[validate.py<br/>invariants gate]
     V --> R[retain.py<br/>delete memo/blame/clones<br/>keep parquet + DBs + bare repos]
@@ -37,7 +37,7 @@ flowchart TD
     AGG --> E[enrich.py<br/>person→firm mapping]
     E --> A[anonymize.py<br/>salted person ids]
     A --> MT[metadata table<br/>per-project provenance]
-    MT --> PKG[package.py<br/>enterprise.parquet + community.parquet<br/>+ Zenodo bundle]
+    MT --> PKG[package.py<br/>enterprise.parquet + community.parquet<br/>+ publication bundle]
 ```
 
 Two layers:
@@ -47,12 +47,12 @@ Two layers:
 2. **Corpus layer** — new scripts that only read finished per-project artifacts.
    Deterministic, cheap, re-runnable any time.
 
-## 3. Corpus manifest (`projects.yaml`)
+## 3. Corpus manifest (`manifest.tsv`)
 
 One entry per project; the manifest is the single source of truth and is itself a
 published dataset artifact (provenance for the paper).
 
-```yaml
+```
 - name: kubernetes
   url: https://github.com/kubernetes/kubernetes.git
   category: enterprise          # enterprise | community | kernel
@@ -91,46 +91,39 @@ Plus one new post-step, outside cregit:
   commit count in `-original.db` == `git rev-list --count pinned_commit`;
   schema columns match the corpus schema version.
 
-## 5. Orchestrator (`corpus_runner.py`)
+## 5. Orchestrator (`ctp.py`) — AS BUILT
 
-Plain Python + SQLite (`corpus.db`), following your deterministic-scripts preference.
-No Airflow/Snakemake dependency — the DAG is trivial (linear per project, fan-in at
-corpus layer); the hard part is state + resource scheduling, which is ~300 lines.
+Stdlib Python, no SQLite state authority. Snakemake was evaluated and rejected
+(bioinformatics-origin, not an MSR-community tool); GNU Parallel was built and
+validated, then superseded by Python for readability and transparency.
 
-**State model** (`corpus.db`):
+**State model — files are the ground truth, the DB is derived:**
 
-```
-projects(name, url, category, pinned_commit, size_class, state, workdir, updated_at)
-stage_runs(project, stage, attempt, rc, started_at, finished_at, log_path)
-```
+- `manifest.tsv` — one row per project (name, url, category, file_filter, size_class)
+- `<out>/<name>/<name>.validated` — stamp written only after the validation gate passes
+- `metrics.tsv` — append-only ledger, one row per phase attempt
+  (`iso_start  project  class  phase  duration_s  rc  log`)
+- `runs.log` — one start/end row per runner invocation
+- `ctp.duckdb` — derived index rebuilt on demand by `./ctp.py db` (`consolidate.py`):
+  `projects` state table (DONE/RUNNING/FAILED/QUEUED), `phase_metrics`, and a unified
+  `tokens` view over all validated parquets. The runner never dual-writes state.
 
-`state ∈ {QUEUED, CLONING, RUNNING, VALIDATING, COMPACTING, DONE, FAILED, QUARANTINED}`
+**Scheduling (as built):** `ThreadPoolExecutor` with a global `--jobs N` slot count,
+plus retry passes over failures (`--retries`, default 1). The per-class weighted
+S/M/L packing above remains the target for mixed corpora; current calibration data
+(S-class wall time varies 9×: jq 4 min vs zstd 36 min) lives in `metrics.tsv`.
 
-- Idempotent tick loop: each invocation scans states, launches work up to slot limits,
-  records transitions. Safe to kill and re-run at any point (per-project resume is
-  delegated to blobExec's own incremental frontier + `from-step`).
-- **flock per project** (kernel launcher pattern) so a cron tick never double-starts.
-- FAILED → auto-retry once (resume mode); second failure → QUARANTINED for manual
-  triage; the corpus run never blocks on one bad project.
-
-**Resource scheduling — size classes, not a global N:**
-
-| Class | Heuristic (commits) | Concurrent slots | blobExec threads | JVM heap |
-| --- | --- | --- | --- | --- |
-| S | < 30k | up to 4 | 2 | 2 GB |
-| M | 30k–150k | up to 2 | 4 | 4 GB |
-| L | > 150k | 1 (exclusive-ish) | 8 | 8 GB |
-
-Mix rule: total weight ≤ 16 cores and ≤ ~22 GB heap (leave headroom for perl/python
-stages). One L + two M, or one L + four S, etc. RAM (30 GB) is the binding constraint,
-not cores.
-
-**Disk guard:** before launching any project, require free space >
-`3 × bare-repo size + 50 GB` floor; below 150 GB free, launch nothing new and only
-finish in-flight work. Compaction (§6) runs eagerly, right after validate.
+- **flock per project** (held for the whole job) so two runner invocations never collide.
+- **Disk floor:** below 150 GB free a project is deferred, not started.
+- **Environment capture:** the cregit devenv environment is resolved ONCE per run and
+  passed to every phase subprocess — concurrent `devenv shell` invocations race on a
+  shared nix GC root and kill each other (found in the first concurrency smoke).
+- **Visibility:** event lines per phase start/finish, 30 s heartbeat (running projects
+  with elapsed time, done/failed counts, disk free), `./ctp.py status` one-screener,
+  per-attempt logs with a live `-latest` symlink.
 
 **Path canonicalization:** the runner resolves every path through
-`realpath` → `/local/home/...` form before invoking blobExec. This is load-bearing:
+`Path.resolve()` → canonical form before invoking blobExec. This is load-bearing:
 blobExec's meta table refuses resume when the command string differs, and
 `/home` vs `/local/home` aliasing has already caused a refusal once.
 
@@ -169,7 +162,7 @@ All pure functions over finished per-project artifacts; each re-runnable in minu
    versions. This is the Data-track "dataset card" backbone.
 4. **package.py** — emits `enterprise/` and `community/` dataset trees with the **same
    schema** (+ kernel as its own labeled member), a `SCHEMA.md`, the manifest, the
-   metadata table, and checksums; bundles for Zenodo/figshare upload.
+   metadata table, and checksums, packaged for the eventual data release.
 
 **Provenance pinning (MSR reviewers care):** every per-project run writes a
 `provenance.json` — cregit git sha, blobExec jar sha256, srcml/ctags versions, file
@@ -178,7 +171,7 @@ filter, pinned commit, wall time. Aggregated into the metadata table.
 ## 8. Observability
 
 - Per-project logs under `<workdir>/pipeline.log` (already exists) + runner log.
-- `status.py` — one-screen table from `corpus.db`: DONE/RUNNING/QUEUED/QUARANTINED
+- `ctp.py status` — one-screen table from `ctp.duckdb`: DONE/RUNNING/QUEUED/QUARANTINED
   counts, ETA from median stage durations, disk free. A MeshClaw cron can post the
   digest daily during the 11 Sep–2 Oct window.
 - QUARANTINED projects listed with last 30 log lines for fast triage.
@@ -210,10 +203,10 @@ projects > 36 h gets flagged before burning the slot.
 ## 11. Build plan (target: runnable by 4 Sep)
 
 1. `--skip-html` + `--no-memo` flags in `run_pipeline_process.sh` (small, test on jq).
-2. `corpus_runner.py` + `corpus.db` schema + flock/tick loop; smoke on 2 S projects.
+2. `ctp.py` + `ctp.duckdb` schema + flock/tick loop; smoke on 2 S projects.
 3. `validate.py` + `retain.py`; wire as post-stages.
-4. `select_corpus.py` heuristics → candidate list → manual curation → `projects.yaml`.
-5. `status.py` + daily digest cron.
+4. `select_corpus.py` heuristics → candidate list → manual curation → `manifest.tsv`.
+5. `ctp.py status` + daily digest cron.
 6. Corpus-level: `enrich.py`, `anonymize.py`, metadata, `package.py` (can land during
    the run window — they only need finished projects).
 
