@@ -1,8 +1,10 @@
 domain,company,kind,source
+(none),(Independent),free_provider,builtin
 030.io,NetEase,company,cncf-gitdm-single
 0x80.net,Airtable,company,cncf-gitdm-single
 0xcafebabe.co.uk,Sky UK,company,cncf-gitdm-single
 123-edv.de,Basler,company,cncf-gitdm-single
+126.com,(Independent),free_provider,builtin
 163.com,Net EASE,company,gitdm
 1und1.de,1&1 IONOS,company,cncf-gitdm
 21viacloud.com,21viacloud,company,gitdm
@@ -37,6 +39,7 @@ aas.io,MapD,company,cncf-gitdm-single
 ab.jp.nec.com,NEC,company,cncf-gitdm-single
 abahgat.com,IPsoft,company,cncf-gitdm-single
 abc.shop.edu.cn,Netease Game,company,cncf-gitdm-single
+abesis.fr,gandi.net,company,cncf-gitdm-single
 ableton.com,Ableton,company,cncf-gitdm-single
 absint.com,AbsInt Angewandte Informatik,company,cncf-gitdm
 ac-montpellier.fr,MinistÃ¨re de lâ€™Ã©ducation nationale de la jeunesse et des sports,company,cncf-gitdm-single
@@ -59,6 +62,7 @@ adamcharnock.com,Gardunha,company,cncf-gitdm-single
 adamtulinius.dk,DBC,company,cncf-gitdm-single
 adamwills.com,Weever Apps,company,cncf-gitdm-single
 adaptec.com,Adaptec,company,gitdm
+adaptechgroup.com,AdapTechSolutions.net,company,cncf-gitdm-single
 addi-data.com,ADDI-DATA GmbH,company,gitdm
 adesso.de,adesso,company,cncf-gitdm-single
 adfin.com,AD/FIN,company,cncf-gitdm-single
@@ -153,6 +157,7 @@ alyseo.com,Alyseo,company,gitdm
 am.sony.com,Sony,company,gitdm
 amadeus.com,Amadeus,company,gitdm
 amarulasolutions.com,Amarula Solutions,company,cncf-gitdm
+amazee.com,amazee.io,company,cncf-gitdm-single
 amazon.com,Amazon,company,rich
 amd.com,AMD,company,gitdm
 amdocs.com,AMDOCS,company,spinellis-sec
@@ -163,6 +168,7 @@ ampliphae.com,Ampliphae,company,gitdm
 anaconda.com,Austin,company,cncf-gitdm-single
 anagramm.de,Anagramm GmbH,company,gitdm
 analog.com,Analog Devices,company,gitdm
+ancestry.com,Ancestry.com,company,cncf-gitdm-single-self-reference
 anchor.com.au,Anchor,company,gitdm
 anchor.hosting,Anchor,company,gitdm
 anchor.net.au,Anchor,company,gitdm
@@ -195,6 +201,7 @@ anurag.gg,Samsung Electronics,company,cncf-gitdm-single
 anw.at,TTTech,company,cncf-gitdm-single
 anz.com,Australia &amp; New Zealand Banking Group,company,spinellis-sec
 aol.co.uk,ZeroLag Communications,company,cncf-gitdm-single
+aol.com,(Independent),free_provider,builtin
 aon.at,ecosio,company,cncf-gitdm-single
 aornis.com,G-Research,company,cncf-gitdm-single
 aotto.com,OpenStack Foundation,company,cncf-gitdm-single
@@ -285,6 +292,7 @@ attinteractive.com,AT&T,company,gitdm
 atto-research.com,ATTO,company,cncf-gitdm-single
 au1.ibm.com,International Business Machines,company,cncf-gitdm
 audrius.rocks,G-Research,company,cncf-gitdm-single
+augello.be,One.com,company,cncf-gitdm-single
 aumjaud.fr,Société Générale,company,cncf-gitdm-single
 aurorasolutions.io,Stakater,company,cncf-gitdm-single
 austad.us,Cisco Systems,company,cncf-gitdm-single
@@ -298,6 +306,7 @@ avastmehearties.com,Netflix,company,cncf-gitdm-single
 avaya.com,Avaya,company,gitdm
 ave81.com,LeadPages,company,cncf-gitdm-single
 avi.com,Code Dx,company,cncf-gitdm-single
+avi.im,Iavin.com,company,cncf-gitdm-single
 avinetworks.com,Avi Networks,company,gitdm
 avinor.no,Avinor,company,cncf-gitdm-single
 avito.ru,Avito,company,cncf-gitdm-single
@@ -429,12 +438,14 @@ bluedotai.cn,BlueDot,company,cncf-gitdm-single
 bluegiga.com,Bluegiga,company,gitdm
 bluehost.com,Bluehost,company,gitdm
 bluescape.com,Bluescape,company,cncf-gitdm-single
+bluestealth.pw,Salesforce.com,company,cncf-gitdm-single
 bluewatersys.com,Bluewater Systems,company,gitdm
 bmc.com,BMC Software,company,cncf-gitdm
 bmw.de,BMW,company,cncf-gitdm-single
 bobuhiro11.net,Yahoo!,company,cncf-gitdm-single
 boeing.com,Boeing,company,gitdm
 boingram.com,Craftsy,company,cncf-gitdm-single
+bol.com,Bol.com,company,cncf-gitdm-self-reference
 bonsaimeme.com,bmeme,company,cncf-gitdm-single
 bookmyshow.com,BookMyShow,company,cncf-gitdm-single
 booleanhaiku.com,Twitter,company,cncf-gitdm-single
@@ -615,6 +626,7 @@ chlupacek.cz,Spinoco,company,cncf-gitdm-single
 chr-fritz.de,Qaware,company,cncf-gitdm-single
 chr.is,Cisco Systems,company,cncf-gitdm-single
 chris-wilson.co.uk,Intel,company,cncf-gitdm-single
+chriskramer.nl,Bol.com,company,cncf-gitdm-single
 chrislaux.com,Deutsches Zentrum,company,cncf-gitdm-single
 chrismoos.com,Chris Moos,company,cncf-gitdm-single
 christian-niehoff.com,Deutsche WertpapierService Bank,company,cncf-gitdm-single
@@ -655,6 +667,7 @@ clearbit.com,Clearbit,company,cncf-gitdm-single
 clemson.edu,Blizzard,company,cncf-gitdm-single
 cliqr.com,Spectro Cloud,company,cncf-gitdm-single
 cliqz.com,Cliqz,company,cncf-gitdm-single
+clkao.org,g0v.tw,company,cncf-gitdm-single
 clock.co.uk,Clock,company,cncf-gitdm-single
 cloud.com,Citrix,company,gitdm
 cloud.upwork.com,Upwork,company,cncf-gitdm-single
@@ -719,6 +732,7 @@ coglative.com,mausworks,company,cncf-gitdm-single
 cognizant.com,Cognizant,company,gitdm
 cohodata.com,Coho Data,company,gitdm
 cojo.in,Whisper,company,cncf-gitdm-single
+coldice.net,OvvY.net,company,cncf-gitdm-single
 colectica.com,Colectica and Algenta Technologies,company,cncf-gitdm-single
 colivre.coop.br,Colivre,company,cncf-gitdm-single
 collab.net,CollabNet,company,gitdm
@@ -728,6 +742,7 @@ collibra.com,Medidata,company,cncf-gitdm-single
 collogia.de,UNICEPTA,company,cncf-gitdm-single
 colorfullife.com,Bruker BioSpin,company,cncf-gitdm-single
 colt.net,Colt,company,gitdm
+comcast.com,home.ai,company,cncf-gitdm-single
 commvault.com,COMMVAULT SYSTEMS,company,spinellis-sec
 compass.com,OfferUp,company,cncf-gitdm-single
 compulab.co.il,CompuLab,company,gitdm
@@ -777,6 +792,7 @@ cr3.io,cr3studio,company,cncf-gitdm-single
 craftech.io,Craftech,company,cncf-gitdm-single
 crashcourse.ca,CrashCourse,company,cncf-gitdm-single
 crashtest-security.com,ottonova Holding,company,cncf-gitdm-single
+crate.io,Crate.io,company,cncf-gitdm-self-reference
 cray.com,Cray,company,gitdm
 crazymax.dev,Docker,company,cncf-gitdm-single
 create-net.org,CREATE-NET,company,gitdm
@@ -787,6 +803,7 @@ crisnoble.com,Tencent Holdings,company,cncf-gitdm-single
 critc.cn,China Railway ITC,company,gitdm
 criteo.com,Criteo,company,spinellis-sec
 criticalstack.com,Critical Stack,company,cncf-gitdm-single
+crossbrowsertesting.com,CrossBrowserTesting.com,company,cncf-gitdm-single-self-reference
 crosse.org,FireEye,company,cncf-gitdm-single
 crossleys.org,Red Hat,company,cncf-gitdm-single
 crowdcube.com,Crowdcube,company,cncf-gitdm-single
@@ -821,6 +838,7 @@ cttc.es,CTTC,company,cncf-gitdm-single
 cumulusnetworks.com,Cumulus Networks,company,patch
 curl.me,Josh Curl,company,cncf-gitdm-single
 curtis.io,Red Hat,company,cncf-gitdm-single
+cvat.ai,CVAT.ai,company,cncf-gitdm-single-self-reference
 cwik.org,Dell EMC,company,cncf-gitdm-single
 cwrcoding.com,Open Knowledge Foundation Germany eV,company,cncf-gitdm-single
 cybera.ca,Cybera,company,gitdm
@@ -851,6 +869,7 @@ dannf.org,Canonical,company,cncf-gitdm-single
 dannyben.com,Telesofia MedicalTelesofia Medical,company,cncf-gitdm-single
 danshin.pro,Tuning,company,cncf-gitdm-single
 daocloud.io,DaoCloud,company,gitdm
+darkk.net.ru,Papirus.net,company,cncf-gitdm-single
 darksecretsoftware.com,Rackspace,company,cncf-gitdm-single
 dash0.com,Dash0,company,cncf-gitdm
 dasprids.de,DASPRiD's,company,cncf-gitdm-single
@@ -930,6 +949,7 @@ deseloper.com,Mozilla,company,cncf-gitdm-single
 deshaw.com,D. E. Shaw Research,company,cncf-gitdm-single
 designcondition.com,DesignCondition,company,cncf-gitdm-single
 desire.sh,株式会社アニメイトラボ,company,cncf-gitdm-single
+despegar.com,Despegar.com,company,spinellis-sec-self-reference
 desy.de,DESY,company,cncf-gitdm-single
 deutschebahn.com,Deutsche Bahn,company,spinellis-sec
 dev10.net,Dev10 Internet,company,cncf-gitdm-single
@@ -1126,6 +1146,7 @@ erdfelt.com,Rackspace,company,cncf-gitdm-single
 ericanderson.ca,Google,company,cncf-gitdm-single
 ericsson.com,Ericsson,company,gitdm
 ernestoalejo.me,AltiplaConsulting,company,cncf-gitdm-single
+ernie.io,CareZone.com,company,cncf-gitdm-single
 ertw.com,Northfield IT,company,cncf-gitdm-single
 erwan.com,Red Hat,company,cncf-gitdm-single
 es.ibm.com,International Business Machines,company,cncf-gitdm-single
@@ -1158,8 +1179,10 @@ everyleaf.com,Everyleaf,company,cncf-gitdm-single
 everything.me,EverythingMe,company,rich
 evilplan.org,Cube Technology IT Services,company,cncf-gitdm-single
 evoila.de,evoila,company,gitdm
+example.com,(Independent),free_provider,builtin
 exaring.de,Cloudflare,company,cncf-gitdm-single
 exati.com.br,Blacksmith-Labs,company,cncf-gitdm-single
+excellent.io,Salesforce.com,company,cncf-gitdm-single
 exmc02pt3pyfvh8.ad.bonniernews.se,Bonnier News Tech,company,cncf-gitdm-single
 expandonline.nl,Expand Online,company,cncf-gitdm-single
 expedia.com,Expedia,company,cncf-gitdm
@@ -1186,6 +1209,7 @@ farberg.de,DHBW Stuttgart,company,cncf-gitdm-single
 farfetch.com,Farfetch,company,cncf-gitdm-single
 farmbio.uu.se,Rikagaku KenkyÅ«jo,company,cncf-gitdm-single
 fashionmetric.com,Bold Metrics,company,cncf-gitdm-single
+fastmail.com,(Independent),free_provider,builtin
 fastmail.fm,FastMail.FM,company,gitdm
 fastrobot.com,FastRobot,company,cncf-gitdm-single
 fathomdb.com,FathomDB,company,gitdm
@@ -1193,11 +1217,13 @@ fb.com,Meta,company,patch
 feit.me,Bytedance,company,cncf-gitdm-single
 ferg.in,Virtustream,company,cncf-gitdm-single
 fernandes.org,FICO,company,cncf-gitdm-single
+ferrai.io,functional.pizza,company,cncf-gitdm-single
 fesseler.info,Leomedia,company,cncf-gitdm-single
 ffwll.ch,Intel,company,cncf-gitdm-single
 fgribreau.com,iAdvize,company,cncf-gitdm-single
 fhnw.ch,FHNW,company,cncf-gitdm-single
 fiberhome.com,Fiberhome,company,gitdm
+finn.no,FINN.no,company,cncf-gitdm-single-self-reference
 fire.lp0.eu,Ingenico,company,cncf-gitdm-single
 firemirror.com,Crowdmix,company,cncf-gitdm-single
 firma.seznam.cz,Seznam.cz,company,gitdm
@@ -1236,6 +1262,7 @@ fortinet.com,Fortinet,company,gitdm
 forumd.net,Google,company,cncf-gitdm-single
 foss.st.com,STMicroelectronics,company,patch
 fostermoore.com,FosterMoore,company,cncf-gitdm-single
+foxmail.com,(Independent),free_provider,builtin
 fr.ibm.com,International Business Machines,company,cncf-gitdm-single
 fraixed.es,iWazat,company,cncf-gitdm-single
 francoposa.io,Grafana Labs,company,cncf-gitdm-single
@@ -1277,6 +1304,8 @@ gaikai.com,Sony Interactive Entertainment,company,cncf-gitdm-single
 gaisler.com,Gaisler Research,company,gitdm
 galcho.com,Microsoft,company,cncf-gitdm-single
 gamestop.com,GameStop,company,cncf-gitdm-single
+gamlor.info,Turbo.net,company,cncf-gitdm-single
+gandi.net,gandi.net,company,cncf-gitdm-single-self-reference
 ganex.com.br,Ganex,company,cncf-gitdm-single
 gangefors.com,Gangefors Programmering,company,cncf-gitdm-single
 garant.ru,TOV ROMSAT,company,cncf-gitdm-single
@@ -1308,6 +1337,7 @@ geomatys.fr,Geomatys,company,gitdm
 gerf.org,International Business Machines,company,cncf-gitdm-single
 getbraintree.com,Braintree Payments,company,cncf-gitdm-single
 getchef.com,Chef,company,gitdm
+getfeedback.com,GetFeedback.com,company,cncf-gitdm-single-self-reference
 gethelios.dev,Helios,company,cncf-gitdm
 getpantheon.com,Pantheon Platform,company,cncf-gitdm-single
 getshogun.com,Rails Girls,company,cncf-gitdm-single
@@ -1335,6 +1365,8 @@ gmail.com,(Independent),free_provider,rich
 gmail.com 502361391!qq.com,SEL-Zhejiang University,company,cncf-gitdm-single
 gmicloud.ai,GMI Cloud,company,cncf-gitdm-single
 gmx.co.uk,GMX,company,cncf-gitdm-single
+gmx.com,(Independent),free_provider,builtin
+gmx.de,(Independent),free_provider,builtin
 gmx.net,(Independent),free_provider,rich
 gnomeontherun.com,VMware,company,cncf-gitdm-single
 gnucoop.com,Gnucoop Soc. Coop,company,cncf-gitdm-single
@@ -1401,6 +1433,7 @@ guiform.com,VMware,company,cncf-gitdm-single
 gum.pt,Lyft,company,cncf-gitdm-single
 gvs.co.yu,GVS,company,gitdm
 gwfischer.com,Echidna,company,cncf-gitdm-single
+h2o.ai,H2o.ai,company,cncf-gitdm-single-self-reference
 h3c.com,New H3C Technologies,company,cncf-gitdm
 hackers.mu,hackers,company,cncf-gitdm-single
 haddons.net,Canonical,company,cncf-gitdm-single
@@ -1441,6 +1474,7 @@ heiber.im,ThoughtWorks,company,cncf-gitdm-single
 helight.info,Tencent Holdings,company,cncf-gitdm-single
 hello2morrow.com,HELLO 2MORROW,company,cncf-gitdm-single
 helmutgranda.com,National Instruments,company,cncf-gitdm-single
+helsedir.no,FINN.no,company,cncf-gitdm-single
 helveticode.com,17LIVE,company,cncf-gitdm-single
 heptio.com,VMware,company,cncf-gitdm-single
 herbert.cc,Selbständig,company,cncf-gitdm-single
@@ -1476,14 +1510,18 @@ hobsons.com,CNCF,company,cncf-gitdm-single
 hodduc.net,KAIST,company,cncf-gitdm-single
 holisticon.de,Holisticon,company,cncf-gitdm-single
 hollensbe.org,Docker,company,cncf-gitdm-single
+homeaway.com,HomeAway.com,company,cncf-gitdm-self-reference
 homedepot.com,HOME DEPOT,company,spinellis-sec
 honeycomb.io,Hound Technology Inc. dba Honeycomb,company,cncf-gitdm
 hoopla.net,Hoopla,company,cncf-gitdm-single
 hooyberghs.org,Open-Future,company,cncf-gitdm-single
 hopsandfork.com,appaloosa,company,cncf-gitdm-single
 hortonworks.com,Hortonworks,company,gitdm
+hotels.com,Hotels.com,company,cncf-gitdm-self-reference
+hotmail.co.uk,(Independent),free_provider,builtin
 hotmail.com,(Independent),free_provider,rich
 hotmail.de,SAP,company,cncf-gitdm-single
+hotmail.es,reflek.io,company,cncf-gitdm-single
 hotmail.fr,Orange,company,cncf-gitdm-single
 hotmail.it,BITROCK,company,cncf-gitdm-single
 hoverbear.org,PingCAP,company,cncf-gitdm-single
@@ -1492,6 +1530,7 @@ hpe.com,HP,company,gitdm
 hqo.co,HqO,company,cncf-gitdm-single
 hreniuc.dev,Quick Screen Trading/CVS,company,cncf-gitdm-single
 hroncok.cz,Red Hat,company,cncf-gitdm-single
+hsiang.io,Salesforce.com,company,cncf-gitdm-single
 htc.com,HTC America,company,cncf-gitdm-single
 huawei.com,Huawei Technologies,company,gitdm
 hubspot.com,HUBSPOT,company,spinellis-sec
@@ -1532,6 +1571,7 @@ ict.ac.cn,ICT,company,gitdm
 ideafidelity.com,Idea Fidelity,company,cncf-gitdm-single
 ideamans.com,ideaman's,company,cncf-gitdm-single
 ideasonboard.com,Ideas on Board,consultancy,patch
+idempotent.ca,Points.com,company,cncf-gitdm-single
 ie.ibm.com,International Business Machines,company,cncf-gitdm
 iekho.com,China Cloud,company,cncf-gitdm-single
 ifca.unican.es,CSIC,company,gitdm
@@ -1609,10 +1649,12 @@ inspur.com/cncf/gitdm,Inspur Group,company,cncf-gitdm-single
 instructure.com,INSTRUCTURE,company,spinellis-sec
 intel.com,Intel,company,patch
 intellinium.com,Intellinium,company,cncf-gitdm-single
+intellisys.info,Takeaway.com,company,cncf-gitdm-single
 intellitech.pro,IntelliTech,company,cncf-gitdm-single
 intellitree.com,IntelliTree Solutions,company,gitdm
 interaktionsweise.de,International Business Machines,company,cncf-gitdm-single
 interhost.no,InterhostAS,company,gitdm
+interlix.com,Salesforce.com,company,cncf-gitdm-single
 internap.com,Internap,company,gitdm
 internet2.edu,Internet2,academic,rich
 internships.antmicro.com,ANTMICRO,company,cncf-gitdm-single
@@ -1653,6 +1695,7 @@ isovalent.com,Isovalent,company,cncf-gitdm
 ispras.ru,ISP RAS,company,gitdm
 isquaredsoftware.com,Northrop Grumman,company,cncf-gitdm-single
 istreamplanet.com,iStreamPlanet,company,cncf-gitdm
+it-works-jbo.de,IRIS.TV,company,cncf-gitdm-single
 it.pt,Instituto de Telecomunicacoes,company,gitdm
 itaysk.com,Microsoft,company,cncf-gitdm-single
 iteris.com,Intuit,company,cncf-gitdm-single
@@ -1713,6 +1756,7 @@ jburnham.net,Tinder,company,cncf-gitdm-single
 jbw.codes,Caspian,company,cncf-gitdm-single
 jcoeltjen.de,BTC,company,cncf-gitdm-single
 jcommerce.pl,Jcommerce,company,cncf-gitdm-single
+jcrosoft.com,JCrosoft.Ling,company,cncf-gitdm-single
 jcubed.me,WithSecure,company,cncf-gitdm-single
 jd.com,Jd.Com,company,gitdm
 jdu-it.co.uk,Wellcome Trust,company,cncf-gitdm-single
@@ -1749,6 +1793,7 @@ joegaffey.com,Ericsson,company,cncf-gitdm-single
 joelsplace.sg,Grab,company,cncf-gitdm-single
 joerun.de,International Business Machines,company,cncf-gitdm-single
 joeshaw.org,Joe,company,cncf-gitdm-single
+joeyb.org,Salesforce.com,company,cncf-gitdm-single
 joeym.net,Pantheon,company,cncf-gitdm-single
 johannesg.com,Kollafoss Gamedev Residency,company,cncf-gitdm-single
 john-millikin.com,Stripe,company,cncf-gitdm-single
@@ -1832,6 +1877,7 @@ katemihalikova.cz,Amazon,company,cncf-gitdm-single
 katherinehouse.com,Geonodal Solutions,company,cncf-gitdm-single
 kau.se,Karlstad Universitet,company,gitdm
 kavatech.de,Nect,company,cncf-gitdm-single
+kawa.net,kawa.net,company,cncf-gitdm-single-self-reference
 kayac.com,kayac,company,cncf-gitdm-single
 kddi.com,KDDI,company,gitdm
 kddilabs.jp,KDDI,company,gitdm
@@ -1856,6 +1902,7 @@ kiit.ac.in,Microsoft,company,cncf-gitdm-single
 kiliaro.com,Kiliaro,company,cncf-gitdm-single
 kilink.net,Netflix,company,cncf-gitdm-single
 kindredgroup.com,Unibet,company,cncf-gitdm-single
+king.com,King.com,company,cncf-gitdm-single-self-reference
 kinvolk.io,Kinvolk,company,gitdm
 kionetworks.com,KIO Networks,company,gitdm
 kippendief.biz,Outreachy,company,cncf-gitdm-single
@@ -1921,6 +1968,7 @@ labn.net,Labn Consulting,company,cncf-gitdm-single
 labouisse.org,Credit Suisse,company,cncf-gitdm-single
 labrencis.lt,INVENTI UAB,company,cncf-gitdm-single
 labundy.com,(Independent),independent,patch
+laccetti.com,Points.com,company,cncf-gitdm-single
 lahondaresearch.org,La Honda Research,company,gitdm
 lairdtech.com,Laird,company,cncf-gitdm-single
 lakeheadu.ca,Huawei Technologies,company,cncf-gitdm-single
@@ -1931,6 +1979,7 @@ lanvisioninc.com,Dexcom,company,cncf-gitdm-single
 laposte.net,Stago,company,cncf-gitdm-single
 laptop.org,OLPC,company,gitdm
 lastcoolnameleft.com,Microsoft,company,cncf-gitdm-single
+lasyk.info,Codewise.com,company,cncf-gitdm-single
 laurelnetworks.com,ECI Telecom,company,gitdm
 lavabit.com,Lavabit,company,gitdm
 lazada.com,Lazada,company,cncf-gitdm-single
@@ -1942,6 +1991,7 @@ leahfamily.plus.com,International Business Machines,company,cncf-gitdm-single
 leakybucket.org,Sysdig,company,cncf-gitdm-single
 learner.manipal.edu,J.P. Morgan,company,cncf-gitdm-single
 lebouder.net,Red Hat,company,cncf-gitdm-single
+lecentre.net,lecentre.net,company,cncf-gitdm-single-self-reference
 ledcity.ch,LEDCity,company,cncf-gitdm-single
 leeks.net,Azure,company,cncf-gitdm-single
 leftclick.eu,LeftClick,company,cncf-gitdm-single
@@ -1953,6 +2003,7 @@ leining.org,Delivery Agent,company,cncf-gitdm-single
 lemmela.net,Elisa,company,cncf-gitdm-single
 lemonhx.tech,PingCAP,company,cncf-gitdm-single
 lemote.com,Tornos,company,cncf-gitdm-single
+lenart.io,lenart.io,company,cncf-gitdm-single-self-reference
 lendingclub.com,LENDINGCLUB,company,spinellis-sec
 lenovo.com,Lenovo,company,gitdm
 lentin.co.uk,Shuttle Thread,company,cncf-gitdm-single
@@ -2013,6 +2064,8 @@ list.alibaba-inc.com,Alibaba Group,company,cncf-gitdm-single
 lithium.com,Lithium Technologies,company,gitdm
 live.be,Info Support,company,cncf-gitdm-single
 live.cn,Microsoft,company,cncf-gitdm-single
+live.co.uk,(Independent),free_provider,builtin
+live.com,(Independent),free_provider,builtin
 live.com.au,Intelledox,company,cncf-gitdm-single
 live.fr,Nuglif,company,cncf-gitdm-single
 liveperson.com,LIVEPERSON,company,spinellis-sec
@@ -2022,6 +2075,8 @@ ll.mit.edu,MIT Connection Science,company,cncf-gitdm-single
 llnl.gov,Lawrence Livermore National Laboratory,company,gitdm
 lmars.net,Econsultancy,company,cncf-gitdm-single
 lnxi.com,Linux Networx,company,gitdm
+localhost,(Independent),free_provider,builtin
+localhost.localdomain,(Independent),free_provider,builtin
 localsearch.ch,Localsearch,company,cncf-gitdm-single
 locationlabs.com,Location Labs,company,rich
 locaweb.com.br,Locaweb,company,gitdm
@@ -2049,8 +2104,8 @@ lsil.com,LSI Logic,company,gitdm
 lsst.org,Vera Rubin Observatory,company,cncf-gitdm-single
 ltgt.net,Atol Conseils et Développements,company,cncf-gitdm-single
 lucasmotta.com,Verizon,company,cncf-gitdm-single
-luck666.cn,Baidu Online Network Technology (Beijing),company,cncf-gitdm-single
-luedkes.com,Robinson Webster (Holdings),company,cncf-gitdm-single
+luck666.cn,Baidu Online Network Technology,company,cncf-gitdm-single
+luedkes.com,Robinson Webster,company,cncf-gitdm-single
 lugoues.net,ThorTech Solutions L.L.C,company,cncf-gitdm-single
 luhn.com,Guest Innovations,company,cncf-gitdm-single
 luizalabs.com,Luizalabs,company,cncf-gitdm-single
@@ -2060,13 +2115,14 @@ lukasfrischknecht.de,Mercedes-Benz,company,cncf-gitdm-single
 lukaslentner.de,PerfectPattern,company,cncf-gitdm-single
 lukekorth.com,Braintree Payments,company,cncf-gitdm-single
 lukenelson.uk,Weprintanyhood,company,cncf-gitdm-single
+luminatewireless.com,luminatewireless.com,company,cncf-gitdm-single-self-reference
 luminis.eu,Luminis,company,cncf-gitdm
 lunanet.gr.jp,Red Hat,company,cncf-gitdm-single
 lundman.net,GMO Pepabo,company,cncf-gitdm-single
 lunn.ch,RUAG Holding,company,cncf-gitdm-single
 luria.ch,Infomaniak Network,company,cncf-gitdm-single
 lvh.io,Latacora,company,cncf-gitdm-single
-lvlv.email,Transwarp Technology (Shanghai),company,cncf-gitdm-single
+lvlv.email,Transwarp Technology,company,cncf-gitdm-single
 lwn.net,LWN.net,company,gitdm
 lwood.me.uk,Sky UK,company,cncf-gitdm-single
 lx.it.pt,Instituto de Telecomunicacoes,company,gitdm
@@ -2080,6 +2136,7 @@ m3s.it,M3S,company,gitdm
 m3y3r.de,EVRY,company,cncf-gitdm-single
 m4rcu5.net,Leaseweb,company,cncf-gitdm-single
 m4x.org,Imandra,company,cncf-gitdm-single
+mac.com,(Independent),free_provider,builtin
 macqel.be,Macq Electronique,company,gitdm
 macqel.com,Macq Electronique,company,gitdm
 macropage.de,MACROPAGE e.K.,company,cncf-gitdm-single
@@ -2091,6 +2148,7 @@ mail.bw.edu,Infragistics,company,cncf-gitdm-single
 mail.com,SAP,company,cncf-gitdm-single
 mail.de,LangChain,company,cncf-gitdm-single
 mail.rakuten.com,Rakuten Group,company,cncf-gitdm-single
+mail.ru,(Independent),free_provider,builtin
 mail.ustc.edu.cn,USTC,company,cncf-gitdm-single
 mailgreg.com,Google,company,cncf-gitdm-single
 mailoo.org,mmmm,company,cncf-gitdm-single
@@ -2125,6 +2183,7 @@ marico.cn,AntGroup,company,cncf-gitdm-single
 markadams.me,Atlassian,company,cncf-gitdm-single
 markspolakovs.me,Couchbase,company,cncf-gitdm-single
 martin.sperl.org,Amdocs,company,cncf-gitdm-single
+martyanov.com,Sport.com,company,cncf-gitdm-single
 marvell.com,Marvell,company,gitdm
 mashape.com,Kong,company,cncf-gitdm-single
 massol.net,XWiki,company,cncf-gitdm-single
@@ -2138,6 +2197,7 @@ matthoran.com,Pivotal,company,cncf-gitdm-single
 mattikus.com,Google,company,cncf-gitdm-single
 mattjmcnaughton.com,Crisis Counselor,company,cncf-gitdm-single
 mattleach.net,Circle Group,company,cncf-gitdm-single
+matyas.dev,Takealot.com,company,cncf-gitdm-single
 maxhawkins.me,Google,company,cncf-gitdm-single
 maximbaz.com,Microsoft,company,cncf-gitdm-single
 maximintegrated.com,Maxim Integrated Products,company,cncf-gitdm-single
@@ -2193,6 +2253,7 @@ metacircular-evaluator.org,The MIT Press,company,cncf-gitdm-single
 metacloud.com,Metacloud,company,gitdm
 metacode.biz,Metacode,company,cncf-gitdm-single
 metafoo.de,Analog Devices,company,patch
+metaskills.net,MetaSkills.net,company,cncf-gitdm-single-self-reference
 metaswitch.com,Metaswitch,company,gitdm
 metrosystems.net,Wipro,company,cncf-gitdm-single
 metsi.co.uk,Metsi Technologies,company,gitdm
@@ -2238,6 +2299,7 @@ mirantis.com,Mirantis,company,gitdm
 mirantis.ru,Mirantis,company,gitdm
 mirusresearch.com,Caterpillar,company,cncf-gitdm-single
 mishak.net,MallGroup a.s.,company,cncf-gitdm-single
+mistressofinformation.com,monday.com,company,cncf-gitdm-single
 mit.edu,MIT,company,gitdm
 mixi.co.jp,mixi,company,cncf-gitdm-single
 mko.dev,deinstapel,company,cncf-gitdm-single
@@ -2256,6 +2318,7 @@ moltar.net,Scale Leap,company,cncf-gitdm-single
 momentumft.co.uk,Candide Gardening,company,cncf-gitdm-single
 momentumsi.com,MomentumSI,company,gitdm
 monax.io,Monax Industries,company,cncf-gitdm-single
+monday.com,monday.com,company,cncf-gitdm-single-self-reference
 moneyforward.co.jp,Money Forward,company,cncf-gitdm-single
 mongodb.com,MongoDB,company,spinellis-sec
 mono-project.de,Dennso,company,cncf-gitdm-single
@@ -2286,6 +2349,8 @@ mrale.ph,Google,company,cncf-gitdm-single
 mrwacky.com,Headspace,company,cncf-gitdm-single
 msi.com.tw,Micro-Star International,company,gitdm
 msih.com,MSIH,company,cncf-gitdm-single
+msn.com,(Independent),free_provider,builtin
+mthode.org,Mthode.org,company,cncf-gitdm-single-self-reference
 mthomason.net,Fastly,company,cncf-gitdm-single
 muet.com,Google,company,cncf-gitdm-single
 mulesoft.com,MuleSoft,company,cncf-gitdm-single
@@ -2419,6 +2484,7 @@ noahgaertner.tech,KBR,company,cncf-gitdm-single
 nobidev.com,NobiDev,company,cncf-gitdm-single
 nod.at,Sigma sta,company,cncf-gitdm-single
 nodalink.com,Nodalink,company,cncf-gitdm-single
+node.energy,node.energy,company,cncf-gitdm-single-self-reference
 node.mu,Vy-Shane Xie,company,cncf-gitdm-single
 noggin.com.au,Noggin,company,cncf-gitdm-single
 noironetworks.com,Cisco,company,gitdm
@@ -2427,9 +2493,12 @@ noldorin.com,Amadeus,company,cncf-gitdm-single
 nomadgs.com,Nomad Global Solutions,company,gitdm
 nomadreact.com,Arimo,company,cncf-gitdm-single
 nomupro.com,Microsoft,company,cncf-gitdm-single
+none,(Independent),free_provider,builtin
+nordheim.io,Fuse.no,company,cncf-gitdm-single
 nordicsemi.no,Nordic Semiconductor ASA,company,cncf-gitdm
 nordnet.fr,SIA Worldline Latvia,company,cncf-gitdm-single
 nordstrom.com,Nordstrom,company,spinellis-sec
+noreply.github.com,(Independent),free_provider,builtin
 nortel.com,Nortel,company,gitdm
 northforgeinc.com,Northforge Innovations,company,cncf-gitdm-single
 nospam.com,VMTraining,company,cncf-gitdm-single
@@ -2542,6 +2611,7 @@ operable.io,GitHub,company,cncf-gitdm-single
 ophelan.com,Samsung Electronics,company,cncf-gitdm-single
 opmbx.org,Bohemia Interactive a.s.,company,cncf-gitdm-single
 opscode.com,Chef,company,gitdm
+opsguru.io,OpsGuru.io,company,cncf-gitdm-single-self-reference
 opsmx.com,OpsMx,company,cncf-gitdm
 opsmx.io,OpsMx,company,cncf-gitdm
 opsroll.com,Opsroll,company,cncf-gitdm-single
@@ -2571,6 +2641,7 @@ ossystems.com.br,O.S. Systems Softwares LTDA,company,cncf-gitdm-single
 oszi.one,Avatao,company,cncf-gitdm-single
 otcaix.iscas.ac.cn,Institute of Software Chinese Academy of Science,company,cncf-gitdm
 oticon.com,Oticon A/S,company,cncf-gitdm
+otso.ai,otso.ai,company,cncf-gitdm-single-self-reference
 ottogroup.com,OTTO &,company,cncf-gitdm-single
 ottoops.com,Ticketmaster,company,cncf-gitdm-single
 oupeng.com,MOJI,company,cncf-gitdm-single
@@ -2658,6 +2729,7 @@ philhsmith.com,Redfin,company,cncf-gitdm-single
 philingrey.com,AmigoCloud,company,cncf-gitdm-single
 philipgardner.com,Cloudflare,company,cncf-gitdm-single
 philipson.co.il,Gavrie Philipson,company,cncf-gitdm-single
+philkates.com,Salesforce.com,company,cncf-gitdm-single
 philo.com,Binti,company,cncf-gitdm-single
 philoserf.com,Samsung SDS,company,cncf-gitdm-single
 philosys.de,Philosys Software,company,gitdm
@@ -2700,6 +2772,7 @@ plumgrid.com,PLUMgrid,company,gitdm
 pluralsight.com,Pluralsight,company,spinellis-sec
 pluribusnetworks.com,Pluribus Networks,company,gitdm
 plytro.com,Shutterstock,company,cncf-gitdm-single
+pm.me,(Independent),free_provider,builtin
 pmc-sierra.com,PMC-Sierra,company,gitdm
 pmeerw.net,(Independent),independent,patch
 pobox.com,Wargaming,company,cncf-gitdm-single
@@ -2715,6 +2788,8 @@ poplatek.fi,MediaTek USA,company,cncf-gitdm-single
 port1024.net,Bundesverband der Arbeitsrechtler in Unternehmen,company,cncf-gitdm-single
 portworx.com,Portworx,company,cncf-gitdm
 post.com,Today Job Post.com,company,cncf-gitdm-single
+posteo.de,(Independent),free_provider,builtin
+posteo.net,(Independent),free_provider,builtin
 postfinance.ch,PostFinance,company,cncf-gitdm-single
 powerman.name,Enhanced,company,cncf-gitdm-single
 powertech.no,PowerTech Information Systems AS,company,gitdm
@@ -2732,6 +2807,7 @@ presslabs.com,PressLabs,company,cncf-gitdm-single
 pressly.com,Pressly,company,gitdm
 prettyrobots.com,Pretty Robots,company,cncf-gitdm-single
 prevas.dk,Prevas,consultancy,patch
+primate.net,Primate.net,company,cncf-gitdm-single-self-reference
 primeton.com,Primeton,company,cncf-gitdm-single
 princessleia.com,HP,company,cncf-gitdm-single
 prisktech.co.nz,Aderant Holdings,company,cncf-gitdm-single
@@ -2748,7 +2824,9 @@ promwad.com,Promwad,company,gitdm
 proofpoint.com,Proofpoint,company,cncf-gitdm-single
 proper.com,Success Creation,company,cncf-gitdm-single
 protei.ru,Protei ltd,company,gitdm
+proton.me,(Independent),free_provider,builtin
 protonic.nl,Protonic Holland,company,cncf-gitdm-single
+protonmail.ch,(Independent),free_provider,builtin
 protonmail.com,(Independent),free_provider,rich
 providence.org,Providence Health and Services,company,cncf-gitdm
 provisionsgroup.com,Provisions,company,cncf-gitdm-single
@@ -2783,6 +2861,7 @@ qiwenbo.com,Ant Group,company,cncf-gitdm-single
 qiyi.com,QIYI,company,gitdm
 qlogic.com,QLogic,company,gitdm
 qoxp.net,Arcesium,company,cncf-gitdm-single
+qq.com,(Independent),free_provider,builtin
 qrclab.com,Quanta Research Cambridge,company,gitdm
 qti.qualcomm.com,CERN,company,cncf-gitdm-single
 quake.fr,Claranet,company,cncf-gitdm-single
@@ -2808,6 +2887,7 @@ rackspace.co.uk,Rackspace,company,gitdm
 rackspace.com,Rackspace,company,gitdm
 racktopsystems.com,RackTop,company,cncf-gitdm-single
 rackwareinc.com,Rackware,company,gitdm
+radarearth.com,Radarearth.com,company,cncf-gitdm-single-self-reference
 radicore.se,Radicore,company,cncf-gitdm-single
 radisys.com,Radisys,company,gitdm
 radview.com,Cisco Systems,company,cncf-gitdm-single
@@ -2859,6 +2939,7 @@ reliablesolutions.de,reliablesolutions,company,gitdm
 relud.com,Mozilla,company,cncf-gitdm-single
 remche.org,CNRS - OSUG,company,cncf-gitdm-single
 renesas.com,Renesas Technology,company,gitdm
+repl.ca,Manifold.co,company,cncf-gitdm-single
 replicated.com,Replicated,company,cncf-gitdm
 reply.de,Liquid Reply,company,cncf-gitdm
 reply.it,Storm Reply Roma,company,cncf-gitdm
@@ -2977,6 +3058,7 @@ sandeen.net,Red Hat,company,cncf-gitdm-single
 sandisk.com,SanDisk,company,gitdm
 sanpeople.com,SANPeople,company,gitdm
 santha.eu,Axon,company,cncf-gitdm-single
+santoshsahoo.com,SantoshSahoo.com,company,cncf-gitdm-single-self-reference
 sap.com,SAP,company,gitdm
 sapho.com,Citrix Systems,company,cncf-gitdm-single
 sargun.me,Mesosphere,company,cncf-gitdm-single
@@ -3010,6 +3092,7 @@ schubergphilis.com,Schuberg Philis,company,cncf-gitdm
 schuhbaeck.eu,ForTISS,company,cncf-gitdm-single
 schuirmann.net,Lasse Schuirmann,company,cncf-gitdm-single
 schweitzer-chaput.fr,IDEMIA,company,cncf-gitdm-single
+schwer.us,FastMail.FM,company,cncf-gitdm-single
 scopely.com,Amazon,company,cncf-gitdm-single
 scotiabank.com,Bank of Nova Scotia,company,spinellis-sec
 scottworley.com,Google,company,cncf-gitdm-single
@@ -3034,6 +3117,7 @@ sebian.fr,Sebastien Badia,company,cncf-gitdm-single
 secful.com,Salt Security,company,cncf-gitdm-single
 secondstate.io,Second State,company,cncf-gitdm-single
 secretlab.ca,Secretlab,company,gitdm
+section.io,section.io,company,cncf-gitdm-single-self-reference
 secunet.com,secunet,company,patch
 securecomputing.com,Secure Computing,company,gitdm
 securit.se,NTT,company,cncf-gitdm-single
@@ -3115,12 +3199,14 @@ simonkowallik.com,Jabulani Sp. z o. o,company,cncf-gitdm-single
 simonkuang.com,ZBJ Network,company,cncf-gitdm-single
 simplearchitect.com,Microsoft,company,cncf-gitdm-single
 simplivity.com,SimpliVity,company,gitdm
+sina.cn,(Independent),free_provider,builtin
 sina.com,Sina,company,gitdm
 singhsays.com,Bleeding Code,company,cncf-gitdm-single
 singlewire.com,Singlewire Software,company,cncf-gitdm-single
 singtel.com,Singtel,company,cncf-gitdm-single
 sinoa.jp,freee,company,cncf-gitdm-single
 siobud.com,NetEase,company,cncf-gitdm-single
+siphoc.com,Manifold.co,company,cncf-gitdm-single
 sipsorcery.com,CERN,company,cncf-gitdm-single
 sirius-es.it,Sirius,company,cncf-gitdm-single
 sisense.com,Periscope,company,cncf-gitdm-single
@@ -3131,6 +3217,7 @@ sjhewitt.co.uk,Sjhewitt,company,cncf-gitdm-single
 skarbek.name,BNP Paribas Bank Polska,company,cncf-gitdm-single
 skilld.fr,SkillD India,company,cncf-gitdm-single
 skoef.nl,TransIP,company,cncf-gitdm-single
+skroutz.gr,Skroutz.gr,company,cncf-gitdm-single-self-reference
 sktelecom.com,SK telecom,company,gitdm
 skwashd.com,Drupal Project,company,cncf-gitdm-single
 sky.uk,Sky UK,company,cncf-gitdm
@@ -3143,6 +3230,7 @@ slicehost.com,Rackspace,company,gitdm
 slie.ru,SLIE,company,cncf-gitdm-single
 slimlogic.co.uk,Scotiabank,company,cncf-gitdm-single
 slok.dev,spotahome,company,cncf-gitdm-single
+slonopotamus.org,My.Games,company,cncf-gitdm-single
 sly-little-fox.ru,School,company,cncf-gitdm-single
 slznv.net,Gemalto,company,cncf-gitdm-single
 smart-cactus.org,Well-Typed,company,cncf-gitdm-single
@@ -3155,6 +3243,7 @@ smartsheet.com,SMARTSHEET,company,spinellis-sec
 smartthings.com,Netflix,company,cncf-gitdm-single
 smartx.com,Beijing Zhiling Haina Technology,company,cncf-gitdm-single
 smile.fr,Smile,company,cncf-gitdm
+smparkes.net,Ascend.io,company,cncf-gitdm-single
 snabb.co,Snabb,company,gitdm
 snapbug.geek.nz,Ngarua Technologies,company,cncf-gitdm-single
 snapchat.com,Snap Snap,company,cncf-gitdm-single
@@ -3181,8 +3270,11 @@ solidboot.com,Solid Boot Ltd.,company,gitdm
 solidfire.com,SolidFire,company,gitdm
 solinea.com,Solinea,company,gitdm
 solita.fi,Solita,company,cncf-gitdm-single
+solo.io,Solo.io,company,cncf-gitdm-self-reference
 solstice.com,Solstice,company,cncf-gitdm-single
 soluto.com,SOLUTO,company,cncf-gitdm-single
+someone.section.me,KIWI.KI,company,cncf-gitdm-single
+somethingdoug.com,Salesforce.com,company,cncf-gitdm-single
 somethingsimilar.com,DARKISH GREEN,company,cncf-gitdm-single
 sonarnerd.net,Signalyst,company,cncf-gitdm-single
 sonarsource.com,SonarSource,company,cncf-gitdm-single
@@ -3334,6 +3426,7 @@ syranide.com,Cetrez Group,company,cncf-gitdm-single
 syrec.org,SyREC,company,cncf-gitdm-single
 sysdig.com,Sysdig,company,cncf-gitdm-single
 syseleven.de,SysEleven,company,cncf-gitdm
+systemli.org,systemli.org,company,cncf-gitdm-single-self-reference
 szc.ca,Red Hat,company,cncf-gitdm-single
 szeredi.hu,Red Hat,company,cncf-gitdm-single
 t-mobile.com,T-MOBILE US,company,spinellis-sec
@@ -3357,6 +3450,7 @@ tc-sa.com,IntegrityNet,company,cncf-gitdm-single
 tcbtech.com,TCB Technologies,company,cncf-gitdm-single
 tcpcloud.eu,tcp cloud,company,gitdm
 tcs.com,Tata,company,gitdm
+tcweb.org,Deliverous.com,company,cncf-gitdm-single
 tdk.com,TDK (InvenSense),company,patch
 tdtds.jp,富士通システム統合研究所,company,cncf-gitdm-single
 teads.tv,Teads,company,cncf-gitdm-single
@@ -3397,6 +3491,7 @@ testplant.com,Keysight Test Automation,company,cncf-gitdm-single
 testrails.org,Morningfame,company,cncf-gitdm-single
 tesujimath.org,Coldharbour Digital,company,cncf-gitdm-single
 tetrasol.org,Tetrasol,company,cncf-gitdm-single
+tetrate.io,Tetrate.io,company,cncf-gitdm-single-self-reference
 teuto.net,Teuto.net Netzdienste,company,cncf-gitdm
 tfdn.org,DARSWAN NETWORKS,company,cncf-gitdm-single
 tfgco.com,topfreegames,company,cncf-gitdm-single
@@ -3407,6 +3502,7 @@ thalesgroup.com,Thales,company,gitdm
 thanjilabs.com,StackRoute,company,cncf-gitdm-single
 the-krishnans.com,Yahoo!,company,cncf-gitdm-single
 thea.codes,Google,company,cncf-gitdm-single
+thebackplane.com,Backplane.io,company,cncf-gitdm-single
 thebends.org,Google,company,cncf-gitdm-single
 theboxes.org,Rackspace,company,cncf-gitdm-single
 thedatateam.in,The Data Team,company,cncf-gitdm-single
@@ -3447,6 +3543,7 @@ timryan.org,3D Robotics,company,cncf-gitdm-single
 timstoop.nl,Kumina,company,cncf-gitdm-single
 tinfoilsecurity.com,Tinfoil Security,company,cncf-gitdm-single
 tintri.com,Tintri,company,gitdm
+tiscali.cz,Wowfan.cz,company,cncf-gitdm-single
 titanous.com,Flynn,company,cncf-gitdm-single
 titicaca-corp.com,titicacadev,company,cncf-gitdm-single
 tjmt.jus.br,Tribunal de Justiça do Estado de Goiás,company,cncf-gitdm-single
@@ -3483,13 +3580,14 @@ trabian.com,Welldone,company,cncf-gitdm-single
 tracetronic.de,TraceTronic,company,cncf-gitdm
 trackhe.de,Trackhe,company,cncf-gitdm-single
 tradesy.com,Tradesy,company,cncf-gitdm-single
+traintracks.io,Traintracks.io,company,cncf-gitdm-single-self-reference
 trall.co,JetBrains s.r.o.,company,cncf-gitdm-single
 transitive.com,Transitive,company,gitdm
 transloadit.com,Transloadit-II,company,cncf-gitdm-single
 transmode.se,Transmode Systems,company,gitdm
 transparencyrights.com,Transparency Rights Management,company,cncf-gitdm-single
 transtex-llc.com,Transtex,company,rich
-transwarp.io,Transwarp Technology (Shanghai),company,cncf-gitdm-single
+transwarp.io,Transwarp Technology,company,cncf-gitdm-single
 traum-ferienwohnungen.de,Traum-Ferienwohnungen,company,cncf-gitdm-single
 traveloka.com,Traveloka,company,cncf-gitdm-single
 travelport.com,Travelport Worldwide,company,spinellis-sec
@@ -3499,6 +3597,7 @@ tremily.us,Red Hat,company,cncf-gitdm-single
 tremolosecurity.com,Tremolo Security,company,cncf-gitdm-single
 trend.com.tw,Trend Micro Incorporated,company,cncf-gitdm-single
 tresys.com,Tresys,company,gitdm
+tretau.net,tretau.net,company,cncf-gitdm-single-self-reference
 tretkowski.de,B1 Systems,company,cncf-gitdm-single
 tretuna.com,jmarantz,company,cncf-gitdm-single
 trevorsummerfield.com,Google,company,cncf-gitdm-single
@@ -3538,6 +3637,7 @@ tundra.com,Tundra Semiconductor,company,gitdm
 tungstengraphics.com,Tungsten Graphics,company,gitdm
 tunnelvisionlabs.com,Tunnel Vision Laboratories,company,gitdm
 turbinelabs.io,Turbine Labs,company,cncf-gitdm-single
+tutanota.com,(Independent),free_provider,builtin
 tutu.ru,Tutu,company,cncf-gitdm-single
 tuxdriver.com,Red Hat,company,cncf-gitdm
 tuxera.com,Tuxera,company,cncf-gitdm-single
@@ -3687,6 +3787,7 @@ visma.com,Visma Connect,company,cncf-gitdm-single
 vistaprint.com,VISTAPRINT CORPORATE SOLUTIONS INCORPORATED,company,cncf-gitdm
 vitaler.com,Orion Health,company,cncf-gitdm-single
 vitaliy.org,DIGITEUM,company,cncf-gitdm-single
+vito.io,D3.do,company,cncf-gitdm-single
 vitresoft.com,Vitresoft,company,cncf-gitdm-single
 viurdata.com,Viur,company,cncf-gitdm-single
 vivecode.com,Vivecode,company,gitdm
@@ -3748,6 +3849,7 @@ wearisma.com,Wearisma,company,cncf-gitdm-single
 weather.com,jobcloud,company,cncf-gitdm
 weave.works,Weaveworks,company,gitdm
 weaveworks.com,Weaveworks,company,cncf-gitdm-single
+web.de,(Independent),free_provider,builtin
 webcloud.it,Webcloud,company,cncf-gitdm-single
 webfactory.de,webfactory,company,cncf-gitdm-single
 webhosting.coop,WebHosting,company,cncf-gitdm-single
@@ -3796,6 +3898,7 @@ wireload.net,WireLoad,company,cncf-gitdm-single
 wirewd.com,Divergent 3D,company,cncf-gitdm-single
 wise2c.com,Wise2c,company,gitdm
 wisefour.com,Google,company,cncf-gitdm-single
+wix.com,Wix.com,company,spinellis-sec-self-reference
 wizery.com,Wizery,consultancy,patch
 wltr.eu,reBuy reCommerce,company,cncf-gitdm-single
 woinar.de,SAP,company,cncf-gitdm-single
@@ -3829,6 +3932,7 @@ xam.dk,Red Hat,company,cncf-gitdm-single
 xamarin.com,Microsoft,company,cncf-gitdm
 xbloom.io,Microsoft,company,cncf-gitdm-single
 xdel.ru,Mirantis,company,cncf-gitdm-single
+xebia.fr,xebia.fr,company,cncf-gitdm-single-self-reference
 xebialabs.com,XebiaLabs,company,cncf-gitdm-single
 xenit.se,Xenit,company,cncf-gitdm-single
 xenomai.org,Microsoft,company,cncf-gitdm-single
@@ -3863,17 +3967,22 @@ yadro.com,YADRO,company,patch
 yahoo-corp.jp,Yahoo! Japan,company,gitdm
 yahoo-inc.com,Yahoo,company,gitdm
 yahoo.co.in,International Business Machines,company,cncf-gitdm-single
+yahoo.co.jp,(Independent),free_provider,builtin
+yahoo.co.uk,(Independent),free_provider,builtin
 yahoo.com,(Independent),free_provider,rich
 yahoo.com.au,(Independent),free_provider,rich
 yahoo.com.tw,(Independent),free_provider,rich
 yahoo.ie,International Business Machines,company,cncf-gitdm-single
 yahoo.ne.jp,ArkEdge,company,cncf-gitdm-single
 yandex-team.ru,Yandex,company,gitdm
+yandex.com,(Independent),free_provider,builtin
+yandex.ru,(Independent),free_provider,builtin
 yearofmoo.com,Google,company,cncf-gitdm-single
 yellowkeycard.net,Verint Transversal,company,cncf-gitdm-single
 yelp.com,YELP,company,spinellis-sec
 yieldlab.de,Yieldlab,company,cncf-gitdm-single
 yikyakapp.com,yilyak,company,cncf-gitdm-single
+ymail.com,(Independent),free_provider,builtin
 yo61.com,InTechnology,company,cncf-gitdm-single
 yotpo.com,Yotpo,company,cncf-gitdm-single
 youmi.net,YOUMI,company,cncf-gitdm-single
@@ -3920,6 +4029,7 @@ zlab.co.jp,Z Lab,company,cncf-gitdm
 zmanda.com,Zmanda,company,gitdm
 zmlka.com,Zmlka,company,cncf-gitdm-single
 zocdoc.com,Zocdoc,company,cncf-gitdm-single
+zoho.com,(Independent),free_provider,builtin
 zohocorp.com,Zoho,company,cncf-gitdm-single
 zohomail.eu,Hostinger,company,cncf-gitdm-single
 zombino.com,SUSE,company,cncf-gitdm-single
