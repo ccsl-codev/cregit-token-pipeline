@@ -721,8 +721,35 @@ SERVER_PATTERNS = ("502", "503", "504", "500", "bad gateway", "timeout",
                    "unexpected eof", "tls handshake")
 
 
-def rate_limit_wait(default: int = 120) -> int:
-    """Seconds until the exhausted quota resets, read from GitHub itself.
+# A secondary limit publishes no reset instant, so the wait is blind and must
+# escalate. The first step is far longer than the primary default on purpose:
+# retrying a secondary limit too eagerly extends it.
+SECONDARY_BACKOFF = (300, 600, 1200, 2400, 3600)
+
+# A quota pause is not a failed request, so it must not spend the retry budget
+# meant for real errors. It gets its own, larger budget: the escalation above
+# spans about 2.2 hours, which covers a secondary limit without hanging for ever
+# on a repository that answers 403 permanently.
+MAX_QUOTA_PAUSES = 8
+
+
+def rate_limit_wait(default: int = 120, attempt: int = 0) -> tuple[int, str]:
+    """Seconds to wait after a quota refusal, and which refusal it was.
+
+    Two different refusals wear the same 403 and the same "rate limit exceeded"
+    message, and they need opposite handling:
+
+      primary    the hourly budget is spent. `gh api rate_limit` reports
+                 remaining == 0 and a reset instant, so wait for that instant.
+      secondary  an undocumented global cap. Every real call is refused while
+                 rate_limit still answers 5000/5000, because that endpoint is
+                 exempt from it. There is no reset to read, so escalate blindly.
+
+    Reading `remaining` alone made every secondary refusal look like "the budget
+    is fine, retry in 120s". Six such retries then aborted a 24,405-row pass at
+    row 7,894, and a human had to notice and restart it. Observed directly:
+    `gh api repos/torvalds/linux` returned 403 while `gh api rate_limit` returned
+    core 5000/5000 in the same second.
 
     `gh api rate_limit` does not consume quota, so this is free to call.
     """
@@ -730,12 +757,20 @@ def rate_limit_wait(default: int = 120) -> int:
         p = subprocess.run(["gh", "api", "rate_limit"], capture_output=True,
                            text=True, timeout=30)
         res = json.loads(p.stdout)["resources"]
-        empty = [r for r in (res.get("core"), res.get("graphql")) if r and not r["remaining"]]
+        buckets = [r for r in (res.get("core"), res.get("graphql")) if r]
+        if not buckets:
+            # No budget reported at all. That is missing data, not a healthy
+            # budget, so do not infer a secondary limit from it.
+            return default, "unknown"
+        empty = [r for r in buckets if not r["remaining"]]
         if not empty:
-            return default
-        return max(default, int(min(r["reset"] for r in empty) - time.time()) + 5)
+            # A bucket was reported, it says budget remains, and the call was
+            # still refused. That combination is the secondary limit.
+            step = SECONDARY_BACKOFF[min(attempt, len(SECONDARY_BACKOFF) - 1)]
+            return max(default, step), "secondary"
+        return max(default, int(min(r["reset"] for r in empty) - time.time()) + 5), "primary"
     except Exception:
-        return default
+        return default, "unknown"
 
 
 def gh(*args: str, retries: int = 6) -> dict | list | None:
@@ -759,7 +794,11 @@ def gh(*args: str, retries: int = 6) -> dict | list | None:
     burned six retries and aborted after 154 repositories.
     """
     detail, transient = "", False
-    for attempt in range(retries):
+    attempt, quota_pauses = 0, 0
+    # Two budgets. `attempt` counts real errors; `quota_pauses` counts waits for a
+    # limit to lift. A pause is not a failed request, and spending the error
+    # budget on it is what let six 120s sleeps abort a 24,405-row pass.
+    while attempt < retries and quota_pauses < MAX_QUOTA_PAUSES:
         try:
             p = subprocess.run(["gh", "api", *args], capture_output=True,
                                text=True, timeout=60)
@@ -767,6 +806,7 @@ def gh(*args: str, retries: int = 6) -> dict | list | None:
             # gh missing, timeout, or the network down. All transient.
             detail, transient = f"subprocess: {e}", True
             time.sleep(2 ** attempt)
+            attempt += 1
             continue
         if p.returncode == 0 and p.stdout.strip():
             try:
@@ -779,13 +819,16 @@ def gh(*args: str, retries: int = 6) -> dict | list | None:
             return None                       # permanent: safe to cache as dead
         if any(pat in err for pat in QUOTA_PATTERNS):
             transient = True
-            wait = rate_limit_wait()
-            say(f"throttled, sleeping {wait}s ({' '.join(args)[:60]})")
+            wait, kind = rate_limit_wait(attempt=quota_pauses)
+            quota_pauses += 1
+            say(f"throttled ({kind}), sleeping {wait}s "
+                f"[pause {quota_pauses}/{MAX_QUOTA_PAUSES}] ({' '.join(args)[:60]})")
             time.sleep(wait)
-            continue
+            continue                          # does not spend the error budget
         if any(pat in err for pat in SERVER_PATTERNS):
             transient = True
         time.sleep(2 ** attempt)              # backoff for server and unknown alike
+        attempt += 1
     if transient or not detail:
         raise RateLimited(f"{' '.join(args)}: {detail}")
     raise GhFailed(f"{' '.join(args)}: {detail}")
