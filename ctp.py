@@ -333,6 +333,19 @@ def lock_path(name: str) -> Path:
     return state_dir(name) / ".lock"
 
 
+def shard_class(project: dict) -> bool:
+    """True when this project should be tokenized in shards.
+
+    Opt-in, and only for the size classes named by --shard-classes. Sharding buys
+    tokenizer throughput and costs transient disk, so it is worth it exactly where
+    one project would otherwise leave the box idle: the L class. For S and M,
+    three concurrent projects already fill the machine and sharding would only
+    multiply the disk.
+    """
+    return (_OPTS.get("shards", 0) > 1
+            and project["size_class"] in _OPTS.get("shard_classes", ()))
+
+
 def run_phase(project: dict, phase: str, args: list[str]) -> int:
     name, cls = project["name"], project["size_class"]
     logdir = state_dir(name) / "logs"
@@ -411,6 +424,15 @@ def run_project(project: dict) -> str:
         ]
         if _OPTS.get("skip_html"):
             pipeline_args.append("--skip-html")
+        # Sharding is for the L class only. Measured on Linux: --mode pipeline
+        # leaves ~14 of 16 cores idle, because the per-blob chain spawns three
+        # processes and the pipelined walk never keeps 16 of them in flight. A
+        # shard is an independent process with its own worker pool, so N shards
+        # multiply tokenizer throughput. It costs transient disk, which is why it
+        # is opt-in rather than the default: three concurrent S-class projects
+        # already fill this box.
+        if shard_class(project):
+            pipeline_args += ["--mode", "sharded", "--shards", str(_OPTS["shards"])]
         rc = run_phase(project, "pipeline", pipeline_args)
         if rc != 0:
             return "failed"
@@ -469,7 +491,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.drop_memo and "--no-memo" in sys.argv:
         say("note: --no-memo is an alias for --drop-memo and does NOT prevent the write. "
             "The tokenizer requires BFG_MEMO_DIR, so memo/ is built and then deleted.")
-    _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo)
+    # Same rule as --skip-html: refuse before the run rather than discover per
+    # project that the configured checkout cannot shard.
+    if args.shards > 1:
+        missing = [f for f in ("--mode", "--shards") if not script_supports(f)]
+        if missing:
+            sys.exit(f"--shards needs {', '.join(missing)}, which "
+                     f"{CREGIT}/run_pipeline_process.sh does not advertise.\n"
+                     "Point pipeline.cfg at a checkout that supports sharded mode,\n"
+                     "or drop --shards and accept the single-process rate.")
+    shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
+    _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
+                 shards=args.shards, shard_classes=shard_classes)
+    if args.shards > 1:
+        say(f"sharding {args.shards}-way for size class"
+            f"{'es' if len(shard_classes) > 1 else ''} {', '.join(shard_classes)}")
 
     run_start = time.time()
     say("capturing devenv environment (once)...")
@@ -567,6 +603,15 @@ def main() -> int:
                        help="delete memo/ (45-88%% of the workdir) once a project "
                             "validates. NOT prevention: the tokenizer requires "
                             "BFG_MEMO_DIR, so memo/ is written first, then removed")
+    run_p.add_argument("--shards", type=int, default=0,
+                       help="tokenize in N shards (needs >1 to take effect). "
+                            "Measured: --mode pipeline leaves ~14 of 16 cores idle "
+                            "on an L-class project. Costs transient disk, so it is "
+                            "opt-in and limited to --shard-classes")
+    run_p.add_argument("--shard-classes", default="L",
+                       help="comma-separated size classes to shard (default L). "
+                            "S and M gain nothing: three concurrent projects "
+                            "already fill the box")
     run_p.set_defaults(fn=cmd_run)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")

@@ -393,8 +393,7 @@ def test_run_refuses_to_start_when_the_runner_lacks_a_required_flag(
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
 
-    args = argparse.Namespace(manifest="manifest.tsv", only=None, jobs=1, retries=0,
-                              skip_html=False, drop_memo=False)
+    args = run_args(jobs=1, retries=0, skip_html=False, drop_memo=False)
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(args)
     assert "does not accept: --mask" in str(exc.value)
@@ -410,8 +409,7 @@ def test_run_refuses_to_start_when_the_runner_lacks_skip_html(
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
 
-    args = argparse.Namespace(manifest="manifest.tsv", only=None, jobs=1, retries=0,
-                              skip_html=True, drop_memo=False)
+    args = run_args(jobs=1, retries=0, skip_html=True, drop_memo=False)
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(args)
     assert "--skip-html is not implemented" in str(exc.value)
@@ -426,8 +424,7 @@ def test_run_starts_when_the_runner_does_support_skip_html(
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: "done")
 
-    args = argparse.Namespace(manifest="manifest.tsv", only=None, jobs=1, retries=0,
-                              skip_html=True, drop_memo=False)
+    args = run_args(jobs=1, retries=0, skip_html=True, drop_memo=False)
     assert ctp.cmd_run(args) == 0
     assert ctp._OPTS["skip_html"] is True
 
@@ -451,8 +448,7 @@ def test_no_memo_warns_that_it_does_not_prevent_the_write(
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: "done")
 
-    args = argparse.Namespace(manifest="manifest.tsv", only=None, jobs=1, retries=0,
-                              skip_html=False, drop_memo=True)
+    args = run_args(jobs=1, retries=0, skip_html=False, drop_memo=True)
     ctp.cmd_run(args)
     out = capsys.readouterr().out
     assert "alias for --drop-memo" in out
@@ -830,8 +826,10 @@ def test_capture_devenv_env_exits_when_devenv_fails(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def run_args(**over):
+    """A complete `ctp run` Namespace. Every cmd_run option belongs here, so
+    adding one is a single edit rather than one per test."""
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
-                skip_html=False, drop_memo=False)
+                skip_html=False, drop_memo=False, shards=0, shard_classes="L")
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -1202,3 +1200,106 @@ def test_proc_scan_agrees_with_real_proc_for_our_own_process(sandbox):
     ppid, rss_kb = table[os.getpid()]
     assert ppid == os.getppid(), "parsed ppid disagrees with os.getppid()"
     assert rss_kb > 0, "a running interpreter cannot have zero resident memory"
+
+
+# --------------------------------------------------------------------------- #
+# sharding
+# --------------------------------------------------------------------------- #
+
+def test_sharding_is_off_unless_asked_for(runner, jq):
+    """Sharding costs transient disk, so it must never be the default. Three
+    concurrent S-class projects already fill this box."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=0, shard_classes=("L",))
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert "--mode" not in argv and "--shards" not in argv
+
+
+def test_one_shard_is_not_sharding(runner, jq):
+    """--shards 1 would pay the sharded-mode overhead for no parallelism, so it
+    is treated as off rather than honoured literally."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=1, shard_classes=("S",))
+    ctp.run_project(jq)
+    assert "--mode" not in runner.argv("pipeline")
+
+
+def test_an_l_class_project_is_sharded(runner):
+    """The measured case. On Linux --mode pipeline left ~14 of 16 cores idle,
+    because the per-blob chain spawns three processes and the pipelined walk
+    never keeps 16 of them in flight."""
+    big = dict(name="linux", url="https://example.invalid/linux.git",
+               category="community", file_filter=r"\.[ch]$", size_class="L")
+    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=6, shard_classes=("L",))
+    ctp.run_project(big)
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--mode") + 1] == "sharded"
+    assert argv[argv.index("--shards") + 1] == "6"
+
+
+def test_an_s_class_project_is_not_sharded_by_default(runner, jq):
+    """--shard-classes defaults to L. An S project gains nothing and would only
+    multiply the disk."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=6, shard_classes=("L",))
+    ctp.run_project(jq)
+    assert "--mode" not in runner.argv("pipeline")
+
+
+def test_shard_classes_is_configurable(runner, jq):
+    """M class may be worth sharding once measured, so the classes are a list
+    rather than a hard-coded L."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=4,
+                     shard_classes=("S", "M"))
+    ctp.run_project(jq)
+    assert runner.argv("pipeline").count("--mode") == 1
+
+
+def test_run_refuses_to_shard_when_the_runner_cannot(
+        sandbox, monkeypatch, runner_script):
+    """Same rule as --skip-html: refuse once, before the devenv capture, rather
+    than discover per project that the checkout has no sharded mode."""
+    runner_script(REAL_RUNNER_USAGE.replace("--shards N", "--nope N"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(shards=6))
+    assert "--shards needs" in str(exc.value)
+    assert not (sandbox.root / "runs.log").exists()
+
+
+def test_run_announces_the_shard_plan(sandbox, monkeypatch, capsys):
+    """A run that silently changed tokenizer mode would be hard to explain later
+    from the logs alone."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(shards=6, shard_classes="L,M")) == 0
+    out = capsys.readouterr().out
+    assert "sharding 6-way" in out
+    assert "L, M" in out
+
+
+def test_shard_classes_are_parsed_into_a_tuple(sandbox, monkeypatch):
+    """Whitespace and a trailing comma are normal in a hand-typed flag."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    ctp.cmd_run(run_args(shards=2, shard_classes=" L , M ,"))
+    assert ctp._OPTS["shard_classes"] == ("L", "M")
+
+
+def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
+    """The two conditions are independent, so both are checked here rather than
+    inferred from run_project's argv."""
+    L = dict(size_class="L")
+    ctp._OPTS.clear()
+    ctp._OPTS.update(shards=6, shard_classes=("L",))
+    assert ctp.shard_class(L) is True
+    ctp._OPTS.update(shards=1)
+    assert ctp.shard_class(L) is False
+    ctp._OPTS.update(shards=6, shard_classes=("M",))
+    assert ctp.shard_class(L) is False
+    ctp._OPTS.clear()
+    assert ctp.shard_class(L) is False, "an unset _OPTS must not shard"
