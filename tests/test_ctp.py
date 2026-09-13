@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import os
 import shutil
 import threading
 import time
@@ -89,7 +90,10 @@ class FakeRunner:
                 f"stamp path must be absolute, got {stamp!r}. A relative path "
                 f"escapes tmp_path and writes into the repository.")
             stamp.write_text("rows=42\nbytes=123456\n")
-        return SimpleNamespace(returncode=rc)
+        # Serves both call shapes. run_phase uses Popen, so it needs .pid and
+        # .wait(); older assertions read .returncode. The pid is our own, so the
+        # resource sampler walks a real process tree without starting anything.
+        return SimpleNamespace(returncode=rc, pid=os.getpid(), wait=lambda: rc)
 
     def argv(self, phase: str) -> list[str]:
         return [c.args for c in self.calls if c.phase == phase][0]
@@ -165,6 +169,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(ctp, "CREGIT", cregit)
     monkeypatch.setattr(ctp, "METRICS", tmp_path / "metrics.tsv")
     monkeypatch.setattr(ctp, "RUNS_LOG", tmp_path / "runs.log")
+    monkeypatch.setattr(ctp, "RESOURCES", tmp_path / "resources.tsv")
     # STATE holds the logs and the per-project lock. Without this patch the tests
     # would write both into the real repository. That is the stray-file class the
     # absolute-stamp assertion in FakeRunner already closed once.
@@ -199,6 +204,7 @@ def jq():
 def runner(monkeypatch):
     r = FakeRunner()
     monkeypatch.setattr(ctp.subprocess, "run", r)
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
     return r
 
 
@@ -344,7 +350,7 @@ def test_lock_is_released_after_a_successful_project(sandbox, runner, jq):
 
 def test_lock_is_released_after_a_failed_project(sandbox, monkeypatch, jq):
     """Same contract on the failure path, which is the common one."""
-    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner(pipeline_rc=2))
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(pipeline_rc=2))
     assert ctp.run_project(jq) == "failed"
     assert lock_is_free(ctp.lock_path("jq"))
 
@@ -352,7 +358,7 @@ def test_lock_is_released_after_a_failed_project(sandbox, monkeypatch, jq):
 def test_lock_is_released_when_the_subprocess_raises(sandbox, monkeypatch, jq):
     """The exception escapes run_project (see the xfail below), but the finally
     block must still hand the lock back."""
-    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner(raise_on="pipeline"))
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(raise_on="pipeline"))
     with pytest.raises(OSError):
         ctp.run_project(jq)
     assert lock_is_free(ctp.lock_path("jq"))
@@ -474,7 +480,7 @@ def test_drop_memo_prunes_only_after_the_project_validates(sandbox, runner, jq):
 
 def test_drop_memo_does_not_prune_when_the_pipeline_fails(monkeypatch, jq):
     """A failed project keeps memo/ so blobExec can resume incrementally."""
-    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner(pipeline_rc=2))
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(pipeline_rc=2))
     monkeypatch.setattr(ctp.retain, "prune", forbidden)
     ctp._OPTS.update(skip_html=False, drop_memo=True)
     assert ctp.run_project(jq) == "failed"
@@ -482,7 +488,7 @@ def test_drop_memo_does_not_prune_when_the_pipeline_fails(monkeypatch, jq):
 
 def test_drop_memo_does_not_prune_when_validation_fails(monkeypatch, jq):
     """Same for a project whose parquet fails the gate."""
-    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner(validate_rc=1))
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(validate_rc=1))
     monkeypatch.setattr(ctp.retain, "prune", forbidden)
     ctp._OPTS.update(skip_html=False, drop_memo=True)
     assert ctp.run_project(jq) == "failed"
@@ -534,7 +540,7 @@ def test_the_log_survives_the_runner_deleting_the_workdir(sandbox, monkeypatch, 
                 shutil.rmtree(sandbox.out / "jq")
             return super().__call__(args, **kwargs)
 
-    monkeypatch.setattr(ctp.subprocess, "run", WipingRunner(pipeline_rc=2))
+    monkeypatch.setattr(ctp.subprocess, "Popen", WipingRunner(pipeline_rc=2))
     assert ctp.run_project(jq) == "failed"
 
     logs = sorted((ctp.state_dir("jq") / "logs").glob("pipeline-*.log"))
@@ -553,7 +559,7 @@ def test_the_lock_survives_the_runner_deleting_the_workdir(sandbox, monkeypatch,
                 shutil.rmtree(sandbox.out / "jq")
             return super().__call__(args, **kwargs)
 
-    monkeypatch.setattr(ctp.subprocess, "run", WipingRunner(pipeline_rc=2))
+    monkeypatch.setattr(ctp.subprocess, "Popen", WipingRunner(pipeline_rc=2))
     ctp.run_project(jq)
 
     assert ctp.lock_path("jq").exists(), "the lock file went with the workdir"
@@ -570,9 +576,9 @@ def test_status_reports_failed_after_the_runner_wiped_the_workdir(sandbox, monke
                 shutil.rmtree(sandbox.out / "jq")
             return super().__call__(args, **kwargs)
 
-    monkeypatch.setattr(ctp.subprocess, "run", WipingRunner(pipeline_rc=2))
+    monkeypatch.setattr(ctp.subprocess, "Popen", WipingRunner(pipeline_rc=2))
     ctp.run_project(jq)
-    monkeypatch.setattr(ctp.subprocess, "run", forbidden)
+    monkeypatch.setattr(ctp.subprocess, "Popen", forbidden)
 
     write_manifest(sandbox.root, VALID_ROW)
     ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv"))
@@ -656,7 +662,7 @@ def test_metrics_row_carries_the_return_code_and_log_path(sandbox, runner, clock
     path must both land in the row."""
     monkey_rc = FakeRunner(pipeline_rc=2)
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(ctp.subprocess, "run", monkey_rc)
+        mp.setattr(ctp.subprocess, "Popen", monkey_rc)
         ctp.run_project(jq)
 
     row = (sandbox.root / "metrics.tsv").read_text().splitlines()[1].split("\t")
@@ -678,7 +684,7 @@ def test_a_second_attempt_does_not_overwrite_the_first_log(
     """Visibility contract: logs are never overwritten. Losing the first log
     loses the evidence of why the first attempt failed."""
     runner = FakeRunner(payload=b"first attempt\n")
-    monkeypatch.setattr(ctp.subprocess, "run", runner)
+    monkeypatch.setattr(ctp.subprocess, "Popen", runner)
 
     ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     runner.payload = b"second attempt\n"
@@ -700,7 +706,7 @@ def test_two_attempts_in_the_same_second_keep_both_logs(
         sandbox, monkeypatch, clock, jq):
     """The 'never overwritten' promise must hold even for a fast retry."""
     runner = FakeRunner(payload=b"first attempt\n")
-    monkeypatch.setattr(ctp.subprocess, "run", runner)
+    monkeypatch.setattr(ctp.subprocess, "Popen", runner)
 
     ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     runner.payload = b"second attempt\n"
@@ -715,7 +721,7 @@ def test_latest_symlink_points_at_the_newest_attempt(
         sandbox, monkeypatch, clock, jq):
     """Visibility contract: `tail -f <phase>-latest.log` must follow the run in
     progress, not a stale attempt."""
-    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner())
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
 
     ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     clock.moment = datetime(2026, 1, 2, 3, 4, 40)
@@ -729,7 +735,7 @@ def test_latest_symlink_points_at_the_newest_attempt(
 def test_latest_symlink_is_created_on_the_first_attempt(
         sandbox, monkeypatch, clock, jq):
     """No prior symlink exists on a fresh project; the swap must still work."""
-    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner())
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
     # run_project creates the workdir; run_phase no longer does it by accident,
     # because the log directory moved out of the workdir. See STATE in ctp.py.
     (sandbox.out / "jq").mkdir()
@@ -744,7 +750,7 @@ def test_latest_symlink_is_created_on_the_first_attempt(
 def test_run_phase_records_the_live_phase_for_the_heartbeat(
         sandbox, monkeypatch, jq):
     """The heartbeat reads _live; an empty _live makes a long run look idle."""
-    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner())
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
     ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     assert ctp._live["jq"][0] == "pipeline"
 
@@ -762,7 +768,7 @@ def test_run_phase_records_the_live_phase_for_the_heartbeat(
 def test_run_project_return_state(monkeypatch, jq, pipeline_rc, validate_rc, expected):
     """run_project returns exactly one of done|skipped|failed|deferred; cmd_run
     computes the run's exit code from these strings."""
-    monkeypatch.setattr(ctp.subprocess, "run",
+    monkeypatch.setattr(ctp.subprocess, "Popen",
                         FakeRunner(pipeline_rc=pipeline_rc, validate_rc=validate_rc))
     assert ctp.run_project(jq) == expected
 
@@ -790,7 +796,7 @@ def test_a_done_project_writes_the_stamp_that_makes_the_next_run_skip(sandbox, r
     "of marking one project failed."))
 def test_run_project_reports_failed_when_the_subprocess_raises(monkeypatch, jq):
     """One unusable project must not end the run."""
-    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner(raise_on="pipeline"))
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(raise_on="pipeline"))
     assert ctp.run_project(jq) == "failed"
 
 
@@ -1051,3 +1057,148 @@ def test_say_prefixes_every_line_with_a_timestamp(capsys, clock):
 def test_now_iso_is_utc_with_second_resolution(clock):
     """metrics.tsv rows are compared across hosts, so the stamp must be UTC."""
     assert ctp.now_iso() == "2026-01-02T03:04:05+00:00"
+
+
+# --------------------------------------------------------------------------- #
+# resource sampling
+# --------------------------------------------------------------------------- #
+
+def test_tree_usage_sums_descendants_not_just_the_direct_child(sandbox):
+    """The pipeline is a shell that spawns perl, git and srcml. Reporting only the
+    shell's own RSS would understate every run, which is the number the cost
+    model depends on."""
+    table = {10: (1, 1024), 11: (10, 2048), 12: (11, 4096), 99: (1, 8192)}
+    rss_mb, procs = ctp.tree_usage(10, table)
+    assert procs == 3, "grandchild 12 was not walked"
+    assert rss_mb == (1024 + 2048 + 4096) // 1024
+    assert 99 not in (10, 11, 12), "unrelated process must not be counted"
+
+
+def test_tree_usage_returns_zero_when_the_process_already_exited(sandbox):
+    """A phase can finish between Popen and the first sample. That must read as
+    zero, not raise, because the sampler runs inside every phase."""
+    assert ctp.tree_usage(424242, {1: (0, 4096)}) == (0, 0)
+
+
+def test_tree_usage_survives_a_cycle_in_the_parent_map(sandbox):
+    """A malformed parent map must not hang the sampler. /proc is read
+    process-by-process, so an inconsistent snapshot is possible."""
+    table = {20: (21, 1024), 21: (20, 1024)}
+    rss_mb, procs = ctp.tree_usage(20, table)
+    assert procs == 2 and rss_mb == 2
+
+
+def test_stop_before_start_returns_an_empty_peak(sandbox, jq):
+    """run_phase stops the sampler in a finally block, so stop() can be reached
+    on a path where start() never ran."""
+    peak = ctp.ResourceSampler(jq, "pipeline").stop()
+    assert peak["samples"] == 0
+    assert peak["disk_free_gb_min"] is None
+
+
+def test_a_failing_sample_never_breaks_the_phase(sandbox, jq, capsys):
+    """Measurement must not fail the thing it measures. The loop reports the
+    failure and keeps sampling."""
+    sampler = ctp.ResourceSampler(jq, "pipeline", interval=0.01)
+    calls = {"n": 0}
+    done = threading.Event()
+
+    def flaky(prev_busy, prev_total):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("/proc vanished")
+        if calls["n"] >= 3:
+            done.set()
+        return prev_busy, prev_total
+
+    sampler._sample = flaky
+    sampler.start(os.getpid())
+    assert done.wait(timeout=10), "the loop stopped after the failing sample"
+    sampler.stop()
+    assert "resource sample failed" in capsys.readouterr().out
+
+
+def test_the_ledger_header_matches_the_declared_fields(sandbox, jq):
+    """A consumer splits on these columns, so the header and the row must agree."""
+    sampler = ctp.ResourceSampler(jq, "pipeline", interval=0.01)
+    sampler.pid = os.getpid()
+    sampler._sample(0, 0)
+
+    lines = (sandbox.root / "resources.tsv").read_text().splitlines()
+    assert lines[0].split("\t") == list(ctp.RESOURCE_FIELDS)
+    assert len(lines[1].split("\t")) == len(ctp.RESOURCE_FIELDS)
+    assert lines[1].split("\t")[1:4] == ["jq", "S", "pipeline"]
+
+
+def test_peaks_are_maxima_and_disk_is_a_low_water_mark(sandbox, jq, monkeypatch):
+    """Capacity planning needs the worst moment, not the last one."""
+    sampler = ctp.ResourceSampler(jq, "pipeline", interval=0.01)
+    sampler.pid = os.getpid()
+
+    sizes = iter([(500, 3), (200, 1)])          # second sample is smaller
+    monkeypatch.setattr(ctp, "tree_usage", lambda *a, **k: next(sizes))
+    frees = iter([900 * 2**30, 100 * 2**30])    # disk shrinks
+    monkeypatch.setattr(ctp.shutil, "disk_usage",
+                        lambda p: SimpleNamespace(free=next(frees)))
+
+    sampler._sample(0, 0)
+    sampler._sample(0, 0)
+    peak = sampler.peak
+    assert peak["tree_rss_mb"] == 500, "peak fell back to the later sample"
+    assert peak["tree_procs"] == 3
+    assert peak["disk_free_gb_min"] == 100, "low-water mark not kept"
+    assert peak["samples"] == 2
+
+
+def test_metrics_row_width_is_unchanged_by_resource_sampling(sandbox, runner, jq):
+    """resources.tsv is a separate ledger on purpose. metrics.tsv's seven-field
+    row is a published contract and widening it would break every consumer."""
+    ctp.run_project(jq)
+    for line in (sandbox.root / "metrics.tsv").read_text().splitlines():
+        assert len(line.split("\t")) == 7
+
+
+def test_cpu_percent_is_zero_when_no_jiffies_elapsed(sandbox, jq, monkeypatch):
+    """Two samples inside one clock tick must not divide by zero."""
+    monkeypatch.setattr(ctp, "_cpu_jiffies", lambda: (100, 200))
+    sampler = ctp.ResourceSampler(jq, "pipeline", interval=0.01)
+    sampler.pid = os.getpid()
+    sampler._sample(100, 200)
+    assert sampler.peak["cpu_pct"] == 0.0
+
+
+def test_proc_scan_skips_a_process_that_vanished_mid_scan(sandbox, tmp_path):
+    """cregit starts and reaps short-lived perl and git processes constantly, so a
+    /proc entry can disappear between the listdir and the read. That must be
+    skipped, not raise inside the sampler thread."""
+    fake_proc = tmp_path / "proc"
+    fake_proc.mkdir()
+    (fake_proc / "self").mkdir()                     # non-numeric, ignored
+    (fake_proc / "7").mkdir()                        # numeric, but no stat file
+    good = fake_proc / "9"
+    good.mkdir()
+    # Real /proc/<pid>/stat, built by field position so the offsets are visible.
+    # A comm of "(git log --oneline)" holds spaces and parentheses, which is why
+    # the parser splits after the LAST ')' instead of on whitespace.
+    stat = ["0"] * 52
+    stat[0] = "9"                       # field 1  pid
+    stat[1] = "(git log --oneline)"     # field 2  comm, spaces and parens
+    stat[2] = "S"                       # field 3  state
+    stat[3] = "1234"                    # field 4  ppid
+    stat[23] = "777"                    # field 24 rss, in pages
+    (good / "stat").write_text(" ".join(stat) + "\n")
+
+    table = ctp._proc_ppid_rss(fake_proc)
+    assert 7 not in table, "an unreadable entry was not skipped"
+    assert list(table) == [9]
+    assert table[9] == (1234, 777 * 4), "ppid or rss read from the wrong offset"
+
+
+def test_proc_scan_agrees_with_real_proc_for_our_own_process(sandbox):
+    """The synthetic layout above only proves the offsets are self-consistent.
+    This proves they match the kernel's real format."""
+    table = ctp._proc_ppid_rss()
+    assert os.getpid() in table
+    ppid, rss_kb = table[os.getpid()]
+    assert ppid == os.getppid(), "parsed ppid disagrees with os.getppid()"
+    assert rss_kb > 0, "a running interpreter cannot have zero resident memory"
