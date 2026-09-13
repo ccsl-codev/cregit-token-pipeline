@@ -80,7 +80,14 @@ class FakeRunner:
             stream.write(self.payload)
         rc = self.pipeline_rc if phase == "pipeline" else self.validate_rc
         if phase == "validate" and rc == 0:
-            Path(args[3]).write_text("rows=42\nbytes=123456\n")
+            stamp = Path(args[3])
+            # A relative stamp path lands in the repository root, outside
+            # tmp_path. One test did exactly that and left a stray file named `s`
+            # in the working tree. Refuse it here, so the whole class is closed.
+            assert stamp.is_absolute(), (
+                f"stamp path must be absolute, got {stamp!r}. A relative path "
+                f"escapes tmp_path and writes into the repository.")
+            stamp.write_text("rows=42\nbytes=123456\n")
         return SimpleNamespace(returncode=rc)
 
     def argv(self, phase: str) -> list[str]:
@@ -622,7 +629,9 @@ def test_latest_symlink_is_created_on_the_first_attempt(
         sandbox, monkeypatch, clock, jq):
     """No prior symlink exists on a fresh project; the swap must still work."""
     monkeypatch.setattr(ctp.subprocess, "run", FakeRunner())
-    ctp.run_phase(jq, "validate", ["python3", "validate.py", "p.parquet", "s"])
+    stamp = sandbox.out / "jq" / "jq.validated"
+    ctp.run_phase(jq, "validate",
+                  ["python3", "validate.py", "p.parquet", str(stamp)])
     latest = sandbox.out / "jq" / "logs" / "validate-latest.log"
     assert latest.is_symlink()
     assert not (sandbox.out / "jq" / "logs" / ".validate-latest.tmp").exists()

@@ -9,6 +9,11 @@ is never touched.
 
 The stub only makes the import succeed. Nothing here asserts DuckDB semantics;
 the tests assert the SQL consolidate.py emits and the row tuples it derives.
+
+A projects row carries two visibility flags at the end, rows_unreadable and
+parquet_missing. They exist so that a project which disagrees with itself is
+counted, named and queryable instead of silently wrong, and rows_unreadable
+also drives the non-zero exit status.
 """
 
 from __future__ import annotations
@@ -165,14 +170,19 @@ def test_lock_held_is_true_while_another_process_holds_it(sandbox):
 # project_rows
 # --------------------------------------------------------------------------- #
 
-def test_project_rows_builds_one_seven_column_tuple_per_project(sandbox):
-    """The tuple shape must match the projects table, or executemany fails."""
+def test_project_rows_builds_one_nine_column_tuple_per_project(sandbox):
+    """The tuple shape must match the projects table, or executemany fails.
+
+    The shape grew from seven columns to nine: rows_unreadable and
+    parquet_missing now travel with every project, false for a healthy one.
+    """
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=1234\nbytes=5678\n", parquet=True)
 
     rows = consolidate.project_rows()
     assert rows == [("jq", "https://github.com/jqlang/jq.git", "community", "S",
-                     "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"))]
+                     "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"),
+                     False, False)]
 
 
 def test_project_rows_classifies_all_four_states(sandbox):
@@ -220,11 +230,24 @@ def test_project_rows_without_a_manifest_raises(sandbox):
 
 
 def test_project_rows_reports_no_parquet_path_when_the_file_is_absent(sandbox):
-    """A stamp without a parquet must not put a dead path in the tokens view."""
+    """A stamp without a parquet must not put a dead path in the tokens view.
+
+    The row now also carries parquet_missing = True, so the disagreement
+    between state DONE and an absent dataset is queryable.
+    """
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=9\nbytes=9\n", parquet=False)
-    (name, _url, _cat, _cls, state, n_rows, parquet) = consolidate.project_rows()[0]
+    (name, _url, _cat, _cls, state, n_rows, parquet,
+     rows_unreadable, parquet_missing) = consolidate.project_rows()[0]
     assert (name, state, n_rows, parquet) == ("jq", "DONE", 9, None)
+    assert (rows_unreadable, parquet_missing) == (False, True)
+
+
+def test_project_rows_does_not_flag_a_queued_project_as_missing_data(sandbox):
+    """parquet_missing means "DONE but no data", so a project that never ran
+    must not be flagged. Otherwise the flag would name every queued project."""
+    write_manifest(sandbox.root, ROW)
+    assert consolidate.project_rows()[0][8] is False
 
 
 def test_project_rows_counts_zero_for_a_stamp_without_a_rows_key(sandbox):
@@ -242,15 +265,40 @@ def test_project_rows_ignores_extra_stamp_keys(sandbox):
     assert consolidate.project_rows()[0][5] == 5
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Defect: int(kv.get('rows', 0)) is unguarded, so a stamp whose rows value "
-    "is not an integer raises ValueError and aborts the whole rebuild instead "
-    "of reporting that one project as unusable."))
-def test_project_rows_survives_a_non_numeric_rows_value(sandbox):
-    """One bad stamp must not stop the derived index for 1,423 projects."""
+def test_project_rows_survives_a_non_numeric_rows_value(sandbox, capsys):
+    """One bad stamp must not stop the derived index for 1,423 projects.
+
+    This was an expected failure. Before the fix int(kv.get('rows', 0)) was
+    unguarded, so a stamp reading rows=many raised ValueError and ended
+    project_rows() for every project. The project is now reported by name and
+    by value, flagged, and still indexed.
+    """
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=many\nbytes=6\n", parquet=True)
-    assert consolidate.project_rows()[0][5] in (0, None)
+
+    row = consolidate.project_rows()[0]
+
+    assert row[5] is None
+    assert row[7] is True
+    assert row[4] == "DONE"
+    err = capsys.readouterr().err
+    assert "jq" in err
+    assert "'many'" in err
+
+
+def test_project_rows_keeps_indexing_the_projects_after_a_bad_stamp(sandbox):
+    """The bad stamp must cost one project, not the tail of the manifest."""
+    write_manifest(sandbox.root,
+                   "bad\thttps://b.git\tcommunity\t\\.[ch]$\tS",
+                   "good\thttps://g.git\tenterprise\t\\.[ch]$\tL")
+    make_project(sandbox.out, "bad", stamp="rows=many\nbytes=6\n", parquet=True)
+    make_project(sandbox.out, "good", stamp="rows=77\nbytes=8\n", parquet=True)
+
+    rows = {r[0]: r for r in consolidate.project_rows()}
+
+    assert [r[0] for r in consolidate.project_rows()] == ["bad", "good"]
+    assert (rows["good"][5], rows["good"][7]) == (77, False)
+    assert (rows["bad"][5], rows["bad"][7]) == (None, True)
 
 
 # --------------------------------------------------------------------------- #
@@ -268,10 +316,13 @@ def test_main_replaces_the_projects_table_and_inserts_every_row(sandbox, con, ca
     ddl = con.find("create or replace table projects")
     assert "name text primary key" in ddl
     assert "token_rows bigint" in ddl
+    assert "rows_unreadable boolean" in ddl
+    assert "parquet_missing boolean" in ddl
     sql, rows = con.batches[0]
-    assert sql == "insert into projects values (?, ?, ?, ?, ?, ?, ?)"
+    assert sql == "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     assert rows == [("jq", "https://github.com/jqlang/jq.git", "community", "S",
-                     "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"))]
+                     "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"),
+                     False, False)]
 
 
 def test_main_loads_the_metrics_ledger_as_a_tsv_with_a_header(sandbox, con):
@@ -354,6 +405,83 @@ def test_main_connects_to_the_configured_database_and_closes_it(
     assert seen["path"] == str(sandbox.root / "ctp.duckdb")
     assert fake.closed is True
     assert "ctp.duckdb rebuilt" in capsys.readouterr().out
+
+
+def test_main_reports_a_malformed_stamp_and_still_indexes_the_rest(
+        sandbox, con, capsys):
+    """Before the fix a stamp reading rows=many raised ValueError out of
+    project_rows() and no index was built at all. The rebuild now finishes, the
+    bad project is named and counted, and the exit status says something was
+    wrong."""
+    write_manifest(sandbox.root,
+                   "bad\thttps://b.git\tcommunity\t\\.[ch]$\tS",
+                   "good\thttps://g.git\tenterprise\t\\.[ch]$\tL")
+    make_project(sandbox.out, "bad", stamp="rows=many\nbytes=6\n", parquet=True)
+    make_project(sandbox.out, "good", stamp="rows=77\nbytes=8\n", parquet=True)
+
+    with pytest.raises(SystemExit) as exc:
+        consolidate.main()
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "unreadable rows= in stamp: 1 (bad)" in captured.out
+    assert "'many'" in captured.err
+    _sql, rows = con.batches[0]
+    assert [r[0] for r in rows] == ["bad", "good"]
+    assert [r[5] for r in rows] == [None, 77]
+    assert con.closed is True
+    assert "good-dataset.parquet" in con.find("create or replace view tokens")
+
+
+def test_main_counts_and_names_a_done_project_whose_parquet_is_gone(
+        sandbox, con, capsys):
+    """Before the fix such a project just vanished from the tokens view while
+    the projects table still said DONE, and nothing reported it. The row is now
+    flagged, counted and named, and the view still leaves the dead file out."""
+    write_manifest(sandbox.root,
+                   "gone\thttps://x.git\tcommunity\t\\.[ch]$\tS",
+                   "here\thttps://y.git\tenterprise\t\\.[ch]$\tL")
+    make_project(sandbox.out, "gone", stamp="rows=5\nbytes=6\n", parquet=False)
+    make_project(sandbox.out, "here", stamp="rows=7\nbytes=8\n", parquet=True)
+
+    consolidate.main()
+
+    out = capsys.readouterr().out
+    assert "DONE but parquet missing: 1 (gone)" in out
+    assert "DONE: 2" in out
+    _sql, rows = con.batches[0]
+    assert {r[0]: r[8] for r in rows} == {"gone": True, "here": False}
+    view = con.find("create or replace view tokens")
+    assert "gone-dataset.parquet" not in view
+    assert "here-dataset.parquet" in view
+
+
+def test_main_says_nothing_about_flags_when_every_project_is_healthy(
+        sandbox, con, capsys):
+    """The summary must stay quiet on a clean corpus, or the operator learns to
+    ignore it."""
+    write_manifest(sandbox.root, ROW)
+    make_project(sandbox.out, "jq", stamp="rows=3\nbytes=4\n", parquet=True)
+
+    consolidate.main()
+
+    out = capsys.readouterr().out
+    assert "parquet missing" not in out
+    assert "unreadable" not in out
+
+
+def test_main_doubles_a_quote_in_a_project_path_in_the_tokens_view(sandbox, con):
+    """A view definition cannot bind parameters, so its file list is escaped
+    instead. A project name with a quote must not unbalance the SQL."""
+    write_manifest(sandbox.root, "we'ird\thttps://w.git\tcommunity\t\\.[ch]$\tS")
+    make_project(sandbox.out, "we'ird", stamp="rows=2\nbytes=3\n", parquet=True)
+
+    consolidate.main()
+
+    view = con.find("create or replace view tokens")
+    escaped = str(sandbox.out / "we'ird" / "we'ird-dataset.parquet").replace("'", "''")
+    assert escaped in view
+    assert view.count("'") % 2 == 0
 
 
 def test_main_is_safe_to_rerun(sandbox, con, capsys):
