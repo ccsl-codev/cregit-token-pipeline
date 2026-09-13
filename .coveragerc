@@ -1,0 +1,21 @@
+[run]
+branch = True
+source = .
+omit =
+    .venv/*
+    tests/*
+    */__pycache__/*
+    .corpus-cache/*
+    setup.py
+
+[report]
+# 80% is a floor agreed with the author, enforced by run_tests.sh. A run that
+# drops below it fails, so a change cannot silently lower the bar.
+fail_under = 80
+show_missing = True
+skip_covered = False
+precision = 1
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError

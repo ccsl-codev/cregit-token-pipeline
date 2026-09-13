@@ -4,3 +4,30 @@ ctp.duckdb
 runs.log
 metrics.tsv
 smoke-*.log
+
+# Test environment and coverage output. run_tests.sh rebuilds the first; the rest
+# are derived from a run.
+.venv/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# Caches. Rebuilt by `select_corpus.py rosters|enrich` and
+# `build_domain_map.py fetch`. Large, machine-specific and derived from public
+# APIs, so they are reproducible rather than source.
+.corpus-cache/
+
+# Third-party source data, 29 MB. The DOI is stable and sources/README.md records
+# every field, so the repo documents the fetch instead of copying the payload:
+#   curl -L -o sources/enterprise-oss.tar.gz \
+#     https://zenodo.org/records/3742962/files/enterprise-oss.tar.gz
+sources/*.tar.gz
+sources/*.txt
+
+# TRACKED ON PURPOSE, do not add these here:
+#   candidates.csv                the corpus decision record, one row per
+#                                 candidate with its exclusion reason
+#   manifest.generated.tsv        the frozen corpus
+#   data/affiliation.merged.csv   the firm map, with provenance per row
+#   sources/README.md             field definitions for the third-party data
