@@ -1,0 +1,4 @@
+# Corpus manifest (TSV): name	url	category	file_filter	size_class
+# Linux from a FRESH clone of torvalds/linux, not the local cregit-kernel-fast tree.
+# L class: 1,482,779 commits. --mode pipeline, so transient disk is not multiplied.
+torvalds__linux	/local/home/ellianco/Projects/cregit-workspace/staging/linux.git	community	\.[ch]$	L
