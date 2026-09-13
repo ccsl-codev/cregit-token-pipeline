@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import os
 import shutil
 import subprocess
 import sys
@@ -85,6 +86,15 @@ NIX_DAEMON_SH = "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
 
 DISK_FLOOR_GB = 150
 HEARTBEAT_S = 30
+
+# Resource ledger. Deliberately NOT extra columns on metrics.tsv: that file's
+# seven-field row is a published contract with a test asserting the width, and
+# every consumer splits on it. A second ledger costs one file and breaks nothing.
+RESOURCES = CORPUS / "resources.tsv"
+RESOURCE_SAMPLE_S = 15
+RESOURCE_FIELDS = ("iso", "project", "class", "phase", "elapsed_s",
+                   "tree_rss_mb", "tree_procs", "cpu_pct", "mem_used_mb",
+                   "disk_free_gb", "load1")
 
 # Flags run_project sends for every project. Keep this list and the pipeline_args
 # list in run_project in step: cmd_run preflights these names against the
@@ -159,6 +169,153 @@ def capture_devenv_env() -> dict:
     return json.loads(out.stdout.splitlines()[-1])
 
 
+def _proc_ppid_rss(proc_root: Path = Path("/proc")) -> dict[int, tuple[int, int]]:
+    """Map pid -> (ppid, rss_kb) for every readable process.
+
+    Read from /proc because ctp is stdlib-only. A process that exits between the
+    listdir and the read is skipped, which is normal during a build: cregit starts
+    and reaps short-lived perl and git processes constantly.
+
+    `proc_root` is injectable so a test can present a malformed or vanishing
+    entry without racing a real process.
+    """
+    table: dict[int, tuple[int, int]] = {}
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            # /proc/<pid>/stat: field 4 is ppid, field 24 is rss in pages. The
+            # command name in field 2 may hold spaces and brackets, so split after
+            # the closing parenthesis rather than on whitespace from the start.
+            raw = (entry / "stat").read_text()
+            fields = raw[raw.rindex(")") + 2:].split()
+            table[int(entry.name)] = (int(fields[1]), int(fields[21]) * 4)
+        except (OSError, ValueError, IndexError):
+            continue
+    return table
+
+
+def tree_usage(root_pid: int, table: dict | None = None) -> tuple[int, int]:
+    """Total resident memory in MB, and process count, for root_pid and its
+    descendants.
+
+    The pipeline is a shell that spawns perl, git and srcml, so the RSS of the
+    direct child alone understates the run by a wide margin. Walking descendants
+    is what makes the number usable for capacity planning.
+
+    `table` is injectable so a test can supply a malformed parent map. The
+    `pid in seen` guard exists for that case: a cycle must not hang the sampler,
+    and the sampler runs inside every phase.
+    """
+    table = _proc_ppid_rss() if table is None else table
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _rss) in table.items():
+        children.setdefault(ppid, []).append(pid)
+
+    seen, stack, rss_kb = set(), [root_pid], 0
+    while stack:
+        pid = stack.pop()
+        if pid in seen or pid not in table:
+            continue
+        seen.add(pid)
+        rss_kb += table[pid][1]
+        stack.extend(children.get(pid, ()))
+    return rss_kb // 1024, len(seen)
+
+
+def _cpu_jiffies() -> tuple[int, int]:
+    """(busy, total) jiffies from /proc/stat, for a delta between two samples."""
+    fields = [int(v) for v in
+              Path("/proc/stat").read_text().split("\n")[0].split()[1:]]
+    total = sum(fields)
+    idle = fields[3] + (fields[4] if len(fields) > 4 else 0)
+    return total - idle, total
+
+
+def _mem_used_mb() -> int:
+    """Used memory in MB: total minus available, per /proc/meminfo."""
+    info = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        key, _, rest = line.partition(":")
+        info[key] = int(rest.split()[0])
+    return (info.get("MemTotal", 0) - info.get("MemAvailable", 0)) // 1024
+
+
+class ResourceSampler:
+    """Samples RAM, CPU and disk on an interval while one phase runs.
+
+    Two outputs, because they answer different questions:
+
+      resources.tsv  every sample, so a slow phase can be read as a time series
+      .peak          the maxima, which is what capacity planning needs
+
+    The thread is a daemon and every sample is wrapped, so a sampling failure can
+    never fail the phase it is measuring. Measurement must not break the run.
+    """
+
+    def __init__(self, project: dict, phase: str, interval: int = RESOURCE_SAMPLE_S):
+        self.name = project["name"]
+        self.cls = project["size_class"]
+        self.phase = phase
+        self.interval = interval
+        self.pid: int | None = None
+        self.peak = dict(tree_rss_mb=0, tree_procs=0, cpu_pct=0.0,
+                         mem_used_mb=0, disk_free_gb_min=None, samples=0)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = time.time()
+
+    def start(self, pid: int) -> None:
+        self.pid = pid
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=self.interval + 5)
+        return self.peak
+
+    def _loop(self) -> None:
+        busy, total = _cpu_jiffies()
+        # Sample once immediately: a phase shorter than the interval would
+        # otherwise record nothing at all.
+        while True:
+            try:
+                busy, total = self._sample(busy, total)
+            except Exception as e:                      # never break the phase
+                say(f"{self.name} resource sample failed: {e}")
+            if self._stop.wait(self.interval):
+                return
+
+    def _sample(self, prev_busy: int, prev_total: int) -> tuple[int, int]:
+        busy, total = _cpu_jiffies()
+        span = total - prev_total
+        cpu_pct = round(100.0 * (busy - prev_busy) / span, 1) if span > 0 else 0.0
+        rss_mb, procs = tree_usage(self.pid) if self.pid else (0, 0)
+        mem_mb = _mem_used_mb()
+        free_gb = shutil.disk_usage(OUT).free // 2**30
+        row = (now_iso(), self.name, self.cls, self.phase,
+               int(time.time() - self._started), rss_mb, procs, cpu_pct,
+               mem_mb, free_gb, os.getloadavg()[0])
+
+        p = self.peak
+        p["tree_rss_mb"] = max(p["tree_rss_mb"], rss_mb)
+        p["tree_procs"] = max(p["tree_procs"], procs)
+        p["cpu_pct"] = max(p["cpu_pct"], cpu_pct)
+        p["mem_used_mb"] = max(p["mem_used_mb"], mem_mb)
+        p["disk_free_gb_min"] = (free_gb if p["disk_free_gb_min"] is None
+                                 else min(p["disk_free_gb_min"], free_gb))
+        p["samples"] += 1
+
+        with _metrics_lock:
+            if not RESOURCES.exists():
+                RESOURCES.write_text("\t".join(RESOURCE_FIELDS) + "\n")
+            with RESOURCES.open("a") as f:
+                f.write("\t".join(str(v) for v in row) + "\n")
+        return busy, total
+
+
 def state_dir(name: str) -> Path:
     """The orchestrator's own directory for one project: logs and the lock.
 
@@ -190,14 +347,27 @@ def run_phase(project: dict, phase: str, args: list[str]) -> int:
     tmp.symlink_to(logfile)
     tmp.rename(latest)
     start = time.time()
+    sampler = ResourceSampler(project, phase)
+    # Popen, not run: the sampler needs the child's pid to walk its descendants.
+    # The pipeline is a shell that spawns perl, git and srcml, so the direct
+    # child's own RSS understates the run badly. At --jobs 3 a system-wide figure
+    # cannot be attributed to a project, and attribution is the point.
     with logfile.open("wb") as lf:
-        rc = subprocess.run(args, cwd=CREGIT, env=_ENV,
-                            stdout=lf, stderr=subprocess.STDOUT).returncode
+        proc = subprocess.Popen(args, cwd=CREGIT, env=_ENV,
+                                stdout=lf, stderr=subprocess.STDOUT)
+        sampler.start(proc.pid)
+        try:
+            rc = proc.wait()
+        finally:
+            peak = sampler.stop()
     duration = int(time.time() - start)
 
     record_metric(name, cls, phase, duration, rc, logfile)
     mark = "✓" if rc == 0 else f"✗ rc={rc}"
-    say(f"{name} {mark} {phase} in {duration}s")
+    say(f"{name} {mark} {phase} in {duration}s"
+        + (f" | peak {peak['tree_rss_mb']}MB rss, {peak['tree_procs']} procs,"
+           f" {peak['cpu_pct']}% cpu, {peak['disk_free_gb_min']}G disk low"
+           if peak["samples"] else ""))
     return rc
 
 
