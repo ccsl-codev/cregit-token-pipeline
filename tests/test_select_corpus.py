@@ -253,8 +253,11 @@ def test_gh_rate_limit_retries_then_raises(monkeypatch, sandbox):
     monkeypatch.setattr(sc.subprocess, "run", run)
     with pytest.raises(sc.RateLimited):
         sc.gh("repos/acme/widget", retries=3)
-    assert len(api_calls(run)) == 3
-    assert len(sandbox.slept) == 3
+    # A quota pause is a wait, not a failed request, so it spends its own budget
+    # rather than `retries`. Sharing one budget is what let six 120s sleeps abort
+    # a 24,405-row pass at row 7,894.
+    assert len(api_calls(run)) == sc.MAX_QUOTA_PAUSES
+    assert len(sandbox.slept) == sc.MAX_QUOTA_PAUSES
 
 
 def test_gh_403_retries_then_raises(monkeypatch, sandbox):
@@ -263,8 +266,32 @@ def test_gh_403_retries_then_raises(monkeypatch, sandbox):
     monkeypatch.setattr(sc.subprocess, "run", run)
     with pytest.raises(sc.RateLimited):
         sc.gh("repos/acme/widget", retries=2)
-    assert len(api_calls(run)) == 2
+    assert len(api_calls(run)) == sc.MAX_QUOTA_PAUSES
     assert sandbox.slept  # it really does back off
+
+
+def test_a_quota_pause_does_not_spend_the_error_retry_budget(monkeypatch, sandbox):
+    """The two budgets must stay separate, and the bound must be the quota one.
+
+    With retries=1 a shared budget would give up after a single API call. The
+    quota budget is larger on purpose, because waiting out a limit is the correct
+    behaviour and abandoning the pass is not.
+    """
+    run = runner(1, err="API rate limit exceeded for user ID 1.")
+    monkeypatch.setattr(sc.subprocess, "run", run)
+    with pytest.raises(sc.RateLimited):
+        sc.gh("repos/acme/widget", retries=1)
+    assert len(api_calls(run)) == sc.MAX_QUOTA_PAUSES > 1
+
+
+def test_a_server_error_still_spends_the_error_retry_budget(monkeypatch, sandbox):
+    """The separation must not leak the other way: a 502 is a real failure and
+    must stay bounded by `retries`, not by the larger quota budget."""
+    run = runner(1, err="HTTP 502: Bad Gateway")
+    monkeypatch.setattr(sc.subprocess, "run", run)
+    with pytest.raises(sc.RateLimited):
+        sc.gh("repos/acme/widget", retries=2)
+    assert len(api_calls(run)) == 2
 
 
 @pytest.mark.parametrize("stderr", [
@@ -331,7 +358,9 @@ def test_rate_limit_wait_returns_seconds_to_reset(monkeypatch):
     body = json.dumps({"resources": {"core": {"remaining": 0, "reset": reset},
                                      "graphql": {"remaining": 500, "reset": 0}}})
     monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, body))
-    assert sc.rate_limit_wait() >= 10_000
+    wait, kind = sc.rate_limit_wait()
+    assert wait >= 10_000
+    assert kind == "primary", "an exhausted core bucket is a primary limit"
 
 
 def test_rate_limit_wait_never_returns_less_than_the_default(monkeypatch):
@@ -339,27 +368,48 @@ def test_rate_limit_wait_never_returns_less_than_the_default(monkeypatch):
     past = int(datetime.now(timezone.utc).timestamp()) - 5_000
     body = json.dumps({"resources": {"graphql": {"remaining": 0, "reset": past}}})
     monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, body))
-    assert sc.rate_limit_wait(default=120) == 120
+    assert sc.rate_limit_wait(default=120) == (120, "primary")
 
 
-def test_rate_limit_wait_returns_default_when_nothing_is_exhausted(monkeypatch):
-    """Quota intact means the failure was something else; use the short wait."""
+def test_rate_limit_wait_reports_secondary_when_the_budget_looks_intact(monkeypatch):
+    """The defect this replaced. A bucket that reports remaining budget while the
+    real call was refused is the undocumented secondary limit, not a healthy
+    quota. Observed directly: repos/torvalds/linux answered 403 in the same second
+    that rate_limit reported core 5000/5000.
+
+    Treating it as healthy returned a 120s wait, and six of those aborted a
+    24,405-row pass at row 7,894."""
     monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, RATE_LIMIT_OK))
-    assert sc.rate_limit_wait(default=77) == 77
+    wait, kind = sc.rate_limit_wait(default=77)
+    assert kind == "secondary"
+    assert wait == sc.SECONDARY_BACKOFF[0], "a secondary limit needs a long wait"
+
+
+def test_secondary_backoff_escalates_and_then_holds(monkeypatch):
+    """A blind wait must grow, because there is no reset instant to read, and
+    retrying a secondary limit too eagerly extends it."""
+    monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, RATE_LIMIT_OK))
+    waits = [sc.rate_limit_wait(default=1, attempt=i)[0] for i in range(8)]
+    assert waits[:5] == list(sc.SECONDARY_BACKOFF), waits
+    assert waits[5:] == [sc.SECONDARY_BACKOFF[-1]] * 3, "must hold, not grow for ever"
 
 
 @pytest.mark.parametrize("body", ["", "not json", '{"resources": {}}', '{"nope": 1}'])
 def test_rate_limit_wait_survives_malformed_output(monkeypatch, body):
-    """A broken probe must degrade to the default, never abort the run."""
+    """A broken probe must degrade to the default, never abort the run.
+
+    '{"resources": {}}' is the subtle one: no bucket was reported at all. That is
+    missing data, not a healthy budget, so it must NOT be read as a secondary
+    limit and earn a 300s sleep."""
     monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, body))
-    assert sc.rate_limit_wait(default=42) == 42
+    assert sc.rate_limit_wait(default=42) == (42, "unknown")
 
 
 def test_rate_limit_wait_survives_a_crash(monkeypatch):
     """gh missing from PATH must not turn a throttle into a traceback."""
     monkeypatch.setattr(sc.subprocess, "run",
                         lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("gh")))
-    assert sc.rate_limit_wait(default=9) == 9
+    assert sc.rate_limit_wait(default=9) == (9, "unknown")
 
 
 # ================================================================ save_json()
