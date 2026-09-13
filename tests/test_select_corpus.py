@@ -70,6 +70,14 @@ def sandbox(tmp_path, monkeypatch):
 
     slept: list[float] = []
     monkeypatch.setattr(sc.time, "sleep", lambda s: slept.append(s))
+    # Pacing off by default, so a test that counts sleeps counts retry sleeps
+    # only. The pacing tests switch it back on explicitly.
+    monkeypatch.setattr(sc, "MIN_CALL_INTERVAL_S", 0)
+    monkeypatch.setattr(sc, "BUDGET_FLOOR", 0)
+    # Backoff is jittered in production. Tests want the ceiling, so the assertions
+    # stay exact rather than ranged.
+    monkeypatch.setattr(sc.random, "uniform", lambda lo, hi: hi)
+    sc.reset_pacing()
     monkeypatch.setattr(sc.subprocess, "run", _boom)
     monkeypatch.setattr(sc.urllib.request, "urlopen", _boom)
 
@@ -2274,3 +2282,128 @@ def test_project_name_never_contains_a_slash():
     """run_pipeline_process.sh exits 2 on a --repo-name holding '/', so
     owner/repo cannot be passed through even though it is the natural key."""
     assert "/" not in sc.project_name("a/b", "c/d")
+
+
+# ================================================================ pacing
+#
+# Why this group exists: the pass that failed sustained 2.10 API calls/second,
+# about 7,559 per hour against a 5,000/hour budget shared with every other tool
+# using this token. Reactive backoff cannot fix that, because by the time a 403
+# arrives the budget is already spent. These tests pin the proactive half.
+
+
+def test_budget_remaining_reports_the_smallest_bucket(monkeypatch):
+    """Either budget running out stops the pass, so the smaller one governs."""
+    body = json.dumps({"resources": {"core": {"remaining": 4000, "reset": 0},
+                                     "graphql": {"remaining": 120, "reset": 0}}})
+    monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, body))
+    assert sc.budget_remaining() == 120
+
+
+@pytest.mark.parametrize("body", ["", "not json", '{"resources": {}}', '{"nope": 1}'])
+def test_budget_remaining_is_none_when_unreadable(monkeypatch, body):
+    """Unknown must not read as zero. Zero would trigger an hour-long hold on
+    every recheck and stall the pass for no reason."""
+    monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, body))
+    assert sc.budget_remaining() is None
+
+
+def test_pace_call_waits_out_the_minimum_interval(monkeypatch, sandbox):
+    """The governor that keeps the pass inside the budget instead of 51% over."""
+    monkeypatch.setattr(sc, "MIN_CALL_INTERVAL_S", 1.0)
+    monkeypatch.setattr(sc.time, "time", lambda: 1000.0)
+    sc.reset_pacing()
+
+    sc.pace_call()                      # first call: no history, no wait
+    assert sandbox.slept == []
+    sc.pace_call()                      # immediately after: must wait
+    assert len(sandbox.slept) == 1
+    assert sandbox.slept[0] == pytest.approx(1.0 + sc.CALL_JITTER_S)
+
+
+def test_pace_call_does_not_wait_when_the_gap_already_passed(monkeypatch, sandbox):
+    """Pacing must not tax a pass that is already slow, for instance one whose
+    calls are dominated by GraphQL latency."""
+    monkeypatch.setattr(sc, "MIN_CALL_INTERVAL_S", 1.0)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(sc.time, "time", lambda: clock["t"])
+    sc.reset_pacing()
+
+    sc.pace_call()
+    clock["t"] += 30.0                  # a slow call happened in between
+    sc.pace_call()
+    assert sandbox.slept == []
+
+
+def test_pace_call_holds_when_the_budget_is_near_exhaustion(monkeypatch, sandbox):
+    """Leaving a floor unspent is the point. The token is shared, so racing the
+    other tools down to zero is what invites a block."""
+    monkeypatch.setattr(sc, "MIN_CALL_INTERVAL_S", 0)
+    monkeypatch.setattr(sc, "BUDGET_FLOOR", 500)
+    monkeypatch.setattr(sc, "BUDGET_RECHECK_CALLS", 1)
+    reset = int(datetime.now(timezone.utc).timestamp()) + 900
+    body = json.dumps({"resources": {"core": {"remaining": 12, "reset": reset},
+                                     "graphql": {"remaining": 4000, "reset": reset}}})
+    monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, body))
+    sc.reset_pacing()
+
+    sc.pace_call()
+    assert sandbox.slept, "the pass kept spending below the floor"
+    assert sandbox.slept[0] >= 120
+
+
+def test_pace_call_does_not_hold_when_the_budget_is_healthy(monkeypatch, sandbox):
+    """The floor must not throttle a pass that has plenty of budget left."""
+    monkeypatch.setattr(sc, "MIN_CALL_INTERVAL_S", 0)
+    monkeypatch.setattr(sc, "BUDGET_FLOOR", 500)
+    monkeypatch.setattr(sc, "BUDGET_RECHECK_CALLS", 1)
+    monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(0, RATE_LIMIT_OK))
+    sc.reset_pacing()
+
+    sc.pace_call()
+    assert sandbox.slept == []
+
+
+def test_pace_call_checks_the_budget_only_periodically(monkeypatch, sandbox):
+    """The probe is free of quota but not of time. Reading it on every call would
+    double the wall time of a 24,405-row pass."""
+    monkeypatch.setattr(sc, "MIN_CALL_INTERVAL_S", 0)
+    monkeypatch.setattr(sc, "BUDGET_FLOOR", 500)
+    monkeypatch.setattr(sc, "BUDGET_RECHECK_CALLS", 10)
+    probes = []
+    monkeypatch.setattr(sc.subprocess, "run",
+                        lambda *a, **k: (probes.append(1), cp(0, RATE_LIMIT_OK))[1])
+    sc.reset_pacing()
+
+    for _ in range(25):
+        sc.pace_call()
+    assert len(probes) == 2, f"expected one probe per 10 calls, got {len(probes)}"
+
+
+def test_backoff_is_exponential_with_jitter_and_a_cap(monkeypatch):
+    """A bare 2**attempt lands every retry on the same instants, which is the
+    pattern abuse detection looks for. Full jitter spreads them."""
+    monkeypatch.setattr(sc.random, "uniform", lambda lo, hi: (lo, hi))
+    assert sc.backoff(0) == (0.5, 1)
+    assert sc.backoff(3) == (4, 8)
+    assert sc.backoff(20) == (sc.BACKOFF_CAP_S / 2, sc.BACKOFF_CAP_S), "no cap"
+
+
+def test_backoff_never_exceeds_the_cap(monkeypatch):
+    """A late attempt must not sleep for hours; a quota wait is handled
+    separately by rate_limit_wait."""
+    monkeypatch.undo()
+    for attempt in range(0, 30):
+        assert 0 <= sc.backoff(attempt) <= sc.BACKOFF_CAP_S
+
+
+def test_reset_pacing_forgets_the_history(monkeypatch, sandbox):
+    """A fresh pass must not inherit the previous pass's last-call instant."""
+    monkeypatch.setattr(sc, "MIN_CALL_INTERVAL_S", 1.0)
+    monkeypatch.setattr(sc.time, "time", lambda: 1000.0)
+    sc.reset_pacing()
+    sc.pace_call()
+    sc.reset_pacing()
+    sandbox.slept.clear()
+    sc.pace_call()
+    assert sandbox.slept == [], "history survived the reset"
