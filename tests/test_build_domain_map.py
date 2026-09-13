@@ -124,6 +124,17 @@ def rows_by_domain(env: Env) -> dict[str, dict[str, str]]:
     return {r["domain"]: r for r in env.read_out()}
 
 
+def firm_rows(env: Env) -> dict[str, dict[str, str]]:
+    """Output rows minus the R1 `(Independent)` floor.
+
+    Since R1 emits a row for every domain in FREE_PROVIDERS, the artifact is
+    never empty. A test about what the import contributed must look past that
+    floor.
+    """
+    return {d: r for d, r in rows_by_domain(env).items()
+            if r["kind"] != "free_provider"}
+
+
 # --------------------------------------------------------------------------
 # norm_company — collapses two spellings of one company into one
 # --------------------------------------------------------------------------
@@ -160,13 +171,20 @@ def test_norm_company_removes_a_trailing_parenthetical(raw, expected):
     assert bdm.norm_company(raw) == expected
 
 
-def test_norm_company_keeps_a_parenthetical_that_is_not_last():
-    """DOCUMENTS A GAP. The parenthetical is removed once, BEFORE the suffix
-    loop, so a note followed by a legal form survives: 'Foo (Bar) Inc.' stays
-    'Foo (Bar)' while 'Foo (Bar)' becomes 'Foo'. The two spellings of one firm
-    therefore stay two firms. See the report."""
-    assert bdm.norm_company("Foo (Bar) Inc.") == "Foo (Bar)"
-    assert bdm.norm_company("Foo (Bar)") == "Foo"
+@pytest.mark.parametrize("raw", [
+    "Foo (Bar) Inc.",
+    "Foo Inc. (Bar)",
+    "Foo (Bar)",
+    "Foo (Bar) Inc. Ltd",
+    "Foo Ltd (Bar) Inc.",
+])
+def test_norm_company_strips_parentheticals_and_suffixes_in_any_order(raw):
+    """D5. Before the fix the parenthetical was removed once, BEFORE the suffix
+    loop, so a note followed by a legal form survived: 'Foo (Bar) Inc.' stayed
+    'Foo (Bar)' while 'Foo (Bar)' became 'Foo'. Two spellings of one firm stayed
+    two firms, which inflates the firm count and deflates each firm's share.
+    Both strips now run inside one fixed-point loop, so they interleave."""
+    assert bdm.norm_company(raw) == "Foo"
 
 
 @pytest.mark.parametrize("raw", [
@@ -219,23 +237,17 @@ def test_norm_company_accepts_none_and_empty():
 
 
 # --------------------------------------------------------------------------
-# domain_root
+# domain_root — deleted
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("domain, expected", [
-    ("opensource.cirrus.com", "cirrus"),
-    ("cirrus.com", "cirrus"),
-    ("OPENSOURCE.CIRRUS.COM", "cirrus"),
-    ("a.b.c.d", "c"),
-    ("localhost", "localhost"),       # single label, no crash
-    ("", ""),                         # empty input, no crash
-    (".", ""),
-    ("..", ""),
-])
-def test_domain_root(domain, expected):
-    """Single-label and empty input must not raise: the upstream file contains
-    both."""
-    assert bdm.domain_root(domain) == expected
+def test_domain_root_is_gone():
+    """D7. `domain_root` had no caller: its docstring claimed it spotted
+    self-references, but R4 uses a regex on the company string instead. Dead
+    code in a research pipeline reads as a rule that is in force when it is not,
+    so the function and its eight parametrised tests were deleted rather than
+    wired in. R4 now tags any domain-shaped company name, which needs no
+    per-label comparison, so there is nothing left for it to do."""
+    assert not hasattr(bdm, "domain_root")
 
 
 # --------------------------------------------------------------------------
@@ -357,28 +369,70 @@ def test_people_are_counted_across_several_cached_files(env):
 # cmd_build — the four rules
 # --------------------------------------------------------------------------
 
-def test_r1_a_free_provider_becomes_independent(env, monkeypatch):
-    """R1: a free provider is never a firm. Exercised through an injected
-    parse_source because no real gitdm input can reach this branch — see
-    test_r1_is_unreachable_from_the_real_source."""
-    monkeypatch.setattr(bdm, "parse_source",
-                        lambda: {"gmail.com": Counter({"Google": 3})})
+def test_r1_a_free_provider_becomes_independent(env):
+    """R1: a free provider is never a firm.
+
+    EXPECTATION CHANGED. This used to need an injected parse_source, because
+    per_domain is keyed on non-free domains only and cmd_build's R1 arm was
+    dead code. The row now comes from the FREE_PROVIDERS constant, so a plain
+    build produces it and `source` is `builtin`, not `cncf-gitdm`."""
+    env.gitdm(person("kate", ["kate!igalia.com"], ["Igalia"]))
     assert build() == 0
     row = rows_by_domain(env)["gmail.com"]
     assert row["company"] == "(Independent)"
     assert row["kind"] == "free_provider"
-    assert row["source"] == "cncf-gitdm"
+    assert row["source"] == "builtin"
 
 
-def test_r1_is_unreachable_from_the_real_source(env, capsys):
-    """Documents a dead branch, not a wish. parse_source keys the map on
-    non-free domains only, so cmd_build's R1 arm can never fire on real input:
-    a person whose only domain is free has no work domain and contributes
-    nothing. No `kind=free_provider` row can be imported."""
+def test_r1_covers_every_free_provider_domain(env, capsys):
+    """D1, the highest-priority defect. Before the fix `per_domain` never held a
+    free provider, so cmd_build's R1 arm could not fire and the counter was
+    always 0: NO `kind=free_provider` row was ever emitted. Any free provider
+    missing from the map falls into `(Unknown)`, which the analysis reads as
+    unmeasured rather than as a volunteer, and `(Unknown)` correlates strongly
+    and negatively with corporate share. So every domain in our own curated
+    constant must appear, not only the ones the CNCF source mentions."""
+    env.gitdm(person("kate", ["kate!igalia.com"], ["Igalia"]))
+    assert build() == 0
+    rows = rows_by_domain(env)
+    missing = sorted(d for d in bdm.FREE_PROVIDERS if d not in rows)
+    assert missing == []
+    for d in bdm.FREE_PROVIDERS:
+        assert rows[d]["kind"] == "free_provider"
+        assert rows[d]["company"] == "(Independent)"
+        assert rows[d]["source"] == "builtin"
+    out = capsys.readouterr().out
+    assert "R1-free-provider (builtin)" in out          # counted in the summary
+    by_src = [ln for ln in out.splitlines() if ln.split()[1:2] == ["builtin"]]
+    assert by_src and by_src[-1].split()[-1] == f"{len(bdm.FREE_PROVIDERS):,}"
+
+
+def test_r1_does_not_need_the_source_to_mention_a_free_provider(env):
+    """REPLACES a test that documented the dead branch. A person whose only
+    domain is free still contributes no work domain, so this source parses to
+    nothing and the build aborts — but that abort is now the only reason a free
+    provider can be absent, and it never writes a partial map."""
     env.gitdm(person("kate", ["kate!gmail.com"], ["Google"]))
     assert build() == 1                       # nothing parsed at all
     assert not env.out.exists()
-    assert "R1-free-provider" not in capsys.readouterr().out
+
+
+def test_r1_a_curated_free_provider_row_still_wins(env):
+    """The curated map is merged last, so a hand-checked row for a free provider
+    beats the builtin one. Losing that would silently discard an identity-level
+    correction made for the VEM paper."""
+    env.curated_rows([{"domain": "gmail.com", "company": "(Independent)",
+                       "kind": "free_provider", "source": "gitdm"},
+                      {"domain": "qq.com", "company": "Tencent",
+                       "kind": "company", "source": "patch"}])
+    env.gitdm(person("kate", ["kate!igalia.com"], ["Igalia"]))
+    assert build() == 0
+    rows = rows_by_domain(env)
+    assert rows["gmail.com"]["source"] == "gitdm"
+    assert (rows["qq.com"]["company"], rows["qq.com"]["source"]) == ("Tencent",
+                                                                    "patch")
+    # every other free provider still falls back to the builtin row
+    assert rows["hotmail.com"]["source"] == "builtin"
 
 
 @pytest.mark.parametrize("n_people, min_persons, expected_source", [
@@ -409,7 +463,7 @@ def test_r3_drops_a_domain_with_no_majority_company(env, capsys):
     env.gitdm(person("liam", ["liam!shared.example"], ["Red Hat"]) + "\n"
               + person("mia", ["mia!shared.example"], ["SUSE"]))
     assert build() == 0
-    assert rows_by_domain(env) == {}
+    assert firm_rows(env) == {}
     assert "R3-no-plurality" in capsys.readouterr().out
 
 
@@ -427,34 +481,161 @@ def test_r3_keeps_a_clear_majority_company(env):
     assert row["source"] == "cncf-gitdm"
 
 
-def test_r4_drops_a_company_that_is_only_a_domain_string(env, capsys):
-    """R4: `systemli.org -> systemli.org` names no company."""
+def test_r4_tags_a_company_that_only_repeats_its_own_domain(env, capsys):
+    """R4, EXPECTATION CHANGED TWICE.
+
+    `systemli.org -> systemli.org` names no company. It was dropped, then tagged
+    together with every domain-shaped value, and is now tagged as a
+    SELF-REFERENCE only. The narrower rule is what the real data asked for: of
+    the 77 domain-shaped values, 35 repeat their key and 42 name a real firm, so
+    one tag covering both would make a consumer who filters it discard 42 real
+    employers.
+    """
     env.gitdm(person("quinn", ["quinn!systemli.org"], ["systemli.org"]))
     assert build() == 0
-    assert rows_by_domain(env) == {}
-    assert "R4-company-is-a-domain" in capsys.readouterr().out
+    row = firm_rows(env)["systemli.org"]
+    assert row["company"] == "systemli.org"
+    assert row["source"] == "cncf-gitdm-single-self-reference"
+    out = capsys.readouterr().out
+    assert "R4-self-reference (tagged)" in out
+    assert "of which R4 self-references" in out           # report distinguishes
 
 
-def test_r4_also_drops_a_real_company_whose_name_contains_a_dot(env):
-    """DOCUMENTS A FALSE POSITIVE. R4 tests the shape of the string, not
-    whether it names a firm, so a firm whose registered name IS a domain --
-    Booking.com, Salesforce.com -- is dropped like a self-reference. The rule
-    loses these rows in both sources. See the report."""
-    env.gitdm(person("book", ["book!booking.com"], ["Booking.com"]))
-    env.spinellis_rows([sp_row("bookings.example", "Booking.com", k10="t")])
+@pytest.mark.parametrize("domain, company", [
+    ("systemli.org", "systemli.org"),          # exact repeat
+    ("systemli.org", "SYSTEMLI.ORG"),          # case only
+    ("systemli.org", "systemli.org."),         # trailing dot only
+])
+def test_self_reference_recognises_a_repeat_of_the_key(domain, company):
+    """Only a repeat of the key counts. Case and a trailing dot are not a name."""
+    assert bdm.self_reference(domain, company) is True
+
+
+@pytest.mark.parametrize("domain, company", [
+    ("joeyb.org", "Salesforce.com"),           # real firm, personal domain
+    ("chriskramer.nl", "Bol.com"),
+    ("helsedir.no", "FINN.no"),
+    ("github.com", "GitHub"),                  # no dot, never domain-shaped
+    ("mozilla.org", "Mozilla"),
+    ("systemli.org", "Systemli Collective"),   # a real name for the same domain
+])
+def test_self_reference_leaves_a_real_firm_alone(domain, company):
+    """A firm whose registered name ends in a TLD is still a firm.
+
+    These are the 42 rows a blanket domain-shape tag would have swept up.
+    """
+    assert bdm.self_reference(domain, company) is False
+
+
+@pytest.mark.parametrize("company", ["Booking.com", "Salesforce.com"])
+def test_r4_keeps_a_real_firm_whose_registered_name_is_a_domain(env, company):
+    """D2. Before the fix Booking.com and Salesforce.com were dropped from the
+    map entirely, out of BOTH sources, because R4 tested the shape of the string
+    rather than whether it named a firm.
+
+    EXPECTATION CHANGED: the row now survives UNTAGGED. The company name differs
+    from the domain, so it is an ordinary firm row and a consumer filtering
+    self-references must not lose it.
+    """
+    env.gitdm(person("book", ["book!cncf.example"], [company]))
+    env.spinellis_rows([sp_row("sp.example", company, k10="t"),
+                        sp_row("plain.example", company)])
     assert build() == 0
-    assert rows_by_domain(env) == {}
+    rows = firm_rows(env)
+    assert rows["cncf.example"]["company"] == company
+    assert rows["cncf.example"]["source"] == "cncf-gitdm-single"
+    assert rows["sp.example"]["company"] == company
+    assert rows["sp.example"]["source"] == "spinellis-sec"
+    assert rows["plain.example"]["source"] == "spinellis"
 
 
-def test_a_build_that_drops_every_domain_still_overwrites_the_artifact(env):
-    """DOCUMENTS A DATA-SAFETY GAP. cmd_build aborts only when the source
-    parses to nothing. A source that parses but loses every domain to R3/R4
-    writes a header-only CSV over a good artifact. See the report."""
+def test_r4_tagged_rows_are_countable_and_separable(env, capsys):
+    """The tag is only useful if a consumer can pick the rows out and the report
+    says how many there are. An untagged firm must not be swept up with them."""
+    env.gitdm("\n".join([
+        person("q1", ["q1!systemli.org"], ["systemli.org"]),
+        person("q2", ["q2!igalia.com"], ["Igalia"]),
+        person("q3", ["q3!joeyb.example"], ["Salesforce.com"]),
+    ]))
+    assert build(report=True) == 0
+    rows = firm_rows(env)
+    tagged = sorted(d for d, r in rows.items()
+                    if r["source"].endswith("-self-reference"))
+    assert tagged == ["systemli.org"]
+    assert rows["igalia.com"]["source"] == "cncf-gitdm-single"
+    assert rows["joeyb.example"]["source"] == "cncf-gitdm-single"
+    line = [ln for ln in capsys.readouterr().out.splitlines()
+            if "R4 self-references" in ln]
+    assert line and line[0].split()[-1] == "1"
+
+
+def test_a_build_that_drops_every_domain_refuses_to_write(env, monkeypatch,
+                                                         capsys):
+    """D6. Before the fix cmd_build aborted only when the source failed to
+    parse. A source that parsed but lost every domain to a rule rewrote a good
+    artifact as a bare header line. FREE_PROVIDERS is emptied here because the
+    R1 floor otherwise keeps the result non-empty on its own."""
+    monkeypatch.setattr(bdm, "FREE_PROVIDERS", set())
     env.data.mkdir()
     env.out.write_text("domain,company,kind,source\nkeep.example,Keep,company,gitdm\n")
-    env.gitdm(person("quinn", ["quinn!systemli.org"], ["systemli.org"]))
+    before = env.out.read_bytes()
+    env.gitdm(person("liam", ["liam!shared.example"], ["Red Hat"]) + "\n"
+              + person("mia", ["mia!shared.example"], ["SUSE"]))
+    assert build() == 1
+    assert env.out.read_bytes() == before                # byte-for-byte intact
+    assert not (env.data / (env.out.name + ".tmp")).exists()
+    out = capsys.readouterr().out
+    assert "REFUSING to write" in out and "empty" in out
+
+
+def test_a_build_below_the_curated_floor_refuses_to_write(env, monkeypatch,
+                                                          capsys):
+    """D6, the floor. The output must never hold fewer rows than the curated
+    input. `merged.update(curated)` guarantees that today, so the guard is
+    driven with a curated map that reports more rows than it yields — the shape
+    a merge-order regression would produce. Before the fix there was no floor
+    check at all and any shrunken result went straight over the artifact."""
+
+    class ShrunkenMerge(dict):
+        """Loads as empty, but claims 99 curated rows."""
+
+        def __len__(self):
+            return 99
+
+    monkeypatch.setattr(bdm, "load_curated", ShrunkenMerge)
+    env.data.mkdir()
+    env.out.write_text("domain,company,kind,source\nkeep.example,Keep,company,gitdm\n")
+    before = env.out.read_bytes()
+    env.gitdm(person("s1", ["s1!igalia.com"], ["Igalia"]))
+    assert build() == 1
+    assert env.out.read_bytes() == before                # byte-for-byte intact
+    assert not (env.data / (env.out.name + ".tmp")).exists()
+    out = capsys.readouterr().out
+    assert "REFUSING to write" in out and "floor" in out
+
+
+def test_write_refusal_states_the_curated_map_is_the_floor():
+    """D6 as a rule, tested on the guard itself, since the merge cannot reach it
+    today. An empty result and a result below the curated row count are both
+    refused; anything at or above the floor is written."""
+    row = ("Firm", "company", "cncf-gitdm")
+    assert bdm.write_refusal({"a.example": row}, {}) == ""
+    assert bdm.write_refusal({"a.example": row}, {"a.example": row}) == ""
+    assert "empty" in bdm.write_refusal({}, {})
+    assert "empty" in bdm.write_refusal({}, {"a.example": row})
+    reason = bdm.write_refusal({"a.example": row},
+                               {"a.example": row, "b.example": row})
+    assert "floor" in reason and "1 rows" in reason and "2 curated" in reason
+
+
+def test_the_artifact_is_written_through_a_temporary_file(env):
+    """D6. An interrupted write must not truncate a good artifact, so the rows
+    go to a sibling `.tmp` and are renamed into place, as select_corpus.save_json
+    does. Nothing may be left behind."""
+    env.gitdm(person("s1", ["s1!igalia.com"], ["Igalia"]))
     assert build() == 0
-    assert env.out.read_text().splitlines() == ["domain,company,kind,source"]
+    assert env.out.exists()
+    assert [p.name for p in env.data.iterdir()] == [env.out.name]
 
 
 @pytest.mark.parametrize("domain, company", [
@@ -514,11 +695,11 @@ def test_precedence_plain_spinellis_only_fills_a_gap(env, n_people, cncf_source)
     """Adjacent pair 2: plain `spinellis` never overwrites a CNCF row; it only
     supplies a domain nobody else has.
 
-    NOTE: the module comment claims the ladder is
-    `cncf-gitdm-single < cncf-gitdm < spinellis`, but the merge condition is
-    `if src == "spinellis-sec" or d not in merged`, so a one-person,
-    uncorroborated CNCF row also beats a published CC-BY row. The test locks in
-    the code as written; the comment is wrong. See the report."""
+    The merge condition is `if src.startswith("spinellis-sec") or d not in
+    merged`, so even a one-person, uncorroborated CNCF row beats a published
+    CC-BY row. The code was always right; the comment above it used to claim a
+    plain ladder `cncf-gitdm < spinellis` and is now fixed. See
+    test_the_precedence_comment_states_the_real_rule."""
     env.gitdm("\n".join(person(f"v{i}", [f"v{i}!held.example"], ["CNCF Firm"])
                         for i in range(n_people)))
     env.spinellis_rows([sp_row("held.example", "Spinellis Firm"),
@@ -557,6 +738,21 @@ def test_precedence_spinellis_sec_overwrites_a_cncf_row(env, n_people,
     row = rows_by_domain(env)["filer.example"]
     assert (row["company"], row["source"]) == ("Filer Firm", "spinellis-sec")
     assert row["company"] != "CNCF Firm", f"{cncf_source} must lose to spinellis-sec"
+
+
+def test_the_precedence_comment_states_the_real_rule():
+    """D3. The comment above the merge claimed the ladder
+    `cncf-gitdm-single < cncf-gitdm < spinellis < spinellis-sec < curated`,
+    which the condition does not implement: a plain `spinellis` row only fills a
+    gap. A wrong comment is worse than none here, because the next reader
+    changes the code to match it. The comment is the only artifact that can
+    carry this, so the test reads it."""
+    src = Path(bdm.__file__).read_text()
+    comment = src.split("merged = dict(kept)")[0].rsplit("\n\n", 1)[-1]
+    assert "OVERRIDE" in comment
+    assert "FILLS A GAP" in comment
+    assert "cncf-gitdm < spinellis" not in comment      # the false ladder
+    assert "not externally checkable" in comment        # and why
 
 
 def test_precedence_curated_overwrites_spinellis_sec(env):
@@ -629,11 +825,26 @@ def test_spinellis_never_turns_a_free_provider_into_a_firm(env, domain):
     assert bdm.parse_spinellis_domains() == {}
 
 
-@pytest.mark.parametrize("company", ["systemli.org", "foo.co.uk", "bar.io"])
-def test_spinellis_drops_a_company_that_is_a_domain(env, company):
-    """R4 applies to the published dataset too."""
+@pytest.mark.parametrize("domain", ["systemli.org", "foo.co.uk", "bar.io"])
+def test_spinellis_tags_a_company_that_repeats_its_domain(env, domain):
+    """R4 applies to the published dataset too, and the row is tagged, not
+    dropped. The CC-BY data is the only source we may redistribute, so silently
+    discarding rows from it costs the most.
+
+    EXPECTATION CHANGED: the tag needs the company to repeat the DOMAIN, so the
+    fixture pairs each value with its own domain rather than with `some.example`.
+    """
+    env.spinellis_rows([sp_row(domain, domain)])
+    assert bdm.parse_spinellis_domains() == {
+        domain: (domain, "spinellis-self-reference")}
+
+
+@pytest.mark.parametrize("company", ["Salesforce.com", "Bol.com", "FINN.no"])
+def test_spinellis_keeps_a_domain_shaped_firm_untagged(env, company):
+    """A firm named after a TLD is an ordinary firm in the published data too."""
     env.spinellis_rows([sp_row("some.example", company)])
-    assert bdm.parse_spinellis_domains() == {}
+    assert bdm.parse_spinellis_domains() == {
+        "some.example": (company, "spinellis")}
 
 
 def test_spinellis_normalises_the_company_name(env):
@@ -673,15 +884,43 @@ def test_spinellis_missing_file_returns_empty_and_does_not_raise(env, capsys):
     assert "spinellis" in capsys.readouterr().out
 
 
-def test_spinellis_sec_row_hides_a_conflicting_plain_row(env):
-    """DOCUMENTS A GAP, not a desired behaviour. Ambiguity is tested inside the
-    verified and the plain bucket separately, so a domain whose SEC-flagged row
-    and unflagged row name DIFFERENT firms is not reported as ambiguous: the
-    verified name wins silently. See the report."""
+def test_spinellis_counts_a_cross_bucket_name_conflict(env, capsys):
+    """D4, EXPECTATION CHANGED. Ambiguity used to be tested inside the verified
+    bucket and inside the plain bucket separately, so a domain whose unflagged
+    row and 10-K row named DIFFERENT firms was not reported: two firms claimed
+    one domain and the conflict disappeared. The SEC name still wins, because it
+    is externally checkable, but the conflict is now COUNTED and REPORTED. A
+    high rate is a finding about the source, and it must not be silent."""
     env.spinellis_rows([sp_row("conflict.example", "Plain Firm"),
                         sp_row("conflict.example", "Filer Firm", k10="t")])
     assert bdm.parse_spinellis_domains() == {
         "conflict.example": ("Filer Firm", "spinellis-sec")}
+    assert "1 cross-bucket name conflicts" in capsys.readouterr().out
+
+
+def test_spinellis_does_not_count_agreement_across_buckets(env, capsys):
+    """The counter must measure disagreement only. A domain both buckets call the
+    same firm, after normalisation, is corroboration, not a conflict: counting it
+    would drown the real conflicts in noise."""
+    env.spinellis_rows([sp_row("agree.example", "Axis Communications"),
+                        sp_row("agree.example", "Axis Communications AB",
+                               k10="t")])
+    assert bdm.parse_spinellis_domains() == {
+        "agree.example": ("Axis Communications", "spinellis-sec")}
+    assert "0 cross-bucket name conflicts" in capsys.readouterr().out
+
+
+def test_a_cross_bucket_conflict_is_not_counted_when_a_bucket_is_ambiguous(env,
+                                                                          capsys):
+    """With two names inside one bucket there is no single name to disagree with,
+    and that ambiguity is already handled. Only two unambiguous, differing names
+    are a cross-bucket conflict."""
+    env.spinellis_rows([sp_row("mixed.example", "Plain Firm"),
+                        sp_row("mixed.example", "Filer One", k10="t"),
+                        sp_row("mixed.example", "Filer Two", k10="t")])
+    assert bdm.parse_spinellis_domains() == {
+        "mixed.example": ("Plain Firm", "spinellis")}
+    assert "0 cross-bucket name conflicts" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
@@ -738,8 +977,9 @@ def test_output_header_is_exact_and_rows_are_sorted_by_domain(env):
     assert env.out_header() == "domain,company,kind,source"
     domains = [r["domain"] for r in env.read_out()]
     assert domains == sorted(domains)
-    assert domains == ["alpha.example", "beta.example", "mid.example",
-                       "zeta.example"]
+    # The R1 floor also ships, so compare only what the import contributed.
+    assert sorted(firm_rows(env)) == ["alpha.example", "beta.example",
+                                      "mid.example", "zeta.example"]
 
 
 def test_report_does_not_change_the_data(env):
@@ -787,7 +1027,7 @@ def test_build_writes_even_when_only_the_import_has_rows(env):
     """The curated map is optional at build time."""
     env.gitdm(person("s1", ["s1!igalia.com"], ["Igalia"]))
     assert build() == 0
-    assert [r["domain"] for r in env.read_out()] == ["igalia.com"]
+    assert list(firm_rows(env)) == ["igalia.com"]
 
 
 # --------------------------------------------------------------------------
@@ -895,6 +1135,25 @@ def test_main_fetch_dispatches_to_cmd_fetch(env, monkeypatch, fake_urlopen):
     monkeypatch.setattr("sys.argv", ["build_domain_map.py", "fetch"])
     assert bdm.main() == 0
     assert len(fake_urlopen) == 1
+
+
+def test_main_parses_argv_exactly_once(env, monkeypatch):
+    """D8. `return ap.parse_args().fn(ap.parse_args())` built the namespace
+    twice, so the function was called with a DIFFERENT namespace than the one it
+    was looked up on. Harmless while parsing is pure, wrong the moment a default
+    is computed, a file is read, or a count is kept."""
+    env.gitdm(person("t3", ["t3!igalia.com"], ["Igalia"]))
+    monkeypatch.setattr("sys.argv", ["build_domain_map.py", "build"])
+    calls: list[int] = []
+    real = argparse.ArgumentParser.parse_args
+
+    def counting(self, *a, **k):
+        calls.append(1)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", counting)
+    assert bdm.main() == 0
+    assert len(calls) == 1
 
 
 def test_main_requires_a_subcommand(monkeypatch):
