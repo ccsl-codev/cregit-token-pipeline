@@ -48,9 +48,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections import Counter
@@ -726,6 +728,92 @@ SERVER_PATTERNS = ("502", "503", "504", "500", "bad gateway", "timeout",
 # retrying a secondary limit too eagerly extends it.
 SECONDARY_BACKOFF = (300, 600, 1200, 2400, 3600)
 
+# ---- pacing -------------------------------------------------------------- #
+#
+# Backoff alone does not keep this pass welcome. Backoff reacts after a refusal,
+# and by then the budget is already spent. Two facts make pacing necessary:
+#
+#   * Measured from the pass that failed: 5,325 repositories in 84.5 minutes,
+#     2.10 API calls per second, about 7,559 calls per hour across both budgets.
+#   * The token is shared. Every other tool on this machine spends the same
+#     5,000 per hour, so consuming all of it is what invites a block.
+#
+# So the pass paces itself and stops short of the budget, leaving the rest for
+# everything else. Jitter keeps the pattern from looking metronomic.
+MIN_CALL_INTERVAL_S = 1.0        # a ceiling near 3,600 calls/hour
+CALL_JITTER_S = 0.4
+BUDGET_FLOOR = 500               # calls left unspent for other tools
+BUDGET_RECHECK_CALLS = 50        # how often to re-read the free rate_limit probe
+
+BACKOFF_CAP_S = 60
+
+_pace_lock = threading.Lock()
+_pace = {"last_call_at": 0.0, "calls_since_check": 0}
+
+
+def backoff(attempt: int) -> float:
+    """Exponential backoff with full jitter, capped.
+
+    Jitter matters even in one process: a bare 2**attempt makes every retry of
+    every repository land on the same instants, which is the pattern abuse
+    detection looks for. The cap keeps a late attempt from sleeping for hours,
+    because a quota wait is handled separately by rate_limit_wait.
+    """
+    ceiling = min(2 ** attempt, BACKOFF_CAP_S)
+    return random.uniform(ceiling / 2, ceiling)
+
+
+def reset_pacing() -> None:
+    """Forget the pacing history. For a fresh pass, and for tests."""
+    with _pace_lock:
+        _pace["last_call_at"] = 0.0
+        _pace["calls_since_check"] = 0
+
+
+def budget_remaining() -> int | None:
+    """Smallest remaining budget across core and graphql, or None if unreadable.
+
+    `gh api rate_limit` does not consume quota, so this probe is free.
+    """
+    try:
+        p = subprocess.run(["gh", "api", "rate_limit"], capture_output=True,
+                           text=True, timeout=30)
+        res = json.loads(p.stdout)["resources"]
+        buckets = [r for r in (res.get("core"), res.get("graphql")) if r]
+        return min(r["remaining"] for r in buckets) if buckets else None
+    except Exception:
+        return None
+
+
+def pace_call() -> None:
+    """Wait, if needed, before spending one API call.
+
+    Two guards, in order of cost:
+
+      interval  keep a minimum gap between calls, plus jitter. This alone holds
+                the pass under the hourly budget instead of 51% over it.
+      floor     every BUDGET_RECHECK_CALLS, read the free probe. If the budget is
+                near exhaustion, wait for the reset rather than race the other
+                tools sharing this token down to zero.
+    """
+    with _pace_lock:
+        gap = MIN_CALL_INTERVAL_S - (time.time() - _pace["last_call_at"])
+        if MIN_CALL_INTERVAL_S and gap > 0:
+            time.sleep(gap + random.uniform(0, CALL_JITTER_S))
+
+        _pace["calls_since_check"] += 1
+        due = (BUDGET_FLOOR
+               and _pace["calls_since_check"] >= BUDGET_RECHECK_CALLS)
+        if due:
+            _pace["calls_since_check"] = 0
+            left = budget_remaining()
+            if left is not None and left < BUDGET_FLOOR:
+                wait, _kind = rate_limit_wait()
+                say(f"budget down to {left}, below the {BUDGET_FLOOR} floor — "
+                    f"holding {wait}s so other tools keep their share")
+                time.sleep(wait)
+        _pace["last_call_at"] = time.time()
+
 # A quota pause is not a failed request, so it must not spend the retry budget
 # meant for real errors. It gets its own, larger budget: the escalation above
 # spans about 2.2 hours, which covers a secondary limit without hanging for ever
@@ -799,13 +887,14 @@ def gh(*args: str, retries: int = 6) -> dict | list | None:
     # limit to lift. A pause is not a failed request, and spending the error
     # budget on it is what let six 120s sleeps abort a 24,405-row pass.
     while attempt < retries and quota_pauses < MAX_QUOTA_PAUSES:
+        pace_call()                           # never burst; see MIN_CALL_INTERVAL_S
         try:
             p = subprocess.run(["gh", "api", *args], capture_output=True,
                                text=True, timeout=60)
         except Exception as e:
             # gh missing, timeout, or the network down. All transient.
             detail, transient = f"subprocess: {e}", True
-            time.sleep(2 ** attempt)
+            time.sleep(backoff(attempt))
             attempt += 1
             continue
         if p.returncode == 0 and p.stdout.strip():
@@ -827,7 +916,7 @@ def gh(*args: str, retries: int = 6) -> dict | list | None:
             continue                          # does not spend the error budget
         if any(pat in err for pat in SERVER_PATTERNS):
             transient = True
-        time.sleep(2 ** attempt)              # backoff for server and unknown alike
+        time.sleep(backoff(attempt))          # backoff for server and unknown alike
         attempt += 1
     if transient or not detail:
         raise RateLimited(f"{' '.join(args)}: {detail}")
