@@ -5,6 +5,11 @@ runs.log
 metrics.tsv
 smoke-*.log
 
+# Per-project run state: logs/ and the single-instance lock, one directory per
+# project. Derived from a run. It lives here rather than in the project workdir
+# because run_pipeline_process.sh deletes that workdir (see STATE in ctp.py).
+state/
+
 # Test environment and coverage output. run_tests.sh rebuilds the first; the rest
 # are derived from a run.
 .venv/
