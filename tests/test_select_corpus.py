@@ -1231,9 +1231,11 @@ def test_parse_cncf_reads_repo_url_and_the_nearest_name(sandbox):
         "    items:",
         "      - item:",
         "        name: Kubernetes",
+        "        project: graduated",
         "        repo_url: https://github.com/kubernetes/kubernetes",
         "      - name: etcd",
         "        repo_url: 'https://github.com/etcd-io/etcd'",
+        "        project: graduated",
         "      - item:",
         "        name: NoRepo",
     ]))
@@ -1241,7 +1243,79 @@ def test_parse_cncf_reads_repo_url_and_the_nearest_name(sandbox):
     assert [(r["repo"], r["roster_name"]) for r in rows] == [
         ("kubernetes", "Kubernetes"), ("etcd", "etcd")]
     assert {r["stratum"] for r in rows} == {"foundation"}
-    assert {r["fact"] for r in rows} == {"F1_roster:cncf"}
+    assert {r["fact"] for r in rows} == {"F1_roster:cncf-graduated"}
+
+
+def test_parse_cncf_pairs_project_and_repo_url_in_either_order(sandbox):
+    """`project:` may precede or follow `repo_url:` inside one item.
+
+    A line-at-a-time pass cannot pair them, which is why the parser buffers.
+    """
+    write(sc.CACHE / "roster-cncf.raw", "\n".join([
+        "      - item:",
+        "        project: incubating",
+        "        name: Before",
+        "        repo_url: https://github.com/o/before",
+        "      - item:",
+        "        name: After",
+        "        repo_url: https://github.com/o/after",
+        "        project: sandbox",
+    ]))
+    facts = {r["repo"]: r["fact"] for r in sc.parse_cncf()}
+    assert facts == {"before": "F1_roster:cncf-incubating",
+                     "after": "F1_roster:cncf-sandbox"}
+
+
+def test_parse_cncf_does_not_call_a_catalogued_project_a_foundation(sandbox):
+    """**The CNCF landscape is not the CNCF.**
+
+    The file catalogues the whole cloud-native ecosystem. Only an entry with a
+    `project:` key donated its trademark, which is what makes F1 a control fact.
+    Before this fix, 734 catalogued entries were labelled `foundation`, which put
+    postgres/postgres and redis/redis in the foundation stratum. PostgreSQL is
+    the canonical mailing-list community project, and Redis Ltd relicensed Redis
+    in 2024. Neither error was visible in the counts.
+    """
+    write(sc.CACHE / "roster-cncf.raw", "\n".join([
+        "      - item:",
+        "        name: PostgreSQL",
+        "        repo_url: https://github.com/postgres/postgres",
+        "      - item:",
+        "        name: Kubernetes",
+        "        project: graduated",
+        "        repo_url: https://github.com/kubernetes/kubernetes",
+    ]))
+    rows = {r["repo"]: r for r in sc.parse_cncf()}
+    assert rows["postgres"]["stratum"] != "foundation"
+    assert rows["postgres"]["fact"] == "F1_pool:cncf-landscape"
+    assert rows["postgres"]["weak"] is True, "F2 must be free to relabel a pool row"
+    assert rows["kubernetes"]["stratum"] == "foundation"
+
+
+def test_parse_cncf_treats_an_archived_project_as_hosted(sandbox):
+    """An archived CNCF project still donated its trademark, so F1 holds.
+
+    The staleness filter removes it later if it is dead. That is a separate
+    decision from who controls it.
+    """
+    write(sc.CACHE / "roster-cncf.raw", "\n".join([
+        "      - item:",
+        "        name: Old",
+        "        project: archived",
+        "        repo_url: https://github.com/o/old",
+    ]))
+    assert sc.parse_cncf()[0]["fact"] == "F1_roster:cncf-archived"
+
+
+def test_parse_cncf_ignores_an_unknown_hosting_level(sandbox):
+    """An unrecognised `project:` value is not evidence of hosting."""
+    write(sc.CACHE / "roster-cncf.raw", "\n".join([
+        "      - item:",
+        "        name: Odd",
+        "        project: rumoured",
+        "        repo_url: https://github.com/o/odd",
+    ]))
+    assert sc.parse_cncf()[0]["fact"] == "F1_pool:cncf-landscape"
 
 
 def test_parse_cncf_skips_an_unparseable_repo_url(sandbox):
@@ -1386,12 +1460,17 @@ def test_collect_maps_a_legacy_stratum_name_forward(no_api_sources):
 
 
 def test_collect_runs_a_roster_parser_when_its_cache_exists(no_api_sources):
-    """A cached roster is parsed; the stratum comes from the roster."""
+    """A cached roster is parsed; the stratum comes from the roster.
+
+    The entry needs `project:` to be a CNCF-hosted project. Without it the
+    landscape only catalogues it, and the label stays open for F2.
+    """
     write(sc.CACHE / "roster-cncf.raw",
-          "      - name: etcd\n        repo_url: https://github.com/etcd-io/etcd")
+          "      - name: etcd\n        project: graduated\n"
+          "        repo_url: https://github.com/etcd-io/etcd")
     row = by_slug(sc.collect_candidates())[("etcd-io", "etcd")]
     assert row["stratum"] == "foundation"
-    assert row["fact"] == "F1_roster:cncf"
+    assert row["fact"] == "F1_roster:cncf-graduated"
 
 
 def test_collect_survives_a_broken_roster_cache(no_api_sources, capsys):

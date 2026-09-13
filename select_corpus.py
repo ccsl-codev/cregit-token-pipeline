@@ -502,21 +502,68 @@ def parse_ghsearch() -> list[dict]:
     return out
 
 
+# CNCF hosting levels. Only an entry carrying one of these has donated its
+# trademark to the Linux Foundation, which is what makes F1 a control fact.
+CNCF_HOSTED = {"graduated", "incubating", "sandbox", "archived"}
+
+
 def parse_cncf() -> list[dict]:
-    """landscape.yml without a yaml dep: pull `repo_url` and the nearest name."""
+    """landscape.yml without a yaml dep: buffer each item, then judge it.
+
+    The distinction this function exists to make: **the CNCF landscape is not
+    the CNCF.** The file catalogues the whole cloud-native ecosystem, and only an
+    entry with a `project:` key is actually CNCF-hosted. 256 of them are, against
+    988 repository URLs in the file.
+
+    Reading every URL as a foundation roster put `postgres/postgres` and
+    `redis/redis` in the foundation stratum. PostgreSQL is the canonical
+    mailing-list community project, and Redis Ltd relicensed Redis in 2024. Both
+    labels were wrong, and neither error was visible in the counts.
+
+    So an item splits two ways:
+      hosted     -> foundation, fact F1_roster:cncf-<level>. A real control fact.
+      catalogued -> an OPEN label. Good candidate pool, no control fact, so F2
+                    decides and community is the residual.
+
+    Buffering matters because `project:` and `repo_url:` sit in the same item in
+    either order, so a line-at-a-time pass cannot pair them.
+    """
     text = (CACHE / "roster-cncf.raw").read_text(errors="replace")
-    out, name = [], ""
+    out: list[dict] = []
+
+    def flush(item: dict) -> None:
+        s = slug(item.get("repo_url", ""))
+        if not s:
+            return
+        level = item.get("project", "").strip().strip("'\"").lower()
+        if level in CNCF_HOSTED:
+            out.append(dict(source="cncf", stratum="foundation",
+                            fact=f"F1_roster:cncf-{level}", owner=s[0], repo=s[1],
+                            roster_lang="", roster_name=item.get("name", s[1])))
+        else:
+            out.append(dict(source="cncf-landscape", stratum="community",
+                            fact="F1_pool:cncf-landscape", weak=True,
+                            owner=s[0], repo=s[1], roster_lang="",
+                            roster_name=item.get("name", s[1])))
+
+    item: dict = {}
     for line in text.splitlines():
         st = line.strip()
         if st.startswith("- item:") or st.startswith("- name:"):
-            name = st.split(":", 1)[1].strip().strip("'\"") if ":" in st else ""
-        elif st.startswith("name:"):
-            name = st.split(":", 1)[1].strip().strip("'\"")
-        elif st.startswith("repo_url:"):
-            s = slug(st.split(":", 1)[1].strip().strip("'\""))
-            if s:
-                out.append(dict(source="cncf", stratum="foundation", fact="F1_roster:cncf",
-                                owner=s[0], repo=s[1], roster_lang="", roster_name=name))
+            flush(item)
+            item = {}
+            if ":" in st and st.startswith("- name:"):
+                item["name"] = st.split(":", 1)[1].strip().strip("'\"")
+            continue
+        for key in ("name", "repo_url", "project"):
+            if st.startswith(f"{key}:") and key not in item:
+                item[key] = st.split(":", 1)[1].strip().strip("'\"")
+                break
+    flush(item)
+
+    hosted = sum(1 for r in out if r["stratum"] == "foundation")
+    say(f"  cncf: {hosted} hosted (F1 control fact), "
+        f"{len(out) - hosted} catalogued only (pool, label stays open)")
     return out
 
 
