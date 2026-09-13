@@ -1604,7 +1604,7 @@ def test_emit_manifest_has_the_documented_header_and_five_fields(sandbox, monkey
     assert len(data) == 1                                  # only the eligible row
     fields = data[0].split("\t")
     assert len(fields) == 5
-    assert fields[0] == "keep"
+    assert fields[0] == "acme__keep", "the manifest key must carry the owner"
     assert fields[1] == "https://github.com/acme/keep.git"
     assert fields[2] == "community"
     assert fields[3] == sc.LANG_FILTER["C"]
@@ -1612,14 +1612,33 @@ def test_emit_manifest_has_the_documented_header_and_five_fields(sandbox, monkey
 
 
 def test_emit_manifest_name_is_lowercased_with_dots_replaced(sandbox, monkeypatch):
-    """The name becomes a directory, so `vert.x` must not create a suffix."""
+    """The name becomes a directory, so `vert.x` must not create a suffix. The
+    owner is kept, because the name must also be unique across owners."""
     write(sc.CACHE / "repo-meta.json", json.dumps({
         "eclipse/vert.x": good_meta(full_name="eclipse/Vert.X")}))
     monkeypatch.setattr(sc, "collect_candidates",
                         lambda: [cand(owner="eclipse", repo="Vert.X",
                                       fact="F1_roster:eclipse", stratum="foundation")])
     sc.cmd_emit(emit_args())
-    assert manifest_lines(sc.MANIFEST_OUT)[1][0].split("\t")[0] == "vert-x"
+    assert manifest_lines(sc.MANIFEST_OUT)[1][0].split("\t")[0] == "eclipse__vert-x"
+
+
+def test_emit_manifest_names_are_unique_across_every_row(sandbox, monkeypatch):
+    """The property that matters, asserted on the artefact rather than on the
+    helper: two repositories sharing a name would share a workdir, a lock and a
+    completion stamp in ctp.py."""
+    owners = ["apolloconfig", "ClassicOldSong", "ApolloAuto"]
+    write(sc.CACHE / "repo-meta.json", json.dumps({
+        f"{o}/apollo": good_meta(full_name=f"{o}/apollo",
+                                 clone_url=f"https://github.com/{o}/apollo.git")
+        for o in owners}))
+    monkeypatch.setattr(sc, "collect_candidates",
+                        lambda: [cand(owner=o, repo="apollo") for o in owners])
+
+    sc.cmd_emit(emit_args())
+    names = [line.split("\t")[0] for line in manifest_lines(sc.MANIFEST_OUT)[1]]
+    assert len(names) == 3, f"expected all three rows, got {names}"
+    assert len(set(names)) == 3, f"names still collide: {names}"
 
 
 def test_emit_per_stratum_caps_each_stratum(sandbox, monkeypatch):
@@ -2161,3 +2180,47 @@ def test_review_survives_blank_numeric_fields(sandbox):
     """An unenriched row has no stars and no commits. That must not crash."""
     review_csv([review_row(repo="bare", stars="", commits="", language="")])
     assert sc.cmd_review(SimpleNamespace()) == 0
+
+
+# --------------------------------------------------------------------------- #
+# project_name: the manifest key
+# --------------------------------------------------------------------------- #
+
+def test_project_name_includes_the_owner():
+    """Repository names are not unique across owners. The name became the workdir,
+    the lock and the stamp in ctp.py, so a collision made two projects share one
+    directory and one stamped the other DONE."""
+    assert sc.project_name("redis", "redis") == "redis__redis"
+    assert sc.project_name("tporadowski", "redis") == "tporadowski__redis"
+    assert sc.project_name("redis", "redis") != sc.project_name("tporadowski", "redis")
+
+
+def test_project_name_separates_the_apollo_collision_across_strata():
+    """The real case that made this a correctness defect rather than a nuisance:
+    three apollo rows, two community and one company-owned. Sharing a name meant
+    the published parquet could carry one repository's tokens under another
+    repository's stratum, which is the study's independent variable."""
+    names = {sc.project_name(o, "apollo")
+             for o in ("apolloconfig", "ClassicOldSong", "ApolloAuto")}
+    assert len(names) == 3, f"apollo rows still collide: {names}"
+
+
+@pytest.mark.parametrize("owner, repo, expected", [
+    ("Genymobile", "scrcpy", "genymobile__scrcpy"),
+    ("apache", "commons-lang", "apache__commons-lang"),
+    ("rust-lang", "rustlings", "rust-lang__rustlings"),
+    ("foo", "bar.baz", "foo__bar-baz"),          # a dot is not path-friendly
+    ("some_org", "under_score", "some-org__under-score"),
+    ("Weird", "a  b", "weird__a-b"),             # runs collapse to one hyphen
+    ("-lead-", "-trail-", "lead__trail"),        # no leading or trailing hyphen
+])
+def test_project_name_is_lowercase_and_path_safe(owner, repo, expected):
+    """The name is used as a directory component and as a Parquet filename
+    prefix, so only lowercase letters, digits and hyphens may survive."""
+    assert sc.project_name(owner, repo) == expected
+
+
+def test_project_name_never_contains_a_slash():
+    """run_pipeline_process.sh exits 2 on a --repo-name holding '/', so
+    owner/repo cannot be passed through even though it is the natural key."""
+    assert "/" not in sc.project_name("a/b", "c/d")

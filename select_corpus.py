@@ -62,6 +62,34 @@ CACHE = CORPUS / ".corpus-cache"
 CANDIDATES = CORPUS / "candidates.csv"
 MANIFEST_OUT = CORPUS / "manifest.generated.tsv"
 
+# Anything outside this set becomes a hyphen, so a name is safe as a directory
+# component, as a Parquet filename prefix and as a TSV field.
+_UNSAFE_IN_NAME = re.compile(r"[^a-z0-9-]+")
+
+
+def _slug(part: str) -> str:
+    return _UNSAFE_IN_NAME.sub("-", part.strip().lower()).strip("-")
+
+
+def project_name(owner: str, repo: str) -> str:
+    """A unique, filesystem-safe key for one repository.
+
+    The owner is part of the key, and must be. Repository names are not unique
+    across owners: 20 names collided across 42 of 1,974 manifest rows when this
+    was built from the repository alone.
+
+    A collision was not cosmetic. ctp.py keys the project workdir, the
+    single-instance lock and the completion stamp on this name, so colliding rows
+    shared one directory: whichever validated first stamped the others DONE, and
+    the published parquet held one repository's tokens. `apollo` collided across
+    strata — two community rows and one company-owned row — so the corrupted
+    column was the study's independent variable.
+
+    Joined with '__' because run_pipeline_process.sh refuses a --repo-name that
+    contains '/', so `owner/repo` cannot be passed through.
+    """
+    return f"{_slug(owner)}__{_slug(repo)}"
+
 # Only languages cregit can tokenize. m4 is omitted on purpose: it appears as
 # .am/.ac build files, never as a project's primary language.
 LANG_FILTER = {
@@ -1020,9 +1048,8 @@ def cmd_emit(args: argparse.Namespace) -> int:
                 f"{len(picked)} projects; labels from control facts\n")
         f.write("# size_class: S < 30k commits | M 30k-150k | L > 150k\n")
         for r in picked:
-            name = r["repo"].lower().replace(".", "-")
-            f.write(f"{name}\t{r['clone_url']}\t{r['stratum']}\t"
-                    f"{LANG_FILTER[r['language']]}\t{r['size_class']}\n")
+            f.write(f"{project_name(r['owner'], r['repo'])}\t{r['clone_url']}\t"
+                    f"{r['stratum']}\t{LANG_FILTER[r['language']]}\t{r['size_class']}\n")
     say(f"wrote {MANIFEST_OUT} ({len(picked)} projects)")
 
     counts: dict[tuple[str, str], int] = {}
