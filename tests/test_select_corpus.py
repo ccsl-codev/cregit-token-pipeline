@@ -64,6 +64,9 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "MANIFEST_OUT", tmp_path / "manifest.generated.tsv")
     monkeypatch.setattr(sc, "SPINELLIS_TSV", sources / "enterprise_projects.txt")
     monkeypatch.setattr(sc, "COHORT_TSV", sources / "cohort_project_details.txt")
+    # REVIEW_OUT is derived from CORPUS at import time, so patching CORPUS alone
+    # would let cmd_review overwrite the real docs/CORPUS-REVIEW.md.
+    monkeypatch.setattr(sc, "REVIEW_OUT", tmp_path / "docs" / "CORPUS-REVIEW.md")
 
     slept: list[float] = []
     monkeypatch.setattr(sc.time, "sleep", lambda s: slept.append(s))
@@ -726,8 +729,12 @@ def test_judge_includes_a_clean_row():
 
 
 @pytest.mark.parametrize("patch, expected", [
+    # judge() reports WHICH error, because the three mean different things: gone,
+    # not yet fetched, and a state gh() does not recognise. Collapsing them into
+    # one word made 20,457 pending rows read as dead repositories in the review.
     ({"error": "unreachable"}, "unreachable"),
-    ({"error": "not-enriched"}, "unreachable"),
+    ({"error": "not-enriched"}, "not-enriched"),
+    ({"error": "unclassified"}, "unclassified"),
     ({"archived": True}, "archived"),
     ({"fork": True}, "fork"),
     ({"language": "Python"}, "lang=Python"),
@@ -1470,11 +1477,17 @@ def test_emit_metadata_lookup_is_case_insensitive(sandbox, monkeypatch):
 
 
 def test_emit_reports_a_candidate_that_was_never_enriched(sandbox, monkeypatch):
-    """A missing record is an exclusion reason, not a crash."""
+    """A missing record is an exclusion reason, not a crash.
+
+    It must say `not-enriched`, not `unreachable`. A pending row and a dead
+    repository are different facts, and the corpus review reports them apart.
+    """
     write(sc.CACHE / "repo-meta.json", json.dumps({}))
     monkeypatch.setattr(sc, "collect_candidates", lambda: [cand()])
     sc.cmd_emit(emit_args())
-    assert "unreachable" in read_csv_rows(sc.CANDIDATES)[0]["excluded_because"]
+    reason = read_csv_rows(sc.CANDIDATES)[0]["excluded_because"]
+    assert "not-enriched" in reason
+    assert "unreachable" not in reason
 
 
 def test_emit_candidates_csv_holds_every_candidate(sandbox, monkeypatch):
@@ -1845,3 +1858,227 @@ def test_main_requires_a_subcommand(sandbox, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["select_corpus.py"])
     with pytest.raises(SystemExit):
         sc.main()
+
+
+# ================================================================ GhFailed paths
+#
+# gh() raises GhFailed when GitHub answers with a state the classifier does not
+# know. A DMCA-blocked repository (HTTP 451) was exactly that, and it aborted a
+# 24,405-candidate pass after 154 repositories. So every caller must degrade
+# instead of propagating, and only RateLimited may stop a run.
+
+
+UNKNOWN = "gh: teapot (HTTP 418)"
+
+
+def test_gh_raises_ghfailed_for_an_unrecognised_state(sandbox, monkeypatch):
+    """An unknown state is neither gone nor transient. It must be distinguishable."""
+    monkeypatch.setattr(sc.subprocess, "run", runner(rc=1, err=UNKNOWN))
+    with pytest.raises(sc.GhFailed):
+        sc.gh("repos/acme/widget", retries=2)
+
+
+def test_gh_raises_ratelimited_when_the_subprocess_itself_fails(sandbox, monkeypatch):
+    """A network failure is transient, so it must raise RateLimited, not GhFailed.
+
+    Before the fix this raised GhFailed, which made cmd_enrich record a live
+    repository as permanently unclassified whenever the network blinked.
+    """
+    monkeypatch.setattr(sc.subprocess, "run",
+                        runner(raises=OSError("network is unreachable")))
+    with pytest.raises(sc.RateLimited):
+        sc.gh("repos/acme/widget", retries=2)
+
+
+@pytest.mark.parametrize("err", ["HTTP 502: Bad Gateway", "gh: 503 unavailable",
+                                 "dial tcp: no such host"])
+def test_gh_treats_a_server_failure_as_transient(sandbox, monkeypatch, err):
+    """A 5xx is not a quota problem, but it is still transient."""
+    monkeypatch.setattr(sc.subprocess, "run", runner(rc=1, err=err))
+    with pytest.raises(sc.RateLimited):
+        sc.gh("repos/acme/widget", retries=2)
+
+
+@pytest.mark.parametrize("err", ["gh: Repository access blocked (HTTP 451)",
+                                 "gh: Gone (HTTP 410)"])
+def test_gh_treats_a_blocked_or_removed_repo_as_gone(sandbox, monkeypatch, err):
+    """451 and 410 are permanent. Caching them as dead is correct and saves quota.
+
+    A DMCA-blocked repository is what aborted the first full enrich pass.
+    """
+    monkeypatch.setattr(sc.subprocess, "run", runner(rc=1, err=err))
+    assert sc.gh("repos/acme/widget", retries=2) is None
+
+
+def test_commit_count_returns_none_on_ghfailed(sandbox, monkeypatch):
+    """One odd repository costs its commit count, not the whole pass."""
+    monkeypatch.setattr(sc, "gh", lambda *a, **k: (_ for _ in ()).throw(sc.GhFailed("x")))
+    assert sc.commit_count("acme", "widget") is None
+
+
+def test_commit_count_still_propagates_ratelimited(sandbox, monkeypatch):
+    """Only RateLimited may stop a run, so it must not be swallowed here."""
+    monkeypatch.setattr(sc, "gh",
+                        lambda *a, **k: (_ for _ in ()).throw(sc.RateLimited("x")))
+    with pytest.raises(sc.RateLimited):
+        sc.commit_count("acme", "widget")
+
+
+def test_org_is_company_claims_nothing_on_ghfailed(sandbox, monkeypatch):
+    """An unreadable namespace must not become a company by accident."""
+    monkeypatch.setattr(sc, "gh", lambda *a, **k: (_ for _ in ()).throw(sc.GhFailed("x")))
+    cache: dict = {}
+    assert sc.org_is_company("mystery", cache) == (False, "")
+
+
+def test_parse_company_orgs_skips_an_org_that_fails(sandbox, monkeypatch):
+    """One unreadable company namespace must not lose the other sixty."""
+    calls = []
+
+    def fake_gh(path, *a, **k):
+        calls.append(path)
+        if path.startswith("orgs/aws/"):
+            raise sc.GhFailed("aws exploded")
+        return [{"name": "thing", "language": "C", "fork": False, "archived": False}]
+
+    monkeypatch.setattr(sc, "gh", fake_gh)
+    monkeypatch.setattr(sc, "COMPANY_ORGS", {"aws", "google"})
+    out = sc.parse_company_orgs()
+    assert [r["owner"] for r in out] == ["google"]
+    assert len(calls) == 2
+
+
+def test_enrich_records_an_unclassified_repo_and_carries_on(sandbox, monkeypatch):
+    """A single unknown state must not abort the pass; it must leave a detail.
+
+    Before the fix, one DMCA-blocked repository ended a 24,405-candidate run.
+    """
+    monkeypatch.setattr(sc, "collect_candidates",
+                        lambda: [cand(repo="blocked"), cand(repo="fine")])
+    monkeypatch.setattr(sc, "commit_count", lambda o, r: 1_234)
+    monkeypatch.setattr(sc, "org_is_company", lambda login, cache: (False, ""))
+
+    def fake_gh(path, *a, **k):
+        if path.endswith("blocked"):
+            raise sc.GhFailed("repos/acme/blocked: teapot")
+        return repo_payload(full_name="acme/fine")
+
+    monkeypatch.setattr(sc, "gh", fake_gh)
+    assert sc.cmd_enrich(SimpleNamespace(limit=0, retry_errors=False)) == 0
+    meta = json.loads((sc.CACHE / "repo-meta.json").read_text())
+    assert meta["acme/blocked"]["error"] == "unclassified"
+    assert "teapot" in meta["acme/blocked"]["detail"]
+    assert meta["acme/fine"]["language"] == "C"
+
+
+# ================================================================ cmd_review()
+
+
+def review_csv(rows: list[dict]) -> None:
+    """Write a candidates.csv exactly as cmd_emit does."""
+    import csv
+    cols = ["source", "stratum", "fact", "contested", "label_date", "owner", "repo",
+            "roster_name", "roster_lang", "language", "commits", "size_class",
+            "size_kb", "stars", "pushed_at", "license", "owner_type", "archived",
+            "fork", "clone_url", "included", "excluded_because"]
+    sc.CANDIDATES.parent.mkdir(parents=True, exist_ok=True)
+    with sc.CANDIDATES.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            base = {c: "" for c in cols}
+            base.update(r)
+            w.writerow(base)
+
+
+def review_row(**over) -> dict:
+    r = dict(source="ghsearch", stratum="community", fact="F1_residual:none",
+             contested="", owner="acme", repo="widget", language="C", commits="1000",
+             size_class="S", stars="100", included="True", excluded_because="")
+    r.update(over)
+    return r
+
+
+def test_review_needs_candidates_csv_first(sandbox):
+    """Without the decision record there is nothing to review."""
+    assert sc.cmd_review(SimpleNamespace()) == 1
+
+
+def test_review_reports_the_three_totals(sandbox):
+    """The header must reconcile: candidates = eligible + excluded."""
+    review_csv([review_row(),
+                review_row(repo="dead", included="False",
+                           excluded_because="unreachable")])
+    assert sc.cmd_review(SimpleNamespace()) == 0
+    text = sc.REVIEW_OUT.read_text()
+    assert "- candidates: **2**" in text
+    assert "- eligible: **1**" in text
+    assert "- excluded: **1**" in text
+
+
+def test_review_warns_when_enrichment_is_incomplete(sandbox):
+    """A partial snapshot must say so, or someone freezes the corpus from it."""
+    review_csv([review_row(repo="pending", included="False",
+                           excluded_because="not-enriched")])
+    sc.cmd_review(SimpleNamespace())
+    assert "partial snapshot" in sc.REVIEW_OUT.read_text()
+
+
+def test_review_is_silent_when_enrichment_is_complete(sandbox):
+    """No false alarm once every candidate has been fetched."""
+    review_csv([review_row()])
+    sc.cmd_review(SimpleNamespace())
+    assert "partial snapshot" not in sc.REVIEW_OUT.read_text()
+
+
+def test_review_splits_one_row_into_several_reasons(sandbox):
+    """A row can fail several filters, and the flow table counts each one."""
+    review_csv([review_row(included="False",
+                           excluded_because="lang=Python; size=10kb; archived")])
+    sc.cmd_review(SimpleNamespace())
+    text = sc.REVIEW_OUT.read_text()
+    for reason in ("`lang=...`", "`size=...`", "`archived`"):
+        assert reason in text
+
+
+def test_review_lists_every_contested_case_including_excluded_ones(sandbox):
+    """A contested label is a human decision, so none may be hidden."""
+    review_csv([review_row(repo="a", contested="F1_roster:cncf vs F2_org:alibaba"),
+                review_row(repo="b", contested="F1_roster:asf vs F2_org:aws",
+                           included="False", excluded_because="archived")])
+    sc.cmd_review(SimpleNamespace())
+    text = sc.REVIEW_OUT.read_text()
+    assert "## 4. Contested cases — 2" in text
+    assert "acme/a" in text and "acme/b" in text
+
+
+def test_review_names_the_foundation_namespace_fact_correctly(sandbox):
+    """F2_org_foundation must not read as a company. Longest match wins."""
+    review_csv([review_row(fact="F2_org_foundation:apache")])
+    sc.cmd_review(SimpleNamespace())
+    assert "a foundation namespace owns the repository" in sc.REVIEW_OUT.read_text()
+
+
+def test_review_flags_the_weakest_evidence_separately(sandbox):
+    """Cohort rows rest on an ABSENCE of evidence, so they get their own section."""
+    review_csv([review_row(source="cohort", repo="weak",
+                           fact="F1_pool:spinellis-cohort")])
+    sc.cmd_review(SimpleNamespace())
+    text = sc.REVIEW_OUT.read_text()
+    assert "## 6. Weakest evidence" in text
+    assert "acme/weak" in text
+
+
+def test_review_sorts_the_largest_projects_first(sandbox):
+    """A mislabel costs most on the biggest project, so those are listed first."""
+    review_csv([review_row(repo="small", stars="1"),
+                review_row(repo="huge", stars="90000")])
+    sc.cmd_review(SimpleNamespace())
+    text = sc.REVIEW_OUT.read_text()
+    assert text.index("acme/huge") < text.index("acme/small")
+
+
+def test_review_survives_blank_numeric_fields(sandbox):
+    """An unenriched row has no stars and no commits. That must not crash."""
+    review_csv([review_row(repo="bare", stars="", commits="", language="")])
+    assert sc.cmd_review(SimpleNamespace()) == 0
