@@ -2,7 +2,7 @@
 
 No test starts a real process. The autouse `sandbox` fixture replaces
 subprocess.run and subprocess.Popen with a guard that raises, and moves every
-path constant (CORPUS, OUT, CREGIT, METRICS, RUNS_LOG) into tmp_path. A test
+path constant (CORPUS, OUT, CREGIT, STATE, METRICS, RUNS_LOG) into tmp_path. A test
 that needs a subprocess installs its own recording fake. Nothing here touches
 the real corpus-files tree, metrics.tsv, runs.log or ctp.duckdb.
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import shutil
 import threading
 import time
 from contextlib import contextmanager
@@ -153,12 +154,21 @@ def sandbox(tmp_path, monkeypatch):
     out.mkdir()
     cregit = tmp_path / "cregit"
     cregit.mkdir()
+    # The sandbox stands for a REAL configured checkout, so it advertises the
+    # flags the real runner advertises. An empty CREGIT is what let ctp send
+    # --work-dir/--file-filter unnoticed: cmd_run's preflight had nothing to read.
+    # A test that needs another runner calls the runner_script fixture.
+    (cregit / "run_pipeline_process.sh").write_text(REAL_RUNNER_USAGE)
 
     monkeypatch.setattr(ctp, "CORPUS", tmp_path)
     monkeypatch.setattr(ctp, "OUT", out)
     monkeypatch.setattr(ctp, "CREGIT", cregit)
     monkeypatch.setattr(ctp, "METRICS", tmp_path / "metrics.tsv")
     monkeypatch.setattr(ctp, "RUNS_LOG", tmp_path / "runs.log")
+    # STATE holds the logs and the per-project lock. Without this patch the tests
+    # would write both into the real repository. That is the stray-file class the
+    # absolute-stamp assertion in FakeRunner already closed once.
+    monkeypatch.setattr(ctp, "STATE", tmp_path / "state")
     # A real disk_usage call stays, but the floor can never trip by accident.
     monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 0)
     monkeypatch.setattr(ctp.time, "sleep", lambda *a, **k: None)
@@ -295,9 +305,10 @@ def test_script_supports_reads_the_configured_runner(runner_script, text, flag, 
     assert ctp.script_supports(flag) is expected
 
 
-def test_script_supports_returns_false_when_the_script_is_missing():
+def test_script_supports_returns_false_when_the_script_is_missing(sandbox):
     """A missing checkout must report 'unsupported', never raise: cmd_run calls
     this before anything else and a traceback there hides the real problem."""
+    (sandbox.cregit / "run_pipeline_process.sh").unlink()
     assert ctp.script_supports("--skip-html") is False
 
 
@@ -320,7 +331,7 @@ def test_second_concurrent_run_of_the_same_project_is_deferred(sandbox, runner, 
     """Locking contract: one project, one worker. Two tokenizers in the same
     workdir corrupt blobExec's incremental state."""
     (sandbox.out / "jq").mkdir()
-    with held_lock(sandbox.out / "jq" / ".lock"):
+    with held_lock(ctp.lock_path("jq")):
         assert ctp.run_project(jq) == "deferred"
     assert runner.calls == []
 
@@ -328,14 +339,14 @@ def test_second_concurrent_run_of_the_same_project_is_deferred(sandbox, runner, 
 def test_lock_is_released_after_a_successful_project(sandbox, runner, jq):
     """A leaked lock makes the next run report the project as RUNNING for ever."""
     assert ctp.run_project(jq) == "done"
-    assert lock_is_free(sandbox.out / "jq" / ".lock")
+    assert lock_is_free(ctp.lock_path("jq"))
 
 
 def test_lock_is_released_after_a_failed_project(sandbox, monkeypatch, jq):
     """Same contract on the failure path, which is the common one."""
     monkeypatch.setattr(ctp.subprocess, "run", FakeRunner(pipeline_rc=2))
     assert ctp.run_project(jq) == "failed"
-    assert lock_is_free(sandbox.out / "jq" / ".lock")
+    assert lock_is_free(ctp.lock_path("jq"))
 
 
 def test_lock_is_released_when_the_subprocess_raises(sandbox, monkeypatch, jq):
@@ -344,7 +355,7 @@ def test_lock_is_released_when_the_subprocess_raises(sandbox, monkeypatch, jq):
     monkeypatch.setattr(ctp.subprocess, "run", FakeRunner(raise_on="pipeline"))
     with pytest.raises(OSError):
         ctp.run_project(jq)
-    assert lock_is_free(sandbox.out / "jq" / ".lock")
+    assert lock_is_free(ctp.lock_path("jq"))
 
 
 # --------------------------------------------------------------------------- #
@@ -364,6 +375,24 @@ def test_skip_html_is_absent_when_the_flag_is_off(runner, jq):
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
     assert "--skip-html" not in runner.argv("pipeline")
+
+
+def test_run_refuses_to_start_when_the_runner_lacks_a_required_flag(
+        sandbox, monkeypatch, runner_script):
+    """Defect D1, turned into a gate. Every project passes --work and --mask, so a
+    runner that does not know them costs one exit-2 per project and produces
+    nothing. Refuse once instead, before the devenv capture starts anything.
+    """
+    runner_script(REAL_RUNNER_USAGE.replace("--mask", "--file-filter"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    args = argparse.Namespace(manifest="manifest.tsv", only=None, jobs=1, retries=0,
+                              skip_html=False, drop_memo=False)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(args)
+    assert "does not accept: --mask" in str(exc.value)
+    assert not (sandbox.root / "runs.log").exists()
 
 
 def test_run_refuses_to_start_when_the_runner_lacks_skip_html(
@@ -473,13 +502,11 @@ def test_drop_memo_reports_when_retain_refuses(monkeypatch, capsys, runner, jq):
 # --------------------------------------------------------------------------- #
 
 def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
-    """Locks in the argv ctp builds today.
+    """Locks in the argv ctp builds.
 
-    KNOWN DEFECT, deliberately not fixed here: the configured runner
-    (cregit-issue61/run_pipeline_process.sh) accepts --work and --mask, not
-    --work-dir and --file-filter, and exits 2 on an unknown argument. So this
-    argv makes every pipeline phase fail immediately against that checkout.
-    See test_pipeline_argv_uses_flags_the_runner_accepts below.
+    The flag names are the runner's: run_pipeline_process.sh takes --work and
+    --mask. ctp used to send --work-dir and --file-filter, which the runner
+    rejects with exit 2, so every project failed before doing any work. Defect D1.
     """
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
@@ -488,10 +515,69 @@ def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
         "./run_pipeline_process.sh",
         "--repo-url", "https://github.com/jqlang/jq.git",
         "--repo-name", "jq",
-        "--work-dir", str(sandbox.out / "jq"),
-        "--file-filter", r"\.[ch]$",
+        "--work", str(sandbox.out / "jq"),
+        "--mask", r"\.[ch]$",
     ]
     assert runner.calls[0].kwargs["cwd"] == sandbox.cregit
+
+
+def test_the_log_survives_the_runner_deleting_the_workdir(sandbox, monkeypatch, jq):
+    """Defect D2. run_pipeline_process.sh runs `rm -rf "$WORK"` at FROM_STEP=1 and
+    again from its EXIT trap on failure. $WORK is the project workdir. The log of
+    the failing run used to live inside it, so the evidence died with the run.
+
+    The fake runner deletes the workdir exactly as the real one does.
+    """
+    class WipingRunner(FakeRunner):
+        def __call__(self, args, **kwargs):
+            if self.phase_of(args) == "pipeline":
+                shutil.rmtree(sandbox.out / "jq")
+            return super().__call__(args, **kwargs)
+
+    monkeypatch.setattr(ctp.subprocess, "run", WipingRunner(pipeline_rc=2))
+    assert ctp.run_project(jq) == "failed"
+
+    logs = sorted((ctp.state_dir("jq") / "logs").glob("pipeline-*.log"))
+    assert logs, "the runner's wipe destroyed the log of its own failure"
+    assert not (sandbox.out / "jq").exists()
+
+
+def test_the_lock_survives_the_runner_deleting_the_workdir(sandbox, monkeypatch, jq):
+    """Same wipe, the other casualty. An unlinked lock file still satisfies THIS
+    process, so the guard looked healthy while a second ctp.py could create a new
+    file and take its own lock on the same project.
+    """
+    class WipingRunner(FakeRunner):
+        def __call__(self, args, **kwargs):
+            if self.phase_of(args) == "pipeline":
+                shutil.rmtree(sandbox.out / "jq")
+            return super().__call__(args, **kwargs)
+
+    monkeypatch.setattr(ctp.subprocess, "run", WipingRunner(pipeline_rc=2))
+    ctp.run_project(jq)
+
+    assert ctp.lock_path("jq").exists(), "the lock file went with the workdir"
+    assert not ctp.lock_path("jq").is_relative_to(sandbox.out / "jq")
+
+
+def test_status_reports_failed_after_the_runner_wiped_the_workdir(sandbox, monkeypatch, capsys, jq):
+    """A failed project must not read as QUEUED. The old rule inferred FAILED from
+    the workdir existing, which the runner deletes on failure. state_dir records
+    the attempt instead, and the runner never touches it."""
+    class WipingRunner(FakeRunner):
+        def __call__(self, args, **kwargs):
+            if self.phase_of(args) == "pipeline":
+                shutil.rmtree(sandbox.out / "jq")
+            return super().__call__(args, **kwargs)
+
+    monkeypatch.setattr(ctp.subprocess, "run", WipingRunner(pipeline_rc=2))
+    ctp.run_project(jq)
+    monkeypatch.setattr(ctp.subprocess, "run", forbidden)
+
+    write_manifest(sandbox.root, VALID_ROW)
+    ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv"))
+    line = [l for l in capsys.readouterr().out.splitlines() if l.startswith("jq ")][0]
+    assert "FAILED" in line
 
 
 def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
@@ -505,13 +591,14 @@ def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
     ]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Open defect: ctp builds --work-dir and --file-filter, but the configured "
-    "runner cregit-issue61/run_pipeline_process.sh advertises --work and "
-    "--mask and exits 2 on an unknown argument. Every pipeline phase therefore "
-    "fails at argument parsing. Not fixed here on purpose."))
 def test_pipeline_argv_uses_flags_the_runner_accepts(runner_script, runner, jq):
-    """Every long flag ctp passes must be advertised by the runner."""
+    """Every long flag ctp passes must be advertised by the runner.
+
+    This is the general form of D1. It compares the argv against the runner's own
+    usage text, so it catches a rename in either direction. Keep it even though
+    REQUIRED_RUNNER_FLAGS now preflights: the constant can drift from the argv,
+    and this test reads the argv itself.
+    """
     runner_script()
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
@@ -521,6 +608,20 @@ def test_pipeline_argv_uses_flags_the_runner_accepts(runner_script, runner, jq):
     assert unsupported == []
 
 
+def test_required_runner_flags_are_exactly_what_run_project_sends(runner, jq):
+    """The preflight constant must not drift from the argv it guards.
+
+    cmd_run checks REQUIRED_RUNNER_FLAGS before starting. If run_project later
+    gains a flag that the constant does not list, the preflight passes and the
+    run fails per project instead — D1 again, with a check that looked green.
+    """
+    ctp._OPTS.update(skip_html=False, drop_memo=False)
+    ctp.run_project(jq)
+
+    sent = {a for a in runner.argv("pipeline") if a.startswith("--")}
+    assert sent == set(ctp.REQUIRED_RUNNER_FLAGS)
+
+
 # --------------------------------------------------------------------------- #
 # metrics ledger
 # --------------------------------------------------------------------------- #
@@ -528,7 +629,7 @@ def test_pipeline_argv_uses_flags_the_runner_accepts(runner_script, runner, jq):
 def test_metrics_is_append_only_with_seven_fields_per_row(sandbox):
     """Visibility contract: metrics.tsv is an append-only ledger, one row per
     phase attempt. Rewriting it destroys the benchmark history."""
-    log = sandbox.out / "jq" / "logs" / "pipeline-1.log"
+    log = ctp.state_dir("jq") / "logs" / "pipeline-1.log"
     ctp.record_metric("jq", "S", "pipeline", 34, 139, log)
     first = (sandbox.root / "metrics.tsv").read_text().splitlines()[1]
 
@@ -569,7 +670,7 @@ def test_metrics_row_carries_the_return_code_and_log_path(sandbox, runner, clock
 # --------------------------------------------------------------------------- #
 
 def logs_of(sandbox, name="jq", phase="pipeline"):
-    return sorted((sandbox.out / name / "logs").glob(f"{phase}-2*.log"))
+    return sorted((ctp.state_dir(name) / "logs").glob(f"{phase}-2*.log"))
 
 
 def test_a_second_attempt_does_not_overwrite_the_first_log(
@@ -620,7 +721,7 @@ def test_latest_symlink_points_at_the_newest_attempt(
     clock.moment = datetime(2026, 1, 2, 3, 4, 40)
     ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
 
-    latest = sandbox.out / "jq" / "logs" / "pipeline-latest.log"
+    latest = ctp.state_dir("jq") / "logs" / "pipeline-latest.log"
     assert latest.is_symlink()
     assert Path(latest.readlink()) == logs_of(sandbox)[-1]
 
@@ -629,12 +730,15 @@ def test_latest_symlink_is_created_on_the_first_attempt(
         sandbox, monkeypatch, clock, jq):
     """No prior symlink exists on a fresh project; the swap must still work."""
     monkeypatch.setattr(ctp.subprocess, "run", FakeRunner())
+    # run_project creates the workdir; run_phase no longer does it by accident,
+    # because the log directory moved out of the workdir. See STATE in ctp.py.
+    (sandbox.out / "jq").mkdir()
     stamp = sandbox.out / "jq" / "jq.validated"
     ctp.run_phase(jq, "validate",
                   ["python3", "validate.py", "p.parquet", str(stamp)])
-    latest = sandbox.out / "jq" / "logs" / "validate-latest.log"
+    latest = ctp.state_dir("jq") / "logs" / "validate-latest.log"
     assert latest.is_symlink()
-    assert not (sandbox.out / "jq" / "logs" / ".validate-latest.tmp").exists()
+    assert not (ctp.state_dir("jq") / "logs" / ".validate-latest.tmp").exists()
 
 
 def test_run_phase_records_the_live_phase_for_the_heartbeat(
@@ -851,7 +955,7 @@ def test_cmd_status_classifies_every_project_state(sandbox, capsys):
     (sandbox.out / "running").mkdir()
     ctp.record_metric("done", "S", "validate", 3, 0, Path("/logs/validate-1.log"))
 
-    with held_lock(sandbox.out / "running" / ".lock"):
+    with held_lock(ctp.lock_path("running")):
         assert ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
 
     out = capsys.readouterr().out
@@ -871,13 +975,13 @@ def test_cmd_status_works_without_a_metrics_file(sandbox, capsys):
 
 def test_lock_held_is_false_when_the_lockfile_is_absent(sandbox):
     """A project that never started has no lock and must read QUEUED."""
-    assert ctp._lock_held(sandbox.out / "nope" / ".lock") is False
+    assert ctp._lock_held(ctp.lock_path("nope")) is False
 
 
 def test_lock_held_distinguishes_a_free_lock_from_a_held_one(sandbox):
     """A stale lockfile left by a killed run must not read as RUNNING."""
-    lockfile = sandbox.out / "jq" / ".lock"
-    lockfile.parent.mkdir()
+    lockfile = ctp.lock_path("jq")
+    lockfile.parent.mkdir(parents=True)
     lockfile.touch()
     assert ctp._lock_held(lockfile) is False
     with held_lock(lockfile):

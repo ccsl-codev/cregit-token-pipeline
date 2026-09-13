@@ -21,8 +21,10 @@ Benchmarking/visibility contract (shared with the previous shell runner):
   - metrics.tsv   append-only ledger, one row per phase attempt:
                   iso_start  project  class  phase  duration_s  rc  log
   - runs.log      one start/end row per runner invocation
-  - logs are never overwritten: corpus-files/<name>/logs/<phase>-<ts>.log
-    (<phase>-latest.log symlink points at the newest attempt)
+  - logs are never overwritten: state/<name>/logs/<phase>-<ts>.log
+    (<phase>-latest.log symlink points at the newest attempt). They live beside
+    metrics.tsv, NOT in the project workdir, because run_pipeline_process.sh
+    deletes that workdir on a clean restart. See STATE below.
   - live progress: event lines on phase start/end + heartbeat summary every
     30s (RUNNING projects with elapsed time, done/failed counts, disk free)
 """
@@ -62,6 +64,20 @@ OUT.mkdir(parents=True, exist_ok=True)
 METRICS = CORPUS / "metrics.tsv"
 RUNS_LOG = CORPUS / "runs.log"
 
+# run_pipeline_process.sh owns OUT/<name>: at FROM_STEP=1 it runs `rm -rf "$WORK"`
+# for a clean restart, and its EXIT trap repeats that on failure. So the
+# orchestrator must keep its own files somewhere else. Two things used to live in
+# the wiped directory and both broke silently:
+#   * logs/ — deleted while the pipeline was still writing into it, so the log of
+#     the failure went to an unlinked inode and the evidence was lost.
+#   * .lock — the open handle survived, so THIS process kept its flock, but a
+#     second ctp.py created a new file and took its own lock. The
+#     single-instance guard passed while guarding nothing.
+# STATE sits beside metrics.tsv and runs.log, the other orchestrator artefacts.
+# Keeping it out of OUT also preserves retain.py's invariant that every child of
+# OUT is a project workdir (retain.check_target relies on that depth).
+STATE = CORPUS / "state"
+
 DEVENV = Path.home() / ".nix-profile/bin/devenv"
 # devenv needs the nix daemon env; a bare PATH prepend fails in non-login
 # shells with: error: not an absolute path: "nix"
@@ -69,6 +85,11 @@ NIX_DAEMON_SH = "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
 
 DISK_FLOOR_GB = 150
 HEARTBEAT_S = 30
+
+# Flags run_project sends for every project. Keep this list and the pipeline_args
+# list in run_project in step: cmd_run preflights these names against the
+# configured checkout, so an upstream rename fails once instead of per project.
+REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 
 _metrics_lock = threading.Lock()
 _print_lock = threading.Lock()
@@ -138,9 +159,26 @@ def capture_devenv_env() -> dict:
     return json.loads(out.stdout.splitlines()[-1])
 
 
+def state_dir(name: str) -> Path:
+    """The orchestrator's own directory for one project: logs and the lock.
+
+    Never inside the project workdir. run_pipeline_process.sh deletes the workdir
+    at FROM_STEP=1 and again from its EXIT trap on failure. Its existence also
+    means "this project was attempted", which is how cmd_status tells FAILED from
+    QUEUED after such a wipe.
+    """
+    return STATE / name
+
+
+def lock_path(name: str) -> Path:
+    """The project's single-instance lock. run_project and cmd_status must build
+    this the same way, so neither may spell it out on its own."""
+    return state_dir(name) / ".lock"
+
+
 def run_phase(project: dict, phase: str, args: list[str]) -> int:
     name, cls = project["name"], project["size_class"]
-    logdir = OUT / name / "logs"
+    logdir = state_dir(name) / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
     logfile = logdir / f"{phase}-{datetime.now():%Y%m%dT%H%M%S}.log"
 
@@ -173,9 +211,11 @@ def run_project(project: dict) -> str:
         return "skipped"
 
     workdir.mkdir(parents=True, exist_ok=True)
+    state_dir(name).mkdir(parents=True, exist_ok=True)
 
-    # Single-instance guard per project (held for the whole job).
-    lockfile = (workdir / ".lock").open("w")
+    # Single-instance guard per project (held for the whole job). Lives in STATE,
+    # not in workdir, because the runner deletes workdir out from under it.
+    lockfile = lock_path(name).open("w")
     try:
         fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -187,12 +227,17 @@ def run_project(project: dict) -> str:
             say(f"{name} — disk below {DISK_FLOOR_GB}G floor, deferred")
             return "deferred"
 
+        # Flag names are the runner's, not ours. run_pipeline_process.sh accepts
+        # --work and --mask; it exits 2 on anything it does not know. ctp.py used
+        # to send --work-dir and --file-filter, so every project failed rc=2
+        # before doing any work. cmd_run now preflights these names, so a rename
+        # upstream stops the run once with a clear message.
         pipeline_args = [
             "./run_pipeline_process.sh",
             "--repo-url", project["url"],
             "--repo-name", name,
-            "--work-dir", str(workdir),
-            "--file-filter", project["file_filter"],
+            "--work", str(workdir),
+            "--mask", project["file_filter"],
         ]
         if _OPTS.get("skip_html"):
             pipeline_args.append("--skip-html")
@@ -233,6 +278,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not projects:
         say("nothing to run (empty manifest / --only filter matched nothing)")
         return 0
+
+    # Fail before the run, not 1,900 times during it. Every project passes these
+    # flags, so a name the runner does not know costs one rc=2 per project and
+    # produces no artefact. This is defect D1, caught by a check instead of by a
+    # wasted run.
+    missing = [f for f in REQUIRED_RUNNER_FLAGS if not script_supports(f)]
+    if missing:
+        sys.exit(f"{CREGIT}/run_pipeline_process.sh does not accept: {', '.join(missing)}.\n"
+                 "ctp.py passes these to every project and the runner exits 2 on an\n"
+                 "unknown flag. Check pipeline.cfg points at the right checkout, or\n"
+                 "update REQUIRED_RUNNER_FLAGS and run_project together.")
 
     # Fail before the run rather than quietly doing something else: --skip-html
     # only means anything if the configured checkout implements it.
@@ -292,9 +348,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         workdir = OUT / p["name"]
         if (workdir / f"{p['name']}.validated").exists():
             state, done = "DONE", done + 1
-        elif _lock_held(workdir / ".lock"):
+        elif _lock_held(lock_path(p["name"])):
             state = "RUNNING"
-        elif workdir.exists():
+        elif state_dir(p["name"]).exists() or workdir.exists():
+            # state_dir first: the runner deletes the workdir when the pipeline
+            # fails, so a workdir-only test would report a failed project QUEUED.
             state = "FAILED"
         else:
             state = "QUEUED"
