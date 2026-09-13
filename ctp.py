@@ -2,8 +2,16 @@
 """ctp — cregit-token-pipeline runner. Runs cregit over every project in manifest.tsv.
 
     ./ctp.py run [--jobs 2] [--retries 1] [--only jq,zstd]
+    ./ctp.py run --skip-html --drop-memo        # disk-frugal corpus run
     ./ctp.py status
     ./ctp.py db
+
+Disk flags (the corpus does not fit otherwise — see retain.py and DESIGN.md §6):
+  --skip-html  prevention. Forwarded to run_pipeline_process.sh, which skips the
+               HTML step outright. 94-255 MB per project never written.
+  --drop-memo  cleanup, NOT prevention. memo/ is 45-88% of a workdir but the
+               tokenizer requires BFG_MEMO_DIR, so memo/ is always written; this
+               deletes it (via retain.prune) once the project validates.
 
 Per project: pipeline (devenv shell) -> validate -> stamp. Idempotent — a
 validated project is skipped; a failed/interrupted one resumes via blobExec's
@@ -33,6 +41,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import configparser
+
+import retain  # shared prune code path for --drop-memo
 
 # .resolve() canonicalizes to /local/home form — blobExec's meta table refuses
 # resume if the command path string drifts (/home vs /local/home symlink alias).
@@ -101,6 +111,19 @@ def record_metric(project: str, cls: str, phase: str, duration: int, rc: int, lo
 # each start their own devenv.
 _ENV: dict = {}
 
+# Run options the worker threads need (disk flags). Set once by cmd_run, for the
+# same reason as _ENV: run_project is called through pool.map and takes only the
+# project dict.
+_OPTS: dict = {}
+
+
+def script_supports(flag: str) -> bool:
+    """True when the configured run_pipeline_process.sh advertises `flag`."""
+    try:
+        return flag in (CREGIT / "run_pipeline_process.sh").read_text()
+    except OSError:
+        return False
+
 
 def capture_devenv_env() -> dict:
     """Resolve the devenv shell once and return its full environment."""
@@ -164,13 +187,16 @@ def run_project(project: dict) -> str:
             say(f"{name} — disk below {DISK_FLOOR_GB}G floor, deferred")
             return "deferred"
 
-        rc = run_phase(project, "pipeline", [
+        pipeline_args = [
             "./run_pipeline_process.sh",
             "--repo-url", project["url"],
             "--repo-name", name,
             "--work-dir", str(workdir),
             "--file-filter", project["file_filter"],
-        ])
+        ]
+        if _OPTS.get("skip_html"):
+            pipeline_args.append("--skip-html")
+        rc = run_phase(project, "pipeline", pipeline_args)
         if rc != 0:
             return "failed"
 
@@ -178,7 +204,16 @@ def run_project(project: dict) -> str:
             "python3", str(CORPUS / "validate.py"),
             str(workdir / f"{name}-dataset.parquet"), str(stamp),
         ])
-        return "done" if rc == 0 else "failed"
+        if rc != 0:
+            return "failed"
+
+        if _OPTS.get("drop_memo"):
+            # Cleanup, not prevention: memo/ is already on disk. retain.prune
+            # re-checks the keepers itself and refuses if they are not there.
+            _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
+            if not ok:
+                say(f"{name} — memo/ kept, retain refused the prune (see above)")
+        return "done"
     finally:
         _live.pop(name, None)
         lockfile.close()
@@ -198,6 +233,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not projects:
         say("nothing to run (empty manifest / --only filter matched nothing)")
         return 0
+
+    # Fail before the run rather than quietly doing something else: --skip-html
+    # only means anything if the configured checkout implements it.
+    if args.skip_html and not script_supports("--skip-html"):
+        sys.exit(f"--skip-html is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                 "Patch that checkout to guard its HTML step, then re-run. Refusing to\n"
+                 "start: generating the HTML and deleting it later is not what the flag says.")
+    if args.drop_memo and "--no-memo" in sys.argv:
+        say("note: --no-memo is an alias for --drop-memo and does NOT prevent the write. "
+            "The tokenizer requires BFG_MEMO_DIR, so memo/ is built and then deleted.")
+    _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo)
 
     run_start = time.time()
     say("capturing devenv environment (once)...")
@@ -286,6 +332,13 @@ def main() -> int:
     run_p.add_argument("--retries", type=int, default=1, help="extra passes over failed projects")
     run_p.add_argument("--only", help="comma-separated project names to restrict to")
     run_p.add_argument("--manifest", default="manifest.tsv")
+    run_p.add_argument("--skip-html", action="store_true",
+                       help="forward --skip-html to run_pipeline_process.sh so the HTML "
+                            "views (94-255 MB per project) are never generated")
+    run_p.add_argument("--drop-memo", "--no-memo", action="store_true",
+                       help="delete memo/ (45-88%% of the workdir) once a project "
+                            "validates. NOT prevention: the tokenizer requires "
+                            "BFG_MEMO_DIR, so memo/ is written first, then removed")
     run_p.set_defaults(fn=cmd_run)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
