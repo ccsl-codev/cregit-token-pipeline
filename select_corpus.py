@@ -1212,6 +1212,11 @@ SAMPLE_SEED = 20261110
 # loses a language stops being comparable to the others.
 SAMPLE_FLOOR = 2
 
+# The corpus runs in phases. Phase 1 is the size the schedule can absorb now;
+# a later phase raises the target, and `draw` guarantees the larger draw
+# contains the smaller one, so phase 1 is never re-run.
+SAMPLE_PHASE_1 = 200
+
 CELL_KEYS = ("stratum", "language", "size_class")
 
 
@@ -1224,7 +1229,53 @@ def sample_frame(path: Path | None = None) -> list[dict]:
     original file.
     """
     with (path or CANDIDATES).open(newline="") as f:
-        return [r for r in csv.DictReader(f) if r.get("included") == "True"]
+        rows = [r for r in csv.DictReader(f) if r.get("included") == "True"]
+    return dedupe_by_clone_url(rows)
+
+
+def url_owner(url: str) -> str:
+    """The owner segment of a clone URL, lowercased. Empty when there is none."""
+    parts = url.rstrip("/").removesuffix(".git").split("/")
+    return parts[-2].lower() if len(parts) >= 2 else ""
+
+
+def dedupe_by_clone_url(rows: list[dict]) -> list[dict]:
+    """One repository, one row.
+
+    GitHub redirects a renamed repository, so a roster that names the old owner
+    and a roster that names the new one resolve to the same clone URL. 106 of
+    the 3,949 eligible rows are such a pair: `apache/incubator-doris` and
+    `apache/doris` are one repository, as are `pingcap/tikv` and `tikv/tikv`.
+    Left in, the sample clones and tokenizes the repository twice, and the
+    published N counts it twice.
+
+    The row whose owner matches the URL wins, because that is the name the
+    repository answers to now. Five pairs also disagree on the stratum, and
+    every one of them is a donation: pingcap -> tikv, intel-iot-devkit ->
+    eclipse-upm, TommyLemon -> Tencent. A namespace-derived label is therefore
+    a label at a date. `candidates.csv` keeps both rows with their provenance;
+    the frame takes the current one.
+
+    A row with no clone URL is kept as it is. Grouping those together would
+    collapse unrelated projects into one.
+    """
+    groups: dict[str, list[dict]] = {}
+    kept: list[dict] = []
+    for r in rows:
+        url = r.get("clone_url") or ""
+        if url:
+            groups.setdefault(url, []).append(r)
+        else:
+            kept.append(r)
+
+    for url, group in groups.items():
+        owner = url_owner(url)
+        group.sort(key=lambda r: (r["owner"].lower() != owner,
+                                  r["owner"].lower(), r["repo"].lower()))
+        kept.append(group[0])
+
+    kept.sort(key=lambda r: (r["owner"].lower(), r["repo"].lower()))
+    return kept
 
 
 def cells_of(rows: list[dict]) -> dict[tuple, list[dict]]:
@@ -1286,7 +1337,19 @@ def allocate(sizes: dict[tuple, int], target: int,
 
 def draw(cells: dict[tuple, list[dict]], take: dict[tuple, int],
          seed: int = SAMPLE_SEED) -> list[dict]:
-    """Draw the allocated count from each cell, without replacement."""
+    """Draw the allocated count from each cell, without replacement.
+
+    Each cell is permuted once, then the first k rows are taken. The
+    permutation does not depend on k, so a small target draws a subset of a
+    large one and a phased run can extend phase 1 instead of replacing it.
+    That matters here because a project costs hours: re-drawing would throw
+    the earlier phase away.
+
+    random.sample gives no such guarantee. It picks its algorithm from k
+    against the pool size, so growing k can drop a member that a smaller k
+    held: at pool 30 and seed 13, sample(...,5) yields p029 and
+    sample(...,11) does not.
+    """
     picked = []
     for key in sorted(cells):
         k = take.get(key, 0)
@@ -1295,7 +1358,9 @@ def draw(cells: dict[tuple, list[dict]], take: dict[tuple, int],
         # One Random per cell, seeded from the run seed and the cell key, so
         # changing the target for one cell cannot reshuffle another.
         rng = random.Random(f"{seed}:{key}")
-        picked += rng.sample(cells[key], k)
+        order = list(cells[key])
+        rng.shuffle(order)
+        picked += order[:k]
     picked.sort(key=lambda r: (r["stratum"], r["language"], r["size_class"],
                               r["owner"].lower(), r["repo"].lower()))
     return picked
@@ -1544,8 +1609,10 @@ def main() -> int:
                    ).set_defaults(fn=cmd_review)
     s = sub.add_parser("sample",
                        help="draw a reproducible stratified sample of the frame")
-    s.add_argument("--target", type=int, default=400,
-                   help="how many projects to draw (default 400)")
+    s.add_argument("--target", type=int, default=SAMPLE_PHASE_1,
+                   help=f"how many projects to draw (default {SAMPLE_PHASE_1}, "
+                        "which is phase 1). A larger target contains a smaller "
+                        "one, so phase 2 extends phase 1 instead of replacing it")
     s.add_argument("--seed", type=int, default=SAMPLE_SEED,
                    help=f"random seed (default {SAMPLE_SEED}); state it in the paper")
     s.add_argument("--floor", type=int, default=SAMPLE_FLOOR,
