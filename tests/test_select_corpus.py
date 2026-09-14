@@ -23,6 +23,7 @@ any unmocked subprocess or urlopen call fail the test.
 from __future__ import annotations
 
 import json
+import random
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -67,6 +68,11 @@ def sandbox(tmp_path, monkeypatch):
     # REVIEW_OUT is derived from CORPUS at import time, so patching CORPUS alone
     # would let cmd_review overwrite the real docs/CORPUS-REVIEW.md.
     monkeypatch.setattr(sc, "REVIEW_OUT", tmp_path / "docs" / "CORPUS-REVIEW.md")
+    # Same reason for the sample outputs: both are derived from CORPUS at import
+    # time, so patching CORPUS alone would let cmd_sample overwrite the real
+    # manifest.sample.tsv and docs/CORPUS-SAMPLE.md.
+    monkeypatch.setattr(sc, "SAMPLE_OUT", tmp_path / "manifest.sample.tsv")
+    monkeypatch.setattr(sc, "SAMPLE_DOC", tmp_path / "docs" / "CORPUS-SAMPLE.md")
 
     slept: list[float] = []
     monkeypatch.setattr(sc.time, "sleep", lambda s: slept.append(s))
@@ -2407,3 +2413,249 @@ def test_reset_pacing_forgets_the_history(monkeypatch, sandbox):
     sandbox.slept.clear()
     sc.pace_call()
     assert sandbox.slept == [], "history survived the reset"
+
+
+# ================================================================ cmd_sample()
+#
+# The sample is the population the dataset paper describes, so the draw has to
+# be reproducible from the frame and the seed alone, and the allocation has to
+# be checkable against the frame.
+
+
+def sample_args(**over):
+    base = dict(target=10, seed=sc.SAMPLE_SEED, floor=sc.SAMPLE_FLOOR)
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def frame_rows(n_per_cell: int, cells=(("community", "C", "S"),)) -> list[dict]:
+    """A candidates.csv with n_per_cell eligible rows in each named cell."""
+    rows = []
+    for stratum, lang, size in cells:
+        for i in range(n_per_cell):
+            rows.append(review_row(
+                stratum=stratum, language=lang, size_class=size,
+                owner=f"{stratum[:3]}{lang[:1]}{size}", repo=f"r{i:03d}",
+                clone_url=f"https://example.invalid/{stratum}/{lang}/{size}/r{i:03d}.git"))
+    return rows
+
+
+# ---- sample_frame: the frame is the eligible rows only
+
+
+def test_sample_frame_keeps_only_included_rows():
+    """An excluded row stays in candidates.csv as a decision record. It is not
+    part of the frame, so it must never be drawn."""
+    review_csv([review_row(repo="in", included="True"),
+                review_row(repo="out", included="False", excluded_because="archived")])
+    assert [r["repo"] for r in sc.sample_frame()] == ["in"]
+
+
+# ---- cells_of: grouping, and an order the seed alone controls
+
+
+def test_cells_of_groups_by_stratum_language_and_size():
+    rows = frame_rows(2, cells=(("community", "C", "S"), ("foundation", "Rust", "L")))
+    cells = sc.cells_of(rows)
+    assert sorted(cells) == [("community", "C", "S"), ("foundation", "Rust", "L")]
+    assert all(len(v) == 2 for v in cells.values())
+
+
+def test_cells_of_sorts_rows_so_the_seed_alone_decides_the_draw():
+    """Without this sort the draw would depend on the order candidates.csv
+    happened to be written in, and the seed would not reproduce it."""
+    rows = [review_row(owner="zeta", repo="b"), review_row(owner="Alpha", repo="a")]
+    pool = sc.cells_of(rows)[("community", "C", "S")]
+    assert [r["owner"] for r in pool] == ["Alpha", "zeta"]
+
+
+# ---- allocate: floor, proportionality, and the two clamps
+
+
+def test_allocate_gives_every_cell_the_floor_first():
+    """Proportional allocation alone empties the thin cells, and a stratum that
+    loses a language stops being comparable to the others."""
+    take = sc.allocate({("a",): 100, ("b",): 3}, target=20, floor=2)
+    assert take[("b",)] >= 2
+
+
+def test_allocate_shares_the_rest_in_proportion():
+    take = sc.allocate({("a",): 90, ("b",): 10}, target=20, floor=0)
+    assert take == {("a",): 18, ("b",): 2}
+
+
+def test_allocate_draws_exactly_the_target():
+    sizes = {("a",): 40, ("b",): 30, ("c",): 7}
+    for target in (13, 40, 77):
+        assert sum(sc.allocate(sizes, target).values()) == target
+
+
+def test_allocate_never_asks_a_cell_for_more_than_it_holds():
+    """A thin cell caps the draw. Asking for more would fail in random.sample."""
+    sizes = {("a",): 2, ("b",): 3}
+    take = sc.allocate(sizes, target=99)
+    assert take[("a",)] <= 2 and take[("b",)] <= 3
+
+
+def test_allocate_cannot_exceed_the_whole_frame():
+    sizes = {("a",): 2, ("b",): 3}
+    assert sum(sc.allocate(sizes, target=1000).values()) == 5
+
+
+def test_allocate_with_a_target_below_the_total_floor_returns_the_floor():
+    """The floor wins. Cutting below it would empty cells, which is the thing
+    the floor exists to prevent; the caller sees the larger count reported."""
+    take = sc.allocate({("a",): 5, ("b",): 5}, target=1, floor=2)
+    assert take == {("a",): 2, ("b",): 2}
+
+
+def test_allocate_handles_a_frame_with_no_room_left_after_the_floor():
+    """Every cell is at or below the floor, so there is nothing to share out."""
+    take = sc.allocate({("a",): 2, ("b",): 1}, target=50, floor=2)
+    assert take == {("a",): 2, ("b",): 1}
+
+
+def test_allocate_breaks_remainder_ties_on_the_cell_key():
+    """Equal cells have equal remainders. Breaking the tie on the key keeps the
+    result independent of dict insertion order."""
+    sizes = {("b",): 10, ("a",): 10}
+    assert sc.allocate(sizes, target=3, floor=0) == {("a",): 2, ("b",): 1}
+
+
+# ---- draw: reproducible, and isolated per cell
+
+
+def test_draw_is_reproducible_for_the_same_seed():
+    cells = sc.cells_of(frame_rows(20))
+    take = {("community", "C", "S"): 5}
+    first = [r["repo"] for r in sc.draw(cells, take, seed=7)]
+    second = [r["repo"] for r in sc.draw(cells, take, seed=7)]
+    assert first == second
+
+
+def test_draw_changes_with_the_seed():
+    cells = sc.cells_of(frame_rows(40))
+    take = {("community", "C", "S"): 10}
+    a = [r["repo"] for r in sc.draw(cells, take, seed=1)]
+    b = [r["repo"] for r in sc.draw(cells, take, seed=2)]
+    assert a != b
+
+
+def test_draw_takes_each_project_at_most_once():
+    cells = sc.cells_of(frame_rows(30))
+    picked = sc.draw(cells, {("community", "C", "S"): 30}, seed=3)
+    assert len(picked) == 30 == len({r["repo"] for r in picked})
+
+
+def test_draw_seeds_each_cell_separately():
+    """Cells are seeded from the run seed plus the cell key, so changing what
+    one cell contributes cannot reshuffle another."""
+    cells = sc.cells_of(frame_rows(20, cells=(("community", "C", "S"),
+                                              ("foundation", "Rust", "L"))))
+    key_a, key_b = ("community", "C", "S"), ("foundation", "Rust", "L")
+    only_a = [r["repo"] for r in sc.draw(cells, {key_a: 4}, seed=9)]
+    with_b = [r["repo"] for r in sc.draw(cells, {key_a: 4, key_b: 7}, seed=9)
+              if r["stratum"] == "community"]
+    assert only_a == with_b
+
+
+def test_draw_skips_cells_allocated_nothing():
+    cells = sc.cells_of(frame_rows(5, cells=(("community", "C", "S"),
+                                             ("foundation", "Rust", "L"))))
+    picked = sc.draw(cells, {("community", "C", "S"): 2}, seed=4)
+    assert {r["stratum"] for r in picked} == {"community"}
+
+
+# ---- the written artefacts
+
+
+def test_sample_manifest_carries_the_language_file_filter(sandbox):
+    """ctp reads this column to build --mask, so a wrong filter tokenizes
+    nothing."""
+    picked = frame_rows(1, cells=(("foundation", "Rust", "L"),))
+    sc.write_sample_manifest(picked, target=1, seed=5, path=sc.SAMPLE_OUT)
+    body = sc.SAMPLE_OUT.read_text()
+    assert f"\t{sc.LANG_FILTER['Rust']}\t" in body
+    assert "target 1, seed 5" in body
+
+
+def test_sample_doc_reports_the_frame_and_the_draw(sandbox):
+    sizes = {("community", "C", "S"): 10, ("foundation", "Rust", "L"): 4}
+    take = {("community", "C", "S"): 5, ("foundation", "Rust", "L"): 2}
+    sc.write_sample_doc(sizes, take, target=7, seed=11, frame_n=14,
+                        path=sc.SAMPLE_DOC)
+    body = sc.SAMPLE_DOC.read_text()
+    assert "Seed: **11**" in body
+    assert "| community | C | S | 10 | 5 | 50% |" in body
+    assert "**14**" in body and "**7**" in body
+
+
+# ---- cmd_sample: the refusals, and the happy path
+
+
+def test_cmd_sample_refuses_without_candidates(sandbox, capsys):
+    assert sc.cmd_sample(sample_args()) == 1
+    assert "run `emit` first" in capsys.readouterr().out
+
+
+def test_cmd_sample_refuses_a_frame_with_no_eligible_rows(sandbox, capsys):
+    review_csv([review_row(included="False", excluded_because="archived")])
+    assert sc.cmd_sample(sample_args()) == 1
+    assert "no eligible rows" in capsys.readouterr().out
+
+
+def test_cmd_sample_refuses_a_target_below_one(sandbox, capsys):
+    review_csv(frame_rows(3))
+    assert sc.cmd_sample(sample_args(target=0)) == 1
+    assert "--target must be 1 or greater" in capsys.readouterr().out
+
+
+def test_cmd_sample_writes_both_artefacts(sandbox, capsys):
+    review_csv(frame_rows(10, cells=(("community", "C", "S"),
+                                     ("company-owned", "Java", "M"),
+                                     ("foundation", "Rust", "L"))))
+    assert sc.cmd_sample(sample_args(target=9)) == 0
+    assert len([l for l in sc.SAMPLE_OUT.read_text().splitlines()
+                if not l.startswith("#")]) == 9
+    assert sc.SAMPLE_DOC.exists()
+    out = capsys.readouterr().out
+    assert "drew 9 of 30 eligible" in out
+    for dim in ("stratum", "size_class", "language"):
+        assert f"by {dim}:" in out
+
+
+def test_cmd_sample_reports_cells_it_had_to_leave_empty(sandbox, capsys):
+    """A target smaller than the cell count cannot reach every cell. Say so,
+    rather than letting a stratum vanish silently."""
+    review_csv(frame_rows(4, cells=(("community", "C", "S"),
+                                    ("company-owned", "Java", "M"),
+                                    ("foundation", "Rust", "L"))))
+    assert sc.cmd_sample(sample_args(target=1, floor=0)) == 0
+    assert "cells left empty" in capsys.readouterr().out
+
+
+def test_allocate_never_overfills_any_cell_across_many_shapes():
+    """Property check, standing in for the capacity guard that allocate does not
+    need. The docstring there argues a cell with a fractional share always has
+    room; this exercises the claim over many shapes rather than trusting it.
+
+    It also protects the invariant random.sample depends on: asking a cell for
+    more rows than it holds raises ValueError.
+    """
+    rng = random.Random(20261110)
+    for _ in range(400):
+        sizes = {(f"c{i}",): rng.randint(1, 40)
+                 for i in range(rng.randint(1, 12))}
+        target = rng.randint(1, sum(sizes.values()) + 20)
+        floor = rng.randint(-1, 4)
+        take = sc.allocate(sizes, target, floor)
+        assert set(take) == set(sizes)
+        for k, n in sizes.items():
+            assert 0 <= take[k] <= n, (sizes, target, floor, take)
+        assert sum(take.values()) <= sum(sizes.values())
+
+
+def test_allocate_treats_a_negative_floor_as_zero():
+    """--floor is a CLI integer. A negative one would make take[] negative and
+    then random.sample would raise, far from the cause."""
+    assert sc.allocate({("a",): 5}, target=3, floor=-2) == {("a",): 3}

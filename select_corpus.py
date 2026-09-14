@@ -1195,6 +1195,202 @@ def cmd_emit(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- sample
+
+
+SAMPLE_OUT = CORPUS / "manifest.sample.tsv"
+SAMPLE_DOC = CORPUS / "docs" / "CORPUS-SAMPLE.md"
+
+# A fixed, stated seed. The published sample must be reproducible from the
+# frame, and a seed picked after seeing the result is not a seed. This one is
+# the dataset paper deadline, so it carries no information about the outcome.
+SAMPLE_SEED = 20261110
+
+# Every cell takes this many first, before the rest is shared out in
+# proportion. Without a floor, proportional allocation empties the thin cells:
+# foundation holds only 11 C projects and 27 C++ projects, and a stratum that
+# loses a language stops being comparable to the others.
+SAMPLE_FLOOR = 2
+
+CELL_KEYS = ("stratum", "language", "size_class")
+
+
+def sample_frame(path: Path | None = None) -> list[dict]:
+    """The eligible rows of candidates.csv. That file is the sampling frame.
+
+    The path is resolved here, not bound as a default argument. A default binds
+    the module constant once at import time, so a caller that redirects
+    CANDIDATES -- a test, or a second corpus root -- would still read the
+    original file.
+    """
+    with (path or CANDIDATES).open(newline="") as f:
+        return [r for r in csv.DictReader(f) if r.get("included") == "True"]
+
+
+def cells_of(rows: list[dict]) -> dict[tuple, list[dict]]:
+    """Group the frame into (stratum, language, size_class) cells.
+
+    Rows inside a cell are sorted by owner and repo, so the seed alone decides
+    the draw. Without the sort the result would depend on the order
+    candidates.csv happened to be written in.
+    """
+    cells: dict[tuple, list[dict]] = {}
+    for r in rows:
+        cells.setdefault(tuple(r[k] for k in CELL_KEYS), []).append(r)
+    for pool in cells.values():
+        pool.sort(key=lambda r: (r["owner"].lower(), r["repo"].lower()))
+    return cells
+
+
+def allocate(sizes: dict[tuple, int], target: int,
+             floor: int = SAMPLE_FLOOR) -> dict[tuple, int]:
+    """Split `target` draws across cells: a floor first, then proportional.
+
+    Largest-remainder allocation, which is the standard way to turn real-valued
+    shares into whole counts without losing or inventing draws. A cell is never
+    allocated more than it holds.
+    """
+    floor = max(0, floor)
+    take = {k: min(floor, n) for k, n in sizes.items()}
+    budget = target - sum(take.values())
+    if budget <= 0:
+        return take
+
+    room = {k: sizes[k] - take[k] for k in sizes}
+    total_room = sum(room.values())
+    if total_room == 0:
+        return take
+    budget = min(budget, total_room)
+
+    shares = {k: budget * room[k] / total_room for k in sizes}
+    for k in sizes:
+        take[k] += int(shares[k])
+
+    # Hand out what integer truncation dropped, largest remainder first. Ties
+    # break on the cell key, so the result does not depend on dict order.
+    #
+    # No capacity check is needed in this loop, and adding one would be dead
+    # code. `budget <= total_room`, so `shares[k] <= room[k]`. `room[k]` is a
+    # whole number, so a fractional `shares[k]` forces `room[k] >= int(shares[k])
+    # + 1`. Only cells with a fraction are ever incremented here, and for those
+    # `take[k] + 1 <= floor + room[k] == sizes[k]`.
+    # Sliced rather than looped-with-a-break: the fractional parts each sit
+    # below 1 and sum to `left`, so `left < len(sizes)` and the slice is always
+    # short enough.
+    left = budget - sum(int(shares[k]) for k in sizes)
+    order = sorted(sizes, key=lambda k: (-(shares[k] - int(shares[k])), k))
+    for k in order[:left]:
+        take[k] += 1
+    return take
+
+
+def draw(cells: dict[tuple, list[dict]], take: dict[tuple, int],
+         seed: int = SAMPLE_SEED) -> list[dict]:
+    """Draw the allocated count from each cell, without replacement."""
+    picked = []
+    for key in sorted(cells):
+        k = take.get(key, 0)
+        if k <= 0:
+            continue
+        # One Random per cell, seeded from the run seed and the cell key, so
+        # changing the target for one cell cannot reshuffle another.
+        rng = random.Random(f"{seed}:{key}")
+        picked += rng.sample(cells[key], k)
+    picked.sort(key=lambda r: (r["stratum"], r["language"], r["size_class"],
+                              r["owner"].lower(), r["repo"].lower()))
+    return picked
+
+
+def write_sample_manifest(picked: list[dict], target: int, seed: int,
+                          path: Path | None = None) -> None:
+    # Resolved here for the same reason as sample_frame.
+    path = path or SAMPLE_OUT
+    with path.open("w") as f:
+        f.write("# Corpus manifest (TSV): name\turl\tcategory\tfile_filter\tsize_class\n")
+        f.write(f"# generated {today()} by select_corpus.py sample — "
+                f"{len(picked)} projects drawn, target {target}, seed {seed}\n")
+        f.write("# Stratified by (stratum, language, size_class): a floor of "
+                f"{SAMPLE_FLOOR} per cell, then largest-remainder proportional.\n")
+        f.write("# size_class: S < 30k commits | M 30k-150k | L > 150k\n")
+        for r in picked:
+            f.write(f"{project_name(r['owner'], r['repo'])}\t{r['clone_url']}\t"
+                    f"{r['stratum']}\t{LANG_FILTER[r['language']]}\t{r['size_class']}\n")
+
+
+def write_sample_doc(sizes: dict[tuple, int], take: dict[tuple, int],
+                     target: int, seed: int, frame_n: int,
+                     path: Path | None = None) -> None:
+    """The allocation table, so a reader can check the sample against the frame."""
+    # Resolved here for the same reason as sample_frame.
+    path = path or SAMPLE_DOC
+    drawn = sum(take.values())
+    in_frame = sum(sizes.values())
+    lines = [
+        "# Corpus sample",
+        "",
+        f"Generated {today()} by `select_corpus.py sample`. Do not edit by hand.",
+        "",
+        f"- Frame: **{frame_n}** eligible projects in `candidates.csv`.",
+        f"- Target: **{target}** projects. Drawn: **{drawn}**.",
+        f"- Seed: **{seed}**. Floor: **{SAMPLE_FLOOR}** per cell.",
+        "",
+        "Allocation takes a floor from every cell first, then shares the rest",
+        "out by largest remainder. A cell is never asked for more than it holds,",
+        "so a thin cell caps the draw instead of failing it.",
+        "",
+        "| stratum | language | size | in frame | drawn | share |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for key in sorted(sizes):
+        n, k = sizes[key], take.get(key, 0)
+        lines.append(f"| {key[0]} | {key[1]} | {key[2]} | {n} | {k} | "
+                     f"{(100 * k / n):.0f}% |")
+    lines.append(f"| **total** | | | **{in_frame}** | **{drawn}** | "
+                 f"**{(100 * drawn / in_frame):.0f}%** |")
+    lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines))
+
+
+def cmd_sample(args: argparse.Namespace) -> int:
+    if not CANDIDATES.exists():
+        say(f"no {CANDIDATES.name} — run `emit` first")
+        return 1
+    if args.target < 1:
+        say("--target must be 1 or greater")
+        return 1
+    frame = sample_frame()
+    if not frame:
+        say(f"{CANDIDATES.name} holds no eligible rows — run `emit` first")
+        return 1
+
+    cells = cells_of(frame)
+    sizes = {k: len(v) for k, v in cells.items()}
+    take = allocate(sizes, args.target, args.floor)
+    picked = draw(cells, take, args.seed)
+
+    write_sample_manifest(picked, args.target, args.seed)
+    write_sample_doc(sizes, take, args.target, args.seed, len(frame))
+    say(f"wrote {SAMPLE_OUT} ({len(picked)} projects) and {SAMPLE_DOC}")
+
+    say(f"--- drew {len(picked)} of {len(frame)} eligible, seed {args.seed} ---")
+    for dim in CELL_KEYS:
+        i = CELL_KEYS.index(dim)
+        rolled: dict[str, list[int]] = {}
+        for key, n in sizes.items():
+            acc = rolled.setdefault(key[i], [0, 0])
+            acc[0] += n
+            acc[1] += take.get(key, 0)
+        say(f"  by {dim}:")
+        for name in sorted(rolled):
+            n, k = rolled[name]
+            say(f"    {name:14s} {k:>4} of {n:>4}  ({100 * k / n:.0f}%)")
+    empty = [k for k, n in sizes.items() if take.get(k, 0) == 0]
+    if empty:
+        say(f"cells left empty: {len(empty)} — {sorted(empty)[:5]}")
+    return 0
+
+
 # ---------------------------------------------------------------- review
 
 
@@ -1346,6 +1542,16 @@ def main() -> int:
     sub.add_parser("rosters").set_defaults(fn=cmd_rosters)
     sub.add_parser("review", help="write docs/CORPUS-REVIEW.md for a human to read"
                    ).set_defaults(fn=cmd_review)
+    s = sub.add_parser("sample",
+                       help="draw a reproducible stratified sample of the frame")
+    s.add_argument("--target", type=int, default=400,
+                   help="how many projects to draw (default 400)")
+    s.add_argument("--seed", type=int, default=SAMPLE_SEED,
+                   help=f"random seed (default {SAMPLE_SEED}); state it in the paper")
+    s.add_argument("--floor", type=int, default=SAMPLE_FLOOR,
+                   help=f"minimum draws per cell (default {SAMPLE_FLOOR}), so a "
+                        "thin cell is not emptied by proportional allocation")
+    s.set_defaults(fn=cmd_sample)
     e = sub.add_parser("enrich")
     e.add_argument("--limit", type=int, default=0)
     e.add_argument("--retry-errors", action="store_true",
