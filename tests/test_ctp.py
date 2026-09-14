@@ -47,6 +47,7 @@ REAL_RUNNER_USAGE = """\
 #   --mask REGEX      regex selecting the files to tokenize; quote it
 #   --work DIR        working/output directory
 #   --skip-html       do not generate the HTML views
+#   --gc MODE         how to pack the generated cregit repo after tokenizing
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
 # unknown arguments exit 2
@@ -381,6 +382,102 @@ def test_skip_html_is_absent_when_the_flag_is_off(runner, jq):
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
     assert "--skip-html" not in runner.argv("pipeline")
+
+
+def test_from_step_is_appended_last_because_it_is_positional(runner, jq):
+    """FROM_STEP is a positional argument. The runner reads it from the tail of
+    argv, so it must follow every flag, including --skip-html."""
+    ctp._OPTS.update(skip_html=True, drop_memo=False, from_step=3)
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert argv[-1] == "3"
+    assert argv[-2] == "--skip-html"
+
+
+def test_from_step_one_sends_no_positional_at_all(runner, jq):
+    """Step 1 is the runner's own default. Sending it explicitly would change
+    nothing, and an absent argument cannot be misread."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=1)
+    ctp.run_project(jq)
+    assert "1" not in runner.argv("pipeline")
+
+
+def test_a_missing_from_step_option_behaves_as_step_one(runner, jq):
+    """run_project reads _OPTS directly, so a caller that never set from_step
+    must still get a full run rather than a crash."""
+    ctp._OPTS.clear()
+    ctp._OPTS.update(skip_html=False, drop_memo=False)
+    ctp.run_project(jq)
+    assert runner.argv("pipeline")[-1] == "\\.[ch]$"
+
+
+def test_gc_mode_is_forwarded_to_the_runner(runner, jq):
+    """The repack default costs hours per project at corpus scale, so the
+    choice has to reach the runner argv to mean anything."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, gc="none")
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--gc") + 1] == "none"
+
+
+def test_no_gc_option_leaves_the_runner_default_alone(runner, jq):
+    """Omitting --gc must not silently pick a mode for the runner."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, gc=None)
+    ctp.run_project(jq)
+    assert "--gc" not in runner.argv("pipeline")
+
+
+def test_run_refuses_to_start_when_the_runner_lacks_gc(
+        sandbox, monkeypatch, runner_script):
+    """A checkout without --gc still packs unconditionally, and an unguarded
+    repack failure fires the EXIT trap that deletes the workdir. Refuse rather
+    than let --gc look effective while the old danger remains."""
+    runner_script(REAL_RUNNER_USAGE.replace("--gc MODE", "--no-such-flag"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(gc="none"))
+    assert "--gc is not implemented" in str(exc.value)
+    assert not (sandbox.root / "runs.log").exists()
+
+
+def test_run_accepts_gc_on_a_checkout_that_implements_it(
+        sandbox, monkeypatch, runner_script):
+    """The refusal must not fire on the patched runner."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(gc="plain")) == 0
+    assert ctp._OPTS["gc"] == "plain"
+
+
+def test_run_rejects_a_from_step_below_one(sandbox, monkeypatch, runner_script):
+    """Step 0 is not a step. Catch it before the devenv capture, because the
+    runner would treat it as a full run and wipe the workdir it was meant to
+    resume."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(from_step=0))
+    assert "--from-step must be 1 or greater" in str(exc.value)
+
+
+def test_run_announces_a_resume_so_the_operator_sees_it(
+        sandbox, monkeypatch, runner_script, capsys):
+    """A resume keeps whatever is already on disk. Say so, because the
+    difference between step 1 and step 3 is 15.2 h of tokenizing."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(from_step=3)) == 0
+    assert "resuming at step 3" in capsys.readouterr().out
 
 
 def test_run_refuses_to_start_when_the_runner_lacks_a_required_flag(
@@ -829,7 +926,8 @@ def run_args(**over):
     """A complete `ctp run` Namespace. Every cmd_run option belongs here, so
     adding one is a single edit rather than one per test."""
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
-                skip_html=False, drop_memo=False, shards=0, shard_classes="L")
+                skip_html=False, drop_memo=False, shards=0, shard_classes="L",
+                from_step=1, gc=None)
     base.update(over)
     return argparse.Namespace(**base)
 
