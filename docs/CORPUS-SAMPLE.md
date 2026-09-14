@@ -2,7 +2,7 @@
 
 Generated 2026-09-14 by `select_corpus.py sample`. Do not edit by hand.
 
-- Frame: **3843** eligible projects in `candidates.csv`.
+- Frame: **3840** eligible projects in `candidates.csv`.
 - Target: **200** projects. Drawn: **200**.
 - Seed: **20261110**. Floor: **2** per cell.
 
@@ -22,9 +22,9 @@ so a thin cell caps the draw instead of failing it.
 | community | Java | S | 623 | 25 | 4% |
 | community | Rust | M | 7 | 2 | 29% |
 | community | Rust | S | 354 | 15 | 4% |
-| company-owned | C | L | 5 | 2 | 40% |
+| company-owned | C | L | 3 | 2 | 67% |
 | company-owned | C | M | 15 | 3 | 20% |
-| company-owned | C | S | 302 | 13 | 4% |
+| company-owned | C | S | 301 | 13 | 4% |
 | company-owned | C++ | L | 8 | 2 | 25% |
 | company-owned | C++ | M | 15 | 3 | 20% |
 | company-owned | C++ | S | 385 | 16 | 4% |
@@ -44,4 +44,4 @@ so a thin cell caps the draw instead of failing it.
 | foundation | Rust | L | 1 | 1 | 100% |
 | foundation | Rust | M | 1 | 1 | 100% |
 | foundation | Rust | S | 35 | 3 | 9% |
-| **total** | | | **3843** | **200** | **5%** |
+| **total** | | | **3840** | **200** | **5%** |

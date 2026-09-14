@@ -1,5 +1,5 @@
 # Corpus manifest (TSV): name	url	category	file_filter	size_class
-# generated 2026-09-14 by select_corpus.py — 3949 projects; labels from control facts
+# generated 2026-09-14 by select_corpus.py — 3946 projects; labels from control facts
 # size_class: S < 30k commits | M 30k-150k | L > 150k
 tensorflow__tensorflow	https://github.com/tensorflow/tensorflow.git	community	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	L
 ultraworkers__claw-code	https://github.com/ultraworkers/claw-code.git	community	\.rs$	S
@@ -2436,7 +2436,6 @@ sonarsource__sonarqube	https://github.com/SonarSource/sonarqube.git	company-owne
 google__skia	https://github.com/google/skia.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	M
 alibaba__spring-ai-alibaba	https://github.com/alibaba/spring-ai-alibaba.git	company-owned	\.java$	S
 google__auto	https://github.com/google/auto.git	company-owned	\.java$	S
-microsoft__wsl2-linux-kernel	https://github.com/microsoft/WSL2-Linux-Kernel.git	company-owned	\.[ch]$	L
 yugabyte__yugabyte-db	https://github.com/yugabyte/yugabyte-db.git	company-owned	\.[ch]$	M
 nvidia__cutlass	https://github.com/NVIDIA/cutlass.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S
 google__benchmark	https://github.com/google/benchmark.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S
@@ -3053,7 +3052,6 @@ datadog__lading	https://github.com/DataDog/lading.git	company-owned	\.rs$	S
 facebook__fb303	https://github.com/facebook/fb303.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S
 sonarsource__slang	https://github.com/SonarSource/slang.git	company-owned	\.java$	S
 suse__salt-netapi-client	https://github.com/SUSE/salt-netapi-client.git	company-owned	\.java$	S
-radeonopencompute__roct-thunk-interface	https://github.com/ROCm/ROCT-Thunk-Interface.git	company-owned	\.[ch]$	S
 google__ink	https://github.com/google/ink.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S
 awslabs__aws-java-nio-spi-for-s3	https://github.com/awslabs/aws-java-nio-spi-for-s3.git	company-owned	\.java$	S
 oracle__microservices-backend	https://github.com/oracle/microservices-backend.git	company-owned	\.java$	S
@@ -3345,7 +3343,6 @@ google__polymorphicdsl	https://github.com/google/polymorphicDSL.git	company-owne
 intel__confidential-computing-tdx-tdx-loader	https://github.com/intel/confidential-computing.tdx.tdx-loader.git	company-owned	\.[ch]$	S
 tencent__tencentkona-25	https://github.com/Tencent/TencentKona-25.git	company-owned	\.java$	M
 texasinstruments__mcupsdk-core-k3	https://github.com/TexasInstruments/mcupsdk-core-k3.git	company-owned	\.[ch]$	S
-texasinstruments__ti-linux-kernel	https://github.com/TexasInstruments/ti-linux-kernel.git	company-owned	\.[ch]$	L
 dell__storage-performance-tool	https://github.com/dell/storage-performance-tool.git	company-owned	\.java$	S
 samsung__gcutil	https://github.com/Samsung/gcutil.git	company-owned	\.[ch]$	S
 nvidia__nppdx	https://github.com/NVIDIA/NPPDx.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S

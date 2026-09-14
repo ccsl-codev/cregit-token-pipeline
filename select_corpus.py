@@ -108,6 +108,25 @@ SIZE_S, SIZE_M = 30_000, 150_000
 MIN_SIZE_KB = 2_000       # excludes doc-only and toy repos
 MAX_STALE_DAYS = 550      # "alive in 2026"
 
+# Repositories that carry another project's history. GitHub does not flag these
+# as forks, because they were pushed as independent repositories: among the
+# eligible rows, `fork=True` counts zero. A fork is not an independent
+# observation. Its tokens are the upstream's tokens, and it lands in a different
+# stratum, so a cross-stratum comparison would partly compare a project with
+# itself. The two named here were 2,733,816 commits of the phase-1 sample, which
+# is 29% of its total work.
+#
+# Named one at a time, deliberately. The general test is the root commit --
+# `git rev-list --max-parents=0 HEAD` -- and it needs a clone, so it belongs in
+# the runner. Until that lands, two kernel trees stay eligible and phase 2 can
+# draw them: `raspberrypi/linux` (1,413,172 commits) and
+# `facebookincubator/oculus-linux-kernel` (31 commits, a squashed dump). See
+# EXECUTION-STATE.md Q7.
+SHARED_HISTORY = {
+    "microsoft/wsl2-linux-kernel": "torvalds/linux",
+    "texasinstruments/ti-linux-kernel": "torvalds/linux",
+}
+
 ROSTERS = {
     "asf": ("foundation", "https://projects.apache.org/json/foundation/projects.json"),
     "cncf": ("foundation", "https://raw.githubusercontent.com/cncf/landscape/master/landscape.yml"),
@@ -1102,6 +1121,9 @@ def judge(c: dict, m: dict) -> dict:
         reasons.append("archived")
     if m.get("fork"):
         reasons.append("fork")
+    upstream = SHARED_HISTORY.get(f"{row.get('owner', '')}/{row.get('repo', '')}".lower())
+    if upstream:
+        reasons.append(f"shared-history={upstream}")
     if (m.get("language") or "") not in LANG_FILTER:
         reasons.append(f"lang={m.get('language')}")
     if (m.get("size_kb") or 0) < MIN_SIZE_KB:
