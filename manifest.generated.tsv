@@ -1,5 +1,5 @@
 # Corpus manifest (TSV): name	url	category	file_filter	size_class
-# generated 2026-09-14 by select_corpus.py — 3944 projects; labels from control facts
+# generated 2026-09-14 by select_corpus.py — 3948 projects; labels from control facts
 # size_class: S < 30k commits | M 30k-150k | L > 150k
 tensorflow__tensorflow	https://github.com/tensorflow/tensorflow.git	community	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	L
 ultraworkers__claw-code	https://github.com/ultraworkers/claw-code.git	community	\.rs$	S
@@ -2436,6 +2436,7 @@ sonarsource__sonarqube	https://github.com/SonarSource/sonarqube.git	company-owne
 google__skia	https://github.com/google/skia.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	M
 alibaba__spring-ai-alibaba	https://github.com/alibaba/spring-ai-alibaba.git	company-owned	\.java$	S
 google__auto	https://github.com/google/auto.git	company-owned	\.java$	S
+microsoft__wsl2-linux-kernel	https://github.com/microsoft/WSL2-Linux-Kernel.git	company-owned	\.[ch]$	L
 yugabyte__yugabyte-db	https://github.com/yugabyte/yugabyte-db.git	company-owned	\.[ch]$	M
 nvidia__cutlass	https://github.com/NVIDIA/cutlass.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S
 google__benchmark	https://github.com/google/benchmark.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S
@@ -2990,6 +2991,7 @@ bytedance__protenix-dock	https://github.com/bytedance/Protenix-Dock.git	company-
 cloudflare__lazyhtml	https://github.com/cloudflare/lazyhtml.git	company-owned	\.rs$	S
 facebook__ocamlrep	https://github.com/facebook/ocamlrep.git	company-owned	\.rs$	S
 googlecloudplatform__healthcare-dicom-dicomweb-adapter	https://github.com/GoogleCloudPlatform/healthcare-dicom-dicomweb-adapter.git	company-owned	\.java$	S
+intel__mos	https://github.com/intel/mOS.git	company-owned	\.[ch]$	L
 nvidia__edk2-nvidia	https://github.com/NVIDIA/edk2-nvidia.git	company-owned	\.[ch]$	S
 nvidia__optix-toolkit	https://github.com/NVIDIA/optix-toolkit.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S
 eclipse-ee4j__jakartaee-tck	https://github.com/jakartaee/platform-tck.git	company-owned	\.java$	S
@@ -3157,6 +3159,7 @@ google__mobly-bundled-snippets	https://github.com/google/mobly-bundled-snippets.
 intel__openlldp	https://github.com/intel/openlldp.git	company-owned	\.[ch]$	S
 apache__jackrabbit-filevault	https://github.com/apache/jackrabbit-filevault.git	company-owned	\.java$	S
 datadog__java-reggie	https://github.com/DataDog/java-reggie.git	company-owned	\.java$	S
+suse__kernel	https://github.com/SUSE/kernel.git	company-owned	\.[ch]$	L
 intel__migtd	https://github.com/intel/MigTD.git	company-owned	\.rs$	S
 mediatek__mtk-openwrt-feeds	https://github.com/mediatek/mtk-openwrt-feeds.git	company-owned	\.[ch]$	S
 oracle__nosql	https://github.com/oracle/nosql.git	company-owned	\.java$	S
@@ -3341,6 +3344,7 @@ google__polymorphicdsl	https://github.com/google/polymorphicDSL.git	company-owne
 intel__confidential-computing-tdx-tdx-loader	https://github.com/intel/confidential-computing.tdx.tdx-loader.git	company-owned	\.[ch]$	S
 tencent__tencentkona-25	https://github.com/Tencent/TencentKona-25.git	company-owned	\.java$	M
 texasinstruments__mcupsdk-core-k3	https://github.com/TexasInstruments/mcupsdk-core-k3.git	company-owned	\.[ch]$	S
+texasinstruments__ti-linux-kernel	https://github.com/TexasInstruments/ti-linux-kernel.git	company-owned	\.[ch]$	L
 dell__storage-performance-tool	https://github.com/dell/storage-performance-tool.git	company-owned	\.java$	S
 samsung__gcutil	https://github.com/Samsung/gcutil.git	company-owned	\.[ch]$	S
 nvidia__nppdx	https://github.com/NVIDIA/NPPDx.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S

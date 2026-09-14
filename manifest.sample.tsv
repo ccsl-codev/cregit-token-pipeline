@@ -28,7 +28,6 @@ switchbrew__libnx	https://github.com/switchbrew/libnx.git	community	\.[ch]$	S
 sysstat__sysstat	https://github.com/sysstat/sysstat.git	community	\.[ch]$	S
 unicorn-engine__unicorn	https://github.com/unicorn-engine/unicorn.git	community	\.[ch]$	S
 util-linux__util-linux	https://github.com/util-linux/util-linux.git	community	\.[ch]$	S
-valvesoftware__steamlink-sdk	https://github.com/ValveSoftware/steamlink-sdk.git	community	\.[ch]$	S
 zerbea__hcxdumptool	https://github.com/ZerBea/hcxdumptool.git	community	\.[ch]$	S
 blender__blender	https://github.com/blender/blender.git	community	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	L
 gcc-mirror__gcc	https://github.com/gcc-mirror/gcc.git	community	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	L
@@ -106,7 +105,8 @@ starship__starship	https://github.com/starship/starship.git	community	\.rs$	S
 tomaka__glutin	https://github.com/rust-windowing/glutin.git	community	\.rs$	S
 tonhowtf__omniget	https://github.com/tonhowtf/omniget.git	community	\.rs$	S
 y2z__monolith	https://github.com/Y2Z/monolith.git	community	\.rs$	S
-texasinstruments__mesa	https://github.com/TexasInstruments/mesa.git	company-owned	\.[ch]$	L
+microsoft__wsl2-linux-kernel	https://github.com/microsoft/WSL2-Linux-Kernel.git	company-owned	\.[ch]$	L
+texasinstruments__ti-linux-kernel	https://github.com/TexasInstruments/ti-linux-kernel.git	company-owned	\.[ch]$	L
 facebookincubator__qemu-wearables	https://github.com/facebookincubator/qemu-wearables.git	company-owned	\.[ch]$	M
 nvidia__libvirt	https://github.com/NVIDIA/libvirt.git	company-owned	\.[ch]$	M
 texasinstruments__simplelink-zephyr	https://github.com/TexasInstruments/simplelink-zephyr.git	company-owned	\.[ch]$	M
