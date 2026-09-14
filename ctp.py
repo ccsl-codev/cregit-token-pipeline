@@ -433,6 +433,13 @@ def run_project(project: dict) -> str:
         # already fill this box.
         if shard_class(project):
             pipeline_args += ["--mode", "sharded", "--shards", str(_OPTS["shards"])]
+        if _OPTS.get("gc"):
+            pipeline_args += ["--gc", _OPTS["gc"]]
+        # FROM_STEP is positional and must come last. The runner only wipes the
+        # workdir when it is 1, so a resume keeps whatever finished before.
+        from_step = _OPTS.get("from_step", 1)
+        if from_step > 1:
+            pipeline_args.append(str(from_step))
         rc = run_phase(project, "pipeline", pipeline_args)
         if rc != 0:
             return "failed"
@@ -500,9 +507,19 @@ def cmd_run(args: argparse.Namespace) -> int:
                      f"{CREGIT}/run_pipeline_process.sh does not advertise.\n"
                      "Point pipeline.cfg at a checkout that supports sharded mode,\n"
                      "or drop --shards and accept the single-process rate.")
+    # Same rule again: refuse before the run rather than per project.
+    if args.gc and not script_supports("--gc"):
+        sys.exit(f"--gc is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                 "That checkout still packs unconditionally, and an unguarded\n"
+                 "repack failure deletes the workdir. Patch it before relying on --gc.")
+    if args.from_step < 1:
+        sys.exit(f"--from-step must be 1 or greater (got {args.from_step}).")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
     _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
-                 shards=args.shards, shard_classes=shard_classes)
+                 shards=args.shards, shard_classes=shard_classes,
+                 from_step=args.from_step, gc=args.gc)
+    if args.from_step > 1:
+        say(f"resuming at step {args.from_step}: the runner keeps the existing workdir")
     if args.shards > 1:
         say(f"sharding {args.shards}-way for size class"
             f"{'es' if len(shard_classes) > 1 else ''} {', '.join(shard_classes)}")
@@ -612,6 +629,17 @@ def main() -> int:
                        help="comma-separated size classes to shard (default L). "
                             "S and M gain nothing: three concurrent projects "
                             "already fill the box")
+    run_p.add_argument("--from-step", type=int, default=1, metavar="N",
+                       help="resume the runner at step N instead of cloning again. "
+                            "Only step 1 wipes the workdir, so N>1 keeps finished "
+                            "work. Use this after a late failure: the Linux run "
+                            "lost its repack at the end of step 2 with 15.2 h of "
+                            "tokenizing already on disk, and --from-step 3 skips "
+                            "the clone, the tokenize and the repack")
+    run_p.add_argument("--gc", choices=("none", "plain", "aggressive"),
+                       help="forward --gc to run_pipeline_process.sh, which packs "
+                            "the generated repo after tokenizing. Omit to accept "
+                            "the runner's own default")
     run_p.set_defaults(fn=cmd_run)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
