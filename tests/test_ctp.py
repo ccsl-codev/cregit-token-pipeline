@@ -48,6 +48,7 @@ REAL_RUNNER_USAGE = """\
 #   --work DIR        working/output directory
 #   --skip-html       do not generate the HTML views
 #   --gc MODE         how to pack the generated cregit repo after tokenizing
+#   --blame-jobs N    run the blame step with N parallel workers
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
 # unknown arguments exit 2
@@ -927,7 +928,7 @@ def run_args(**over):
     adding one is a single edit rather than one per test."""
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
                 skip_html=False, drop_memo=False, shards=0, shard_classes="L",
-                from_step=1, gc=None)
+                from_step=1, gc=None, blame_jobs=0)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -1401,3 +1402,55 @@ def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
     assert ctp.shard_class(L) is False
     ctp._OPTS.clear()
     assert ctp.shard_class(L) is False, "an unset _OPTS must not shard"
+
+
+def test_blame_jobs_is_forwarded_to_the_runner(runner, jq):
+    """Blame is the bottleneck. The worker count only helps if it reaches the
+    runner argv."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, blame_jobs=8)
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--blame-jobs") + 1] == "8"
+
+
+def test_no_blame_jobs_leaves_the_runner_default_alone(runner, jq):
+    """Zero means "not asked for", so the runner keeps its own default of 1."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, blame_jobs=0)
+    ctp.run_project(jq)
+    assert "--blame-jobs" not in runner.argv("pipeline")
+
+
+def test_run_refuses_blame_jobs_on_a_runner_that_blames_serially(
+        sandbox, monkeypatch, runner_script):
+    """Accepting the flag against an unpatched checkout would promise a speedup
+    the runner cannot deliver, and the difference is days per project."""
+    runner_script(REAL_RUNNER_USAGE.replace("--blame-jobs N", "--no-such-flag"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(blame_jobs=8))
+    assert "--blame-jobs is not implemented" in str(exc.value)
+
+
+def test_run_rejects_a_negative_blame_jobs(sandbox, monkeypatch, runner_script):
+    """A negative count is a typo, and the runner would reject it hours later."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(blame_jobs=-1))
+    assert "--blame-jobs cannot be negative" in str(exc.value)
+
+
+def test_run_accepts_blame_jobs_on_a_patched_runner(
+        sandbox, monkeypatch, runner_script):
+    """The refusal must not fire on the patched runner."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(blame_jobs=12)) == 0
+    assert ctp._OPTS["blame_jobs"] == 12

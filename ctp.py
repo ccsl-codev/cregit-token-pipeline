@@ -435,6 +435,8 @@ def run_project(project: dict) -> str:
             pipeline_args += ["--mode", "sharded", "--shards", str(_OPTS["shards"])]
         if _OPTS.get("gc"):
             pipeline_args += ["--gc", _OPTS["gc"]]
+        if _OPTS.get("blame_jobs"):
+            pipeline_args += ["--blame-jobs", str(_OPTS["blame_jobs"])]
         # FROM_STEP is positional and must come last. The runner only wipes the
         # workdir when it is 1, so a resume keeps whatever finished before.
         from_step = _OPTS.get("from_step", 1)
@@ -512,12 +514,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         sys.exit(f"--gc is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
                  "That checkout still packs unconditionally, and an unguarded\n"
                  "repack failure deletes the workdir. Patch it before relying on --gc.")
+    if args.blame_jobs and not script_supports("--blame-jobs"):
+        sys.exit(f"--blame-jobs is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                 "That checkout blames serially, at roughly 3 files per minute.\n"
+                 "Patch it before relying on the flag.")
+    if args.blame_jobs < 0:
+        sys.exit(f"--blame-jobs cannot be negative (got {args.blame_jobs}).")
     if args.from_step < 1:
         sys.exit(f"--from-step must be 1 or greater (got {args.from_step}).")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
     _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
                  shards=args.shards, shard_classes=shard_classes,
-                 from_step=args.from_step, gc=args.gc)
+                 from_step=args.from_step, gc=args.gc,
+                 blame_jobs=args.blame_jobs)
     if args.from_step > 1:
         say(f"resuming at step {args.from_step}: the runner keeps the existing workdir")
     if args.shards > 1:
@@ -640,6 +649,12 @@ def main() -> int:
                        help="forward --gc to run_pipeline_process.sh, which packs "
                             "the generated repo after tokenizing. Omit to accept "
                             "the runner's own default")
+    run_p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
+                       help="run the blame step with N parallel workers. Blame is "
+                            "the bottleneck: measured serially on Linux it managed "
+                            "3 files per minute against 64,536 files, which is 14 "
+                            "days. Each file is independent, so N does not change "
+                            "the output. Omit to accept the runner's default of 1")
     run_p.set_defaults(fn=cmd_run)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
