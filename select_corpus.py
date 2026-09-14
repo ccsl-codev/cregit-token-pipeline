@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
 import random
 import re
@@ -113,19 +114,37 @@ MAX_STALE_DAYS = 550      # "alive in 2026"
 # eligible rows, `fork=True` counts zero. A fork is not an independent
 # observation. Its tokens are the upstream's tokens, and it lands in a different
 # stratum, so a cross-stratum comparison would partly compare a project with
-# itself. The two named here were 2,733,816 commits of the phase-1 sample, which
-# is 29% of its total work.
+# itself.
 #
-# Named one at a time, deliberately. The general test is the root commit --
-# `git rev-list --max-parents=0 HEAD` -- and it needs a clone, so it belongs in
-# the runner. Until that lands, two kernel trees stay eligible and phase 2 can
-# draw them: `raspberrypi/linux` (1,413,172 commits) and
-# `facebookincubator/oculus-linux-kernel` (31 commits, a squashed dump). See
-# EXECUTION-STATE.md Q7.
+# This dict is the manual escape hatch, for a copy decided before its root was
+# read. The general test lives in `shared_history.py`: two repositories that
+# share a root commit share a history. Naming copies by hand did not converge --
+# excluding two kernel trees on 2026-09-14 let the next draw pull in `intel/mOS`
+# and `TexasInstruments/mesa` instead -- so the root test is the rule and this is
+# the exception.
 SHARED_HISTORY = {
     "microsoft/wsl2-linux-kernel": "torvalds/linux",
     "texasinstruments/ti-linux-kernel": "torvalds/linux",
 }
+
+# Written by `shared_history.py scan`. Read here, never computed here: the root
+# test needs a clone of every candidate, and `emit` must stay offline and cheap.
+ROOTS_CACHE = CACHE / "roots.json"
+
+
+@functools.cache
+def shared_history_exclusions() -> dict[str, str]:
+    """The scan's verdict, keyed by `owner/repo` lowercased.
+
+    An absent or unreadable cache means no exclusions. That is the honest
+    reading before the first scan, and it keeps `emit` working for anyone who
+    has not run one. Cached because `judge` runs once per candidate row, and
+    there are 24,405 of them.
+    """
+    try:
+        return dict(json.loads(ROOTS_CACHE.read_text()).get("excluded", {}))
+    except (OSError, ValueError):
+        return {}
 
 ROSTERS = {
     "asf": ("foundation", "https://projects.apache.org/json/foundation/projects.json"),
@@ -1121,9 +1140,16 @@ def judge(c: dict, m: dict) -> dict:
         reasons.append("archived")
     if m.get("fork"):
         reasons.append("fork")
-    upstream = SHARED_HISTORY.get(f"{row.get('owner', '')}/{row.get('repo', '')}".lower())
+    key = f"{row.get('owner', '')}/{row.get('repo', '')}".lower()
+    upstream = SHARED_HISTORY.get(key)
     if upstream:
         reasons.append(f"shared-history={upstream}")
+    else:
+        # The scan already carries its reason as a whole string, so it is
+        # appended as it stands rather than rebuilt from a name.
+        scanned = shared_history_exclusions().get(key)
+        if scanned:
+            reasons.append(scanned)
     if (m.get("language") or "") not in LANG_FILTER:
         reasons.append(f"lang={m.get('language')}")
     if (m.get("size_kb") or 0) < MIN_SIZE_KB:

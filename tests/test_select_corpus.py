@@ -883,6 +883,60 @@ def test_the_shared_history_list_names_only_copies_not_the_upstream():
     assert not set(sc.SHARED_HISTORY) & {v.lower() for v in sc.SHARED_HISTORY.values()}
 
 
+# ---- the root scan's verdict. shared_history.py owns the test; emit only reads
+# the answer, because reading a root needs a clone and emit stays offline.
+
+
+@pytest.fixture
+def roots_cache(tmp_path, monkeypatch):
+    """Point select_corpus at a scan cache under tmp_path."""
+    path = tmp_path / "roots.json"
+    monkeypatch.setattr(sc, "ROOTS_CACHE", path)
+    sc.shared_history_exclusions.cache_clear()
+    yield path
+    sc.shared_history_exclusions.cache_clear()
+
+
+def test_judge_applies_the_scan_verdict(roots_cache):
+    roots_cache.write_text(json.dumps(
+        {"excluded": {"acme/widget": "shared-history=torvalds/linux"}}))
+    row = sc.judge(cand(), good_meta())
+    assert row["included"] is False
+    assert row["excluded_because"] == "shared-history=torvalds/linux"
+
+
+def test_judge_ignores_a_project_the_scan_cleared(roots_cache):
+    roots_cache.write_text(json.dumps({"excluded": {"other/thing": "x"}}))
+    assert sc.judge(cand(), good_meta())["included"] is True
+
+
+def test_an_absent_scan_cache_excludes_nothing(roots_cache):
+    """emit must work before the first scan, and before it must not mean
+    everything is a copy."""
+    assert not roots_cache.exists()
+    assert sc.shared_history_exclusions() == {}
+
+
+def test_a_corrupt_scan_cache_excludes_nothing(roots_cache):
+    roots_cache.write_text("{not json")
+    assert sc.shared_history_exclusions() == {}
+
+
+def test_a_scan_cache_without_the_key_excludes_nothing(roots_cache):
+    roots_cache.write_text(json.dumps({"roots": {"u": ["r"]}}))
+    assert sc.shared_history_exclusions() == {}
+
+
+def test_the_hand_list_wins_over_the_scan(roots_cache, monkeypatch):
+    """The hand list is the escape hatch for a decision already taken. Two
+    reasons for one row would read as two separate findings."""
+    monkeypatch.setitem(sc.SHARED_HISTORY, "acme/widget", "torvalds/linux")
+    roots_cache.write_text(json.dumps(
+        {"excluded": {"acme/widget": "shared-history=someone/else"}}))
+    row = sc.judge(cand(), good_meta())
+    assert row["excluded_because"] == "shared-history=torvalds/linux"
+
+
 # ================================================================ small pure functions
 
 
