@@ -109,26 +109,19 @@ SIZE_S, SIZE_M = 30_000, 150_000
 MIN_SIZE_KB = 2_000       # excludes doc-only and toy repos
 MAX_STALE_DAYS = 550      # "alive in 2026"
 
-# Repositories that carry another project's history. GitHub does not flag these
-# as forks, because they were pushed as independent repositories: among the
-# eligible rows, `fork=True` counts zero. A fork is not an independent
-# observation. Its tokens are the upstream's tokens, and it lands in a different
-# stratum, so a cross-stratum comparison would partly compare a project with
-# itself.
+# A repository that carries another project's history is **kept**, and the
+# relationship is recorded. Author decision, 2026-09-14: flagging is enough, and
+# the flag says which project came first.
 #
-# This dict is the manual escape hatch, for a copy decided before its root was
-# read. The general test lives in `shared_history.py`: two repositories that
-# share a root commit share a history. Naming copies by hand did not converge --
-# excluding two kernel trees on 2026-09-14 let the next draw pull in `intel/mOS`
-# and `TexasInstruments/mesa` instead -- so the root test is the rule and this is
-# the exception.
-SHARED_HISTORY = {
-    "microsoft/wsl2-linux-kernel": "torvalds/linux",
-    "texasinstruments/ti-linux-kernel": "torvalds/linux",
-}
-
-# Written by `shared_history.py scan`. Read here, never computed here: the root
-# test needs a clone of every candidate, and `emit` must stay offline and cheap.
+# GitHub does not mark these as forks, because they were pushed as independent
+# repositories: among the eligible rows, `fork=True` counts zero. Excluding them
+# was tried first and rejected -- a derivative with its own governance is a
+# project, not a duplicate, and dropping it answers a question the dataset should
+# let its reader ask. A consumer who wants one project per history filters on
+# `history_cluster`.
+#
+# Written by `shared_history.py`. Read here, never computed here: the root test
+# needs a clone per candidate, and `emit` must stay offline and cheap.
 ROOTS_CACHE = CACHE / "roots.json"
 
 
@@ -146,11 +139,6 @@ def _scan_verdict() -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
-
-
-def shared_history_exclusions() -> dict[str, str]:
-    """Copies the scan resolved in favour of one member, keyed by `owner/repo`."""
-    return dict(_scan_verdict().get("excluded", {}))
 
 
 def shared_history_clusters() -> dict[str, dict]:
@@ -1156,24 +1144,27 @@ def judge(c: dict, m: dict) -> dict:
         reasons.append("archived")
     if m.get("fork"):
         reasons.append("fork")
+    # Sharing a history never excludes a row. It is recorded instead, for every
+    # member of the cluster.
+    #
+    #   history_relation   what the commit graph proves about INCLUSION:
+    #                      includes / included_in / mirror / diverged
+    #   history_includes   the projects whose whole history is part of this one
+    #   history_first      the cluster's oldest repository, which is the ORIGIN
+    #                      signal and comes from outside the graph
+    #
+    # Inclusion is not origin. torvalds/linux is included in SUSE/kernel and the
+    # included one is the upstream; simplelink-zephyr is included in Zephyr and
+    # the included one is the fork. Same topology, opposite origin, so the two
+    # columns must stay separate. See shared_history.direction.
     key = f"{row.get('owner', '')}/{row.get('repo', '')}".lower()
-
-    # The relationship is recorded for every member of a cluster, including the
-    # ones that stay. A project kept as distinct still shares a history, and a
-    # reader counting tokens per stratum has to be able to see that.
     cluster = shared_history_clusters().get(key, {})
     row["history_cluster"] = cluster.get("cluster", "")
     row["history_shared_with"] = " ".join(cluster.get("shared_with", []))
-
-    upstream = SHARED_HISTORY.get(key)
-    if upstream:
-        reasons.append(f"shared-history={upstream}")
-    else:
-        # The scan already carries its reason as a whole string, so it is
-        # appended as it stands rather than rebuilt from a name.
-        scanned = shared_history_exclusions().get(key)
-        if scanned:
-            reasons.append(scanned)
+    row["history_relation"] = cluster.get("relation", "")
+    row["history_includes"] = " ".join(cluster.get("includes", []))
+    row["history_first"] = cluster.get("first", "")
+    row["history_created"] = cluster.get("created", "")
     if (m.get("language") or "") not in LANG_FILTER:
         reasons.append(f"lang={m.get('language')}")
     if (m.get("size_kb") or 0) < MIN_SIZE_KB:
@@ -1208,7 +1199,8 @@ def cmd_emit(args: argparse.Namespace) -> int:
             "roster_name", "roster_lang", "language", "commits", "size_class",
             "size_kb", "stars", "pushed_at", "license", "owner_type", "archived",
             "fork", "clone_url", "history_cluster", "history_shared_with",
-            "included", "excluded_because"]
+            "history_relation", "history_includes", "history_first",
+            "history_created", "included", "excluded_because"]
     with CANDIDATES.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()

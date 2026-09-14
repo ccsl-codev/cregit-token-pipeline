@@ -852,39 +852,11 @@ def test_judge_keeps_the_data_of_an_excluded_row():
     assert row["owner"] == "acme"
 
 
-# ---- shared history. GitHub flags none of these as a fork, because each was
-# pushed as an independent repository. A fork is not an independent observation.
-
-
-def test_judge_excludes_a_named_shared_history_repository(monkeypatch):
-    monkeypatch.setitem(sc.SHARED_HISTORY, "acme/widget", "torvalds/linux")
-    row = sc.judge(cand(), good_meta())
-    assert row["included"] is False
-    assert row["excluded_because"] == "shared-history=torvalds/linux"
-
-
-def test_judge_matches_shared_history_whatever_the_case(monkeypatch):
-    """The rosters spell it microsoft/WSL2-Linux-Kernel; the manifest lowercases
-    it. The rule must not depend on which spelling arrives."""
-    monkeypatch.setitem(sc.SHARED_HISTORY, "acme/widget", "torvalds/linux")
-    row = sc.judge(cand(owner="ACME", repo="Widget"), good_meta())
-    assert row["included"] is False
-
-
-def test_judge_leaves_the_upstream_itself_eligible():
-    """Dropping the copies must not drop the original."""
-    row = sc.judge(cand(owner="torvalds", repo="linux"), good_meta())
-    assert row["included"] is True
-    assert row["excluded_because"] == ""
-
-
-def test_the_shared_history_list_names_only_copies_not_the_upstream():
-    """A self-referring entry would exclude the project it protects."""
-    assert not set(sc.SHARED_HISTORY) & {v.lower() for v in sc.SHARED_HISTORY.values()}
-
-
-# ---- the root scan's verdict. shared_history.py owns the test; emit only reads
-# the answer, because reading a root needs a clone and emit stays offline.
+# ---- shared history is recorded, never excluded. Author decision 2026-09-14:
+# a derivative with its own governance is a project, not a duplicate, so the
+# frame carries the relationship and the direction instead of dropping a row.
+# shared_history.py owns the measurement; emit only reads the answer, because
+# reading a root needs a clone and emit stays offline.
 
 
 @pytest.fixture
@@ -897,103 +869,100 @@ def roots_cache(tmp_path, monkeypatch):
     sc._scan_verdict.cache_clear()
 
 
-def test_judge_applies_the_scan_verdict(roots_cache):
-    roots_cache.write_text(json.dumps(
-        {"excluded": {"acme/widget": "shared-history=torvalds/linux"}}))
-    row = sc.judge(cand(), good_meta())
-    assert row["included"] is False
-    assert row["excluded_because"] == "shared-history=torvalds/linux"
+def cluster_cache(**over) -> str:
+    entry = dict(cluster="1da177e4", shared_with=["torvalds/linux"],
+                 relation="includes", includes=["torvalds/linux"],
+                 first="torvalds/linux", created="2013-01-01T00:00:00Z",
+                 note="Linux trees")
+    entry.update(over)
+    return json.dumps({"clusters": {"acme/widget": entry}})
 
 
-def test_judge_ignores_a_project_the_scan_cleared(roots_cache):
-    roots_cache.write_text(json.dumps({"excluded": {"other/thing": "x"}}))
-    assert sc.judge(cand(), good_meta())["included"] is True
-
-
-def test_an_absent_scan_cache_excludes_nothing(roots_cache):
-    """emit must work before the first scan, and before it must not mean
-    everything is a copy."""
-    assert not roots_cache.exists()
-    assert sc.shared_history_exclusions() == {}
-
-
-def test_a_corrupt_scan_cache_excludes_nothing(roots_cache):
-    roots_cache.write_text("{not json")
-    assert sc.shared_history_exclusions() == {}
-
-
-def test_a_scan_cache_without_the_key_excludes_nothing(roots_cache):
-    roots_cache.write_text(json.dumps({"roots": {"u": ["r"]}}))
-    assert sc.shared_history_exclusions() == {}
-
-
-def test_judge_records_the_cluster_of_a_project_it_keeps(roots_cache):
-    """A project kept as distinct still shares a history. Author decision
-    2026-09-14: record the relationship instead of dropping the project."""
-    roots_cache.write_text(json.dumps({"clusters": {
-        "acme/widget": {"cluster": "abc123", "shared_with": ["other/thing"]}}}))
+def test_sharing_a_history_never_excludes_a_row(roots_cache):
+    """The whole point of the decision. A copy stays in the corpus."""
+    roots_cache.write_text(cluster_cache())
     row = sc.judge(cand(), good_meta())
     assert row["included"] is True
-    assert row["history_cluster"] == "abc123"
-    assert row["history_shared_with"] == "other/thing"
+    assert row["excluded_because"] == ""
 
 
-def test_judge_records_the_cluster_of_a_project_it_excludes(roots_cache):
-    """The relationship belongs in the record either way, so a reader can see
-    which project the excluded one duplicated."""
-    roots_cache.write_text(json.dumps({
-        "excluded": {"acme/widget": "shared-history=torvalds/linux"},
-        "clusters": {"acme/widget": {"cluster": "1da177e4",
-                                     "shared_with": ["torvalds/linux"]}}}))
+def test_judge_records_the_cluster_and_the_direction(roots_cache):
+    roots_cache.write_text(cluster_cache())
     row = sc.judge(cand(), good_meta())
-    assert row["included"] is False
     assert row["history_cluster"] == "1da177e4"
     assert row["history_shared_with"] == "torvalds/linux"
+    assert row["history_includes"] == "torvalds/linux"
+    assert row["history_relation"] == "includes"
+    assert row["history_first"] == "torvalds/linux"
+    assert row["history_created"] == "2013-01-01T00:00:00Z"
+
+
+def test_judge_records_a_row_whose_history_is_inside_another(roots_cache):
+    """The upstream of a vendor mirror reads `included_in`, and `includes` is
+    empty: nothing in the cluster is part of it."""
+    roots_cache.write_text(cluster_cache(relation="included_in", includes=[]))
+    row = sc.judge(cand(), good_meta())
+    assert row["history_includes"] == ""
+    assert row["history_relation"] == "included_in"
+
+
+def test_judge_records_a_diverged_pair_without_claiming_inclusion(roots_cache):
+    """Measured on torvalds/linux against raspberrypi/linux: neither history is
+    inside the other, so the inclusion column must stay empty."""
+    roots_cache.write_text(cluster_cache(relation="diverged", includes=[]))
+    row = sc.judge(cand(), good_meta())
+    assert row["history_includes"] == ""
+    assert row["history_relation"] == "diverged"
+    assert row["included"] is True
 
 
 def test_judge_joins_several_cluster_members_with_a_space(roots_cache):
     """The MySQL cluster holds four members, so the column is a list."""
-    roots_cache.write_text(json.dumps({"clusters": {"acme/widget": {
-        "cluster": "017586", "shared_with": ["a/one", "b/two", "c/three"]}}}))
+    roots_cache.write_text(cluster_cache(shared_with=["a/one", "b/two", "c/three"]))
     assert sc.judge(cand(), good_meta())["history_shared_with"] == "a/one b/two c/three"
 
 
-def test_judge_leaves_the_cluster_columns_empty_without_a_scan(roots_cache):
+def test_judge_leaves_the_history_columns_empty_without_a_scan(roots_cache):
     assert not roots_cache.exists()
     row = sc.judge(cand(), good_meta())
     assert row["history_cluster"] == "" and row["history_shared_with"] == ""
+    assert row["history_includes"] == "" and row["history_relation"] == ""
+    assert row["history_first"] == "" and row["history_created"] == ""
 
 
-def test_a_scan_cache_that_is_not_a_mapping_reads_as_empty(roots_cache):
+def test_a_corrupt_scan_cache_annotates_nothing(roots_cache):
+    roots_cache.write_text("{not json")
+    assert sc.shared_history_clusters() == {}
+
+
+def test_a_scan_cache_without_the_key_annotates_nothing(roots_cache):
+    roots_cache.write_text(json.dumps({"roots": {"u": ["r"]}}))
+    assert sc.shared_history_clusters() == {}
+
+
+def test_a_scan_cache_that_is_not_a_mapping_annotates_nothing(roots_cache):
     """json.loads accepts a bare list. Indexing it would raise later, in emit,
     after the caller had already paid for enrichment."""
     roots_cache.write_text("[1, 2, 3]")
     assert sc.shared_history_clusters() == {}
 
 
-def test_the_cluster_columns_reach_candidates_csv(sandbox, roots_cache, monkeypatch):
+def test_the_history_columns_reach_candidates_csv(sandbox, roots_cache, monkeypatch):
     """candidates.csv is the record a reviewer reads, so the columns have to
     reach the file and not only the row dict."""
-    roots_cache.write_text(json.dumps({"clusters": {
-        "acme/widget": {"cluster": "abc123", "shared_with": ["other/thing"]}}}))
+    roots_cache.write_text(cluster_cache())
     write(sc.CACHE / "repo-meta.json", json.dumps({"acme/widget": good_meta()}))
     monkeypatch.setattr(sc, "collect_candidates", lambda: [cand()])
 
     assert sc.cmd_emit(SimpleNamespace(per_stratum=0, balance_lang=False)) == 0
     row, = read_csv_rows(sc.CANDIDATES)
-    assert row["history_cluster"] == "abc123"
-    assert row["history_shared_with"] == "other/thing"
+    assert row["history_cluster"] == "1da177e4"
+    assert row["history_includes"] == "torvalds/linux"
+    assert row["history_relation"] == "includes"
+    assert row["history_first"] == "torvalds/linux"
+    assert row["history_created"] == "2013-01-01T00:00:00Z"
     assert row["included"] == "True"
 
-
-def test_the_hand_list_wins_over_the_scan(roots_cache, monkeypatch):
-    """The hand list is the escape hatch for a decision already taken. Two
-    reasons for one row would read as two separate findings."""
-    monkeypatch.setitem(sc.SHARED_HISTORY, "acme/widget", "torvalds/linux")
-    roots_cache.write_text(json.dumps(
-        {"excluded": {"acme/widget": "shared-history=someone/else"}}))
-    row = sc.judge(cand(), good_meta())
-    assert row["excluded_because"] == "shared-history=torvalds/linux"
 
 
 # ================================================================ small pure functions

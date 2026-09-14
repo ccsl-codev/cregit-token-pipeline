@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """shared_history — find projects that carry another project's history.
 
-    ./shared_history.py scan                    # scan manifest.sample.tsv
-    ./shared_history.py scan --manifest M        # scan another manifest
-    ./shared_history.py scan --force             # re-read cached roots
-    ./shared_history.py report                   # read the cache, no network
+    ./shared_history.py scan            # 1. find the clusters (one clone each)
+    ./shared_history.py ancestry        # 2. measure who holds whose history
+    ./shared_history.py report          # read the cache, no network
+    ./select_corpus.py emit             # 3. write the flags into the record
+    ./select_corpus.py sample           # 4. re-draw
 
 Why. GitHub marks a repository as a fork only when it was made with the fork
 button. A tree pushed as an independent repository carries the upstream's whole
-history and is not marked: among 3,840 eligible rows, `fork=True` counts **zero**,
-and the L class still holds four Linux kernels, eight MySQL descendants and two
-copies of FreeBSD. A copy is not an independent observation. Its tokens are the
-upstream's tokens, and the copies sit in different strata, so a cross-stratum
-comparison would partly compare a project with itself.
+history and is not marked: among the eligible rows, `fork=True` counts **zero**,
+and the sample still draws five Linux kernels, four MySQL descendants and two
+vendor JDKs. Those tokens appear more than once, under more than one
+`repo_name`, and a reader who does not know cannot correct for it.
 
-Naming the copies by hand does not converge. Two kernel trees were excluded by
-name on 2026-09-14, and the next draw replaced them with `intel/mOS` (a kernel)
-and `TexasInstruments/mesa` (a Mesa tree), which is 1,366,279 commits of copied
-history back in the sample after one iteration.
+**Nothing is excluded.** Author decision, 2026-09-14: a derivative with its own
+governance is a project, not a duplicate, so the relationship is recorded and the
+record says which project came first. A consumer who wants one project per
+history filters on `history_cluster`.
+
+Naming copies by hand was tried first and abandoned. Two kernel trees were
+excluded by name, and the next draw replaced them with `intel/mOS` (a kernel) and
+`TexasInstruments/mesa` (a Mesa tree): 1,366,279 commits of copied history back
+in the sample after one iteration.
 
 How. Two repositories share history when they share a root commit — a commit
 with no parent. The test is exact and needs no name list. It needs the commit
@@ -43,40 +48,27 @@ FreeBSD, NetBSD and OpenBSD descend from the same 1990s code, and they share
 Identical root SHAs mean identical commit objects, which is the granularity
 token duplication needs.
 
-What this file does NOT decide. Detection is exact; choosing which member
-represents a cluster is a research decision. Commit count cannot decide it:
-`SUSE/kernel` holds 1,566,626 commits against `torvalds/linux`'s 1,482,779
-because it adds SUSE's patches, and `raspberrypi/linux` holds fewer because it
-lags. So UPSTREAM names one representative per cluster, one line each, and a
-cluster with no entry makes the scan exit non-zero and name it. That is one
-decision per cluster, not one per copy.
+Which came first. `ancestry` compares the commit SETS of the members of a
+cluster. If B holds every commit of A, then B holds A's whole history and A came
+first. That is exact, and it is reported per PAIR, never for the cluster as a
+whole -- see `direction` for the measurement that proved a cluster-wide vote
+wrong. The graph cannot order every pair, and `diverged` says so rather than
+guessing.
 
 Output. The cache is the only thing this script writes. `select_corpus.py` reads
-two maps from it, so both land in `candidates.csv` and therefore in the PRISMA
-flow. Nothing here edits the frame directly.
+`clusters` from it, so the flags land in `candidates.csv` and therefore in the
+PRISMA flow. Nothing here edits the frame directly.
 
     roots      every project ever scanned, keyed by clone URL
-    projects   the name, stratum and size class of each, so a later scan can
+    projects   the name, stratum and size class of each, so a later run can
                resolve without being handed the same manifest again
-    excluded   one member of the cluster survives; the rest carry a reason
-    clusters   EVERY member, with its cluster id and the projects it shares a
-               history with, whether or not it was excluded
+    ancestry   the pairwise evidence per cluster: shared, unique and lag counts
+    clusters   every member, with its cluster id, the projects it shares a
+               history with, and which of them it came after or before
 
 Resolution runs over the whole cache, never over one manifest. Scoping it to a
-manifest oscillates: exclude a kernel copy, the draw refills the cell with the
-next kernel copy, the first copy leaves the manifest, its exclusion vanishes, and
-the draw takes it back. Measured on the real frame before the fix.
-
-The second map exists because a shared history is a property of the corpus, not
-only a reason to drop something. A reader who wants one project per history can
-filter on the cluster id; a reader who keeps them all can state the overlap.
-
-    ./shared_history.py scan          # 1. find the clusters
-    ./select_corpus.py emit           # 2. write the exclusions into the record
-    ./select_corpus.py sample         # 3. re-draw; freed slots refill per cell
-
-Repeat until the draw stops changing. Each pass scans only what the last draw
-added, because roots are cached by clone URL.
+manifest oscillated: a verdict on a project vanished when the draw dropped that
+project, and the draw took it straight back. Measured on the real frame.
 
 Scope. `--single-branch` follows HEAD, so a root reachable only from another
 branch is not seen. The pipeline's dataset covers the default branch's history,
@@ -108,56 +100,32 @@ DEFAULT_MANIFEST = CORPUS / "manifest.sample.tsv"
 # we could not read is unknown, not innocent.
 CLONE_TIMEOUT_S = 2_700
 
-# One representative per cluster, keyed by any root commit in that cluster.
-#
-# This is the only manual decision in this file, and it is a research decision:
-# the algorithm finds the cluster, a person names the project the cluster is
-# about. Cite the reason in the comment beside each entry.
-UPSTREAM: dict[str, str] = {
-    # Linux: 1da177e4 is the 2.6.12-rc2 import that starts the git history.
-    # torvalds/linux is the tree the others copied, and it is the tree the
-    # kernel results in the paper already describe.
-    "1da177e4c3f41524e886b7f1b8a0c1fc7321cac2": "torvalds/linux",
-
-    # FreeBSD: freebsd/freebsd and freebsd/freebsd-src are one repository under
-    # two names -- identical 215-root sets, 313,060 commits each. The project
-    # renamed the canonical repository to freebsd-src, so that name survives.
-    # This entry is bookkeeping, not a research judgement.
-    "eb3b1302382b1d0cbe37eeebabfcdd546aa2fc4e": "freebsd/freebsd-src",
-}
-
-# Clusters where every member stays in the corpus, and the shared history is
-# recorded rather than resolved. Author decision, 2026-09-14.
+# Nothing is excluded for sharing a history. Author decision, 2026-09-14:
+# flagging is enough, and the flag must say which project came first.
 #
 # The reasoning is that a derivative with its own governance is a project, not a
 # duplicate: MariaDB has had separate governance since 2009, and a vendor JDK is
-# a shipped product. Dropping them would answer a question the dataset should
-# instead let its reader ask. The cost is real -- the same tokens appear under
-# more than one `repo_name` -- so the annotation has to reach the data, not just
-# this file. See EXECUTION-STATE.md D26.
+# a shipped product. Dropping one would answer a question the dataset should let
+# its reader ask instead. The cost is real -- the same tokens appear under more
+# than one `repo_name` -- so the annotation has to reach the data, and a consumer
+# who wants one project per history filters on `history_cluster`.
 #
-# Every cluster listed here sits inside ONE stratum, so the duplication costs
-# compute and inflates a within-stratum count. It does not contaminate a
-# comparison ACROSS strata, which is what the excluded kernel copies did.
-DISTINCT_HISTORY: dict[str, str] = {
-    # MySQL descendants, all company-owned: MariaDB/server,
-    # percona/percona-xtrabackup, Tencent/TenDBCluster-Tdbctl,
-    # Tencent/TenDBCluster-TenDB. The upstream, mysql/mysql-server, is not in
-    # the sample, so no member is the cluster's obvious representative.
+# A human-readable note per cluster, keyed by cluster id. Documentation only: no
+# entry here changes what enters the corpus, and a cluster with no note is still
+# annotated. See EXECUTION-STATE.md D26 and D27.
+CLUSTER_NOTES: dict[str, str] = {
+    "1da177e4c3f41524e886b7f1b8a0c1fc7321cac2":
+        "Linux kernel trees; 1da177e4 is the 2.6.12-rc2 import",
+    "eb3b1302382b1d0cbe37eeebabfcdd546aa2fc4e":
+        "freebsd/freebsd and freebsd/freebsd-src are one repository under two names",
     "0175860925a8dc08e831cf54220cc0e7d7387213":
-        "MySQL descendants with separate governance; upstream absent from the sample",
-
-    # OpenJDK descendants, both company-owned: SAP/SapMachine and
-    # Tencent/TencentKona-21. Upstream openjdk/jdk is not in the sample.
+        "MySQL descendants; upstream mysql/mysql-server absent from the sample",
     "29e77aaf0b4ec026f49a6027f045b2429e7e3177":
-        "vendor JDK builds, each a shipped product; upstream absent from the sample",
-
-    # rust-lang/rust and rust-lang/rust-analyzer, both foundation, same owner.
-    # This is a SUBTREE MERGE, not a fork: rust carries rust-analyzer under
-    # src/tools/rust-analyzer, so it holds those tokens as well as its own. The
-    # mechanism differs from a fork and the annotation should say so.
+        "vendor JDK builds; upstream openjdk/jdk absent from the sample",
     "37226273a7a5b2119daaab06d253f93b6813b881":
         "subtree merge: rust-lang/rust contains rust-analyzer under src/tools",
+    "8ddf82cf70dc6f951ab477f325dee0efde3ec589":
+        "Zephyr and TexasInstruments/simplelink-zephyr, a vendor fork",
 }
 
 
@@ -197,8 +165,8 @@ def load_cache() -> dict:
     rebuilds it, and refusing to start because a derived file is corrupt would
     block the corpus on something that costs one command to regenerate.
     """
-    empty = {"roots": {}, "errors": {}, "excluded": {}, "clusters": {},
-             "projects": {}}
+    empty = {"roots": {}, "errors": {}, "clusters": {}, "projects": {},
+             "ancestry": {}}
     try:
         data = json.loads(CACHE.read_text())
     except (OSError, ValueError):
@@ -320,59 +288,282 @@ def group_by_root(roots_by_url: dict[str, list[str]]) -> list[list[str]]:
     return [sorted(g) for g in groups.values()]
 
 
-def resolve(cache: dict) -> tuple[dict[str, str], dict[str, dict], list[list[str]]]:
-    """Return (exclusions, annotations, clusters with no verdict).
+def head_commits(url: str, name: str) -> set[int]:
+    """Every commit reachable from HEAD, as the 64-bit prefix of its SHA.
 
-    Resolves over **everything the cache knows**, not over one manifest. That
-    distinction is load-bearing. A verdict scoped to the current manifest
-    oscillates: exclude a kernel copy, the draw refills the cell with the next
-    kernel copy, the first one leaves the manifest, its exclusion disappears, and
-    the draw takes it back. Roots are cached for ever, so cluster membership is
-    permanent knowledge and the manifest is only the work queue.
+    A prefix, not the whole hash, so a kernel-sized history costs tens of
+    megabytes instead of hundreds. Across 1.5 M commits the chance of a 64-bit
+    collision is about 1.5M**2 / 2**65, which is far below the chance of a disk
+    error, and a single collision would move one commit between the shared and
+    unique counts rather than change a direction.
+    """
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    dst = SCRATCH / f"{name}.git"
+    if dst.exists():
+        shutil.rmtree(dst)
+    try:
+        clone = subprocess.run(
+            ["git", "clone", "--filter=tree:0", "--bare", "--single-branch",
+             "--quiet", url, str(dst)],
+            capture_output=True, text=True, timeout=CLONE_TIMEOUT_S)
+        if clone.returncode != 0:
+            raise RuntimeError((clone.stderr or clone.stdout).strip()[:300])
+        rev = subprocess.run(["git", "--git-dir", str(dst), "rev-list", "HEAD"],
+                             capture_output=True, text=True,
+                             timeout=CLONE_TIMEOUT_S)
+        if rev.returncode != 0:
+            raise RuntimeError((rev.stderr or rev.stdout).strip()[:300])
+        return {int(line[:16], 16) for line in rev.stdout.split()}
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"timed out after {CLONE_TIMEOUT_S}s")
+    finally:
+        shutil.rmtree(dst, ignore_errors=True)
 
-    Every member of every cluster is annotated, whether or not it is excluded.
-    The shared history is a property of the corpus, so it belongs in the record
-    even where the project stays: a reader who wants one project per history can
-    then filter, and a reader who wants all of them can state the overlap.
 
-    Only UPSTREAM turns a cluster into an exclusion. DISTINCT_HISTORY keeps every
-    member and relies on the annotation instead. A cluster in neither is reported
-    and left alone: resolving it by guesswork would put the wrong project in the
-    corpus, and the wrong stratum with it.
+# A tree that mirrors another still lags it. SUSE/kernel holds 1,482,841 of
+# torvalds/linux's 1,482,901 commits and misses 60 -- the commits Linux made after
+# SUSE's last merge. Strict containment would call that a divergence and lose a
+# fact the numbers make obvious, so "inside" allows the lagging tail: A is inside
+# B when the commits of A that B lacks are under this fraction of A.
+LAG_TOLERANCE = 0.001
+
+
+def repo_created(name: str) -> str:
+    """The repository's creation date on GitHub, or "" when it cannot be read.
+
+    Origin cannot come from the commit graph -- see `direction` -- so it comes
+    from here. One call per cluster member, about fifteen calls, not one per
+    candidate.
+
+    **What this date is.** When the repository appeared on GitHub, not when the
+    project began. `torvalds/linux` is a 2011 mirror of a history that starts in
+    2005, for work that began in 1991. Within a cluster the comparison is still
+    informative, because a fork's repository is created after the repository it
+    forked from. The absolute date is not a birthday, and the paper must say so.
+    """
+    slug = name if "/" in name else name.replace("__", "/", 1)
+    try:
+        out = subprocess.run(
+            ["gh", "repo", "view", slug, "--json", "createdAt",
+             "-q", ".createdAt"],
+            capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def direction(commits: dict[str, set[int]],
+              tolerance: float = LAG_TOLERANCE) -> list[dict]:
+    """Return the pairwise evidence: for each pair, whose history holds whose.
+
+    **Pairwise, never cluster-wide.** An earlier version also picked the member
+    that came first for the cluster as a whole, by counting how many others held
+    its history. Measured on the MySQL cluster, that answered
+    `tencent/tendbcluster-tendb`, which is nobody's ancestor: it is a near-mirror
+    of `tencent/tendbcluster-tdbctl` (112 unique commits of 134,827), so it won
+    the only containment in a cluster where every other pair had diverged. A
+    near-mirror pair hijacks any cluster-wide vote, so there is no vote.
+
+    **What the commit graph proves: inclusion, not origin.** A cluster shares
+    root commits, and a shared root is the same object in both repositories, so
+    no date on it orders the members. Containment is exact -- if B holds every
+    commit of A, then A's whole history is part of B's -- but it does **not** say
+    which project came first. Measured on two real pairs of the same shape:
+
+        torvalds/linux vs SUSE/kernel          lag 0.004%  inside; subset = upstream
+        simplelink-zephyr vs zephyr/zephyr     lag 0.32%   diverged, but the
+                                                           subset is the FORK
+
+    The first pair is inside the tolerance and reads `torvalds/linux inside
+    SUSE/kernel`: SUSE keeps merging upstream and adding patches, so the upstream
+    is the subset. The second pair sits just outside it and reads `diverged`, but
+    it shows what inclusion would have claimed: TI's fork lags Zephyr and adds
+    almost nothing, so the FORK is the subset. Same topology as the first pair,
+    opposite origin. Every asymmetry that looks promising turns out symmetric:
+    both trees are "the other, truncated, plus their own commits", and both
+    sides' unique commits are newer than the last commit they share.
+
+    So origin is not taken from here. It comes from `repo_created`, and this
+    function reports inclusion, which is what it can prove.
+
+    Each row reads: shared, only_a, only_b, the two lag fractions, and one of
+    `identical`, `<x> inside <y>` or `diverged`.
+    """
+    names = sorted(commits)
+    evidence = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            shared = len(commits[a] & commits[b])
+            only_a, only_b = len(commits[a]) - shared, len(commits[b]) - shared
+            lag_a = only_a / max(len(commits[a]), 1)
+            lag_b = only_b / max(len(commits[b]), 1)
+            a_inside = lag_a <= tolerance
+            b_inside = lag_b <= tolerance
+            if a_inside and b_inside:
+                rel = "identical"
+            elif a_inside:
+                rel = f"{a} inside {b}"
+            elif b_inside:
+                rel = f"{b} inside {a}"
+            else:
+                rel = "diverged"
+            evidence.append({"a": a, "b": b, "shared": shared,
+                             "only_a": only_a, "only_b": only_b,
+                             "lag_a": round(lag_a, 6), "lag_b": round(lag_b, 6),
+                             "relation": rel})
+    return evidence
+
+
+def clusters_of(cache: dict) -> list[dict]:
+    """Every cluster the cache knows, as {id, note, members: {name: url}}.
+
+    Built over **everything the cache knows**, not over one manifest. That
+    distinction is load-bearing. Scoping it to the current manifest oscillated:
+    a verdict on a project vanished when the draw dropped that project, and the
+    draw took it straight back. Roots are cached for ever, so cluster membership
+    is permanent knowledge and the manifest is only the work queue.
     """
     by_url = cache["projects"]
-    excluded: dict[str, str] = {}
-    annotations: dict[str, dict] = {}
-    unresolved: list[list[str]] = []
-
-    for cluster in group_by_root({u: cache["roots"].get(u, [])
-                                  for u in by_url if u in cache["roots"]}):
-        if len(cluster) < 2:
+    out = []
+    for group in group_by_root({u: cache["roots"].get(u, [])
+                                for u in by_url if u in cache["roots"]}):
+        if len(group) < 2:
             continue
-        roots = sorted({root for url in cluster
+        roots = sorted({root for url in group
                         for root in cache["roots"].get(url, [])})
         cid = cluster_id(roots)
         # ctp's project name is owner__repo; the frame keys on owner/repo.
-        names = {url: by_url[url]["name"].replace("__", "/", 1).lower()
-                 for url in cluster}
-        for url in cluster:
-            annotations[names[url]] = {
-                "cluster": cid,
-                "shared_with": sorted(n for u, n in names.items() if u != url),
+        out.append({"id": cid, "note": CLUSTER_NOTES.get(cid, ""),
+                    "members": {by_url[url]["name"].replace("__", "/", 1).lower(): url
+                                for url in group}})
+    return sorted(out, key=lambda c: c["id"])
+
+
+def annotate(cache: dict) -> dict[str, dict]:
+    """One record per project that shares a history with another.
+
+    Nothing is excluded. The relationship is the finding, so it is recorded for
+    every member: which cluster, which projects it shares with, and which of
+    them came first.
+
+    `first` and `relation` come from `cache["ancestry"]`, which the `ancestry`
+    command fills. Without it the cluster is still recorded, and `relation` reads
+    `unmeasured` rather than guessing a direction.
+    """
+    ancestry = cache.get("ancestry", {})
+    out: dict[str, dict] = {}
+    for cluster in clusters_of(cache):
+        names = sorted(cluster["members"])
+        measured = ancestry.get(cluster["id"], {})
+        evidence = measured.get("evidence")
+        created = measured.get("created", {})
+        # The earliest repository in the cluster. This is the origin signal, and
+        # it is external: the commit graph proves inclusion, not who came first.
+        dated = {n: d for n, d in created.items() if d}
+        first = min(dated, key=lambda n: dated[n]) if dated else ""
+        for name in names:
+            record = {
+                "cluster": cluster["id"],
+                "shared_with": [n for n in names if n != name],
+                "note": cluster["note"],
+                # `includes` names the projects whose whole history is part of
+                # this one. `included_in` is the mirror of that. Neither claims
+                # origin: `first` does, from the repository creation date.
+                "includes": [], "included_in": [], "mirror_of": [],
+                "diverged_from": [], "relation": "unmeasured",
+                "first": first, "created": created.get(name, ""),
             }
+            if evidence is not None:
+                for e in evidence:
+                    if name not in (e["a"], e["b"]):
+                        continue
+                    other = e["b"] if e["a"] == name else e["a"]
+                    if e["relation"] == "identical":
+                        record["mirror_of"].append(other)
+                    elif e["relation"] == f"{other} inside {name}":
+                        record["includes"].append(other)
+                    elif e["relation"] == f"{name} inside {other}":
+                        record["included_in"].append(other)
+                    else:
+                        record["diverged_from"].append(other)
+                record["relation"] = (
+                    "includes" if record["includes"] else
+                    "included_in" if record["included_in"] else
+                    "mirror" if record["mirror_of"] else "diverged")
+            out[name] = record
+    return out
 
-        if cid in DISTINCT_HISTORY:
-            continue
 
-        named = {UPSTREAM[root] for root in roots if root in UPSTREAM}
-        if len(named) != 1:
-            unresolved.append(cluster)
-            continue
-        upstream = named.pop()
-        for url in cluster:
-            if names[url] != upstream.lower():
-                excluded[names[url]] = f"shared-history={upstream}"
-    return excluded, annotations, unresolved
+def measure_ancestry(cache: dict, force: bool = False) -> dict:
+    """Fill `cache["ancestry"]`: inclusion from the graph, origin from GitHub.
+
+    Two independent measurements per cluster, and they are cached apart because
+    they cost different amounts. `evidence` needs one commits-only clone per
+    member, which is minutes. `created` needs one API call per member, which is
+    seconds. A cluster that already has evidence but no dates therefore backfills
+    the dates without cloning anything again.
+    """
+    cache.setdefault("ancestry", {})
+    all_clusters = clusters_of(cache)
+    todo = [c for c in all_clusters
+            if force
+            or not cache["ancestry"].get(c["id"], {}).get("evidence")
+            or not cache["ancestry"].get(c["id"], {}).get("created")]
+    say(f"{len(all_clusters)} clusters, {len(todo)} to measure")
+    for cluster in todo:
+        entry = dict(cache["ancestry"].get(cluster["id"], {}))
+        members = sorted(cluster["members"])
+        say(f"  cluster {cluster['id'][:12]} — {len(members)} members"
+            f"{': ' + cluster['note'] if cluster['note'] else ''}")
+
+        if force or not entry.get("created"):
+            # Origin comes from outside the graph. One call per member.
+            entry["created"] = {name: repo_created(name) for name in members}
+            for name, when in entry["created"].items():
+                say(f"      {name:44s} created {when or 'unknown'}")
+
+        if force or not entry.get("evidence"):
+            commits: dict[str, set[int]] = {}
+            failed = []
+            for name in members:
+                try:
+                    commits[name] = head_commits(cluster["members"][name],
+                                                 name.replace("/", "__"))
+                    say(f"      {name:44s} {len(commits[name]):>9,} commits")
+                except RuntimeError as e:
+                    failed.append(name)
+                    say(f"      {name:44s} FAILED: {e}")
+            if len(commits) < 2:
+                say("      fewer than two members readable; no inclusion recorded")
+                cache["ancestry"][cluster["id"]] = entry
+                save_cache(cache)
+                continue
+            entry["evidence"] = direction(commits)
+            entry["unreadable"] = failed
+            for e in entry["evidence"]:
+                say(f"      {e['relation']}: shared {e['shared']:,}, "
+                    f"only {e['a']} {e['only_a']:,}, only {e['b']} {e['only_b']:,}")
+            commits.clear()
+
+        cache["ancestry"][cluster["id"]] = entry
+        save_cache(cache)
+    return cache
+
+
+def cmd_ancestry(args: argparse.Namespace) -> int:
+    manifest = Path(args.manifest)
+    if not manifest.exists():
+        say(f"no {manifest}")
+        return 1
+    cache = load_cache()
+    for r in read_manifest(manifest):
+        cache["projects"][r["url"]] = {k: r[k] for k in
+                                       ("name", "stratum", "size_class")}
+    for url in cache["roots"]:
+        cache["projects"].setdefault(url, {"name": name_from_url(url),
+                                           "stratum": "?", "size_class": "?"})
+    cache = measure_ancestry(cache, force=args.force)
+    return finish(read_manifest(manifest), cache)
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -403,9 +594,11 @@ def finish(rows: list[dict], cache: dict) -> int:
     for url in cache["roots"]:
         cache["projects"].setdefault(url, {"name": name_from_url(url),
                                            "stratum": "?", "size_class": "?"})
-    excluded, annotations, unresolved = resolve(cache)
-    cache["excluded"] = excluded
+    annotations = annotate(cache)
     cache["clusters"] = annotations
+    # An older cache carries an `excluded` map. Nothing writes it now, and a
+    # stale verdict left in a published record is worse than no verdict.
+    cache.pop("excluded", None)
     save_cache(cache)
 
     by_name = {p["name"].replace("__", "/", 1).lower(): p
@@ -415,18 +608,24 @@ def finish(rows: list[dict], cache: dict) -> int:
         r = by_name.get(name, {})
         return f"{name:44s} {r.get('stratum', '?'):14s} {r.get('size_class', '?')}"
 
-    kept = {n: a for n, a in annotations.items() if n not in excluded}
-    say(f"--- {len(annotations)} projects share history: "
-        f"{len(kept)} kept and flagged, {len(excluded)} excluded ---")
-    for cid, note in sorted(DISTINCT_HISTORY.items()):
-        members = sorted(n for n, a in kept.items() if a["cluster"] == cid)
-        if not members:
-            continue
-        say(f"  cluster {cid[:12]} — {note}")
-        for name in members:
-            say(f"      {describe(name)}")
-    for name, reason in sorted(excluded.items()):
-        say(f"  {describe(name)}  {reason}")
+    unmeasured = [c for c in clusters_of(cache)
+                  if c["id"] not in cache.get("ancestry", {})]
+    say(f"--- {len(clusters_of(cache))} clusters, "
+        f"{len(annotations)} projects share a history. Nothing is excluded ---")
+    for cluster in clusters_of(cache):
+        head = f"  cluster {cluster['id'][:12]}"
+        if cluster["note"]:
+            head += f" — {cluster['note']}"
+        say(head)
+        for name in sorted(cluster["members"]):
+            a = annotations[name]
+            detail = {"includes": "includes " + " ".join(a["includes"]),
+                      "included_in": "included in " + " ".join(a["included_in"]),
+                      "mirror": "mirror of " + " ".join(a["mirror_of"]),
+                      "diverged": "diverged",
+                      "unmeasured": "inclusion unmeasured"}[a["relation"]]
+            oldest = "  <- oldest repository" if a["first"] == name else ""
+            say(f"      {describe(name)}  {detail}{oldest}")
 
     failed = {u: e for u, e in cache["errors"].items() if u in {r["url"] for r in rows}}
     if failed:
@@ -434,22 +633,11 @@ def finish(rows: list[dict], cache: dict) -> int:
         for url, err in sorted(failed.items()):
             say(f"  {url} — {err}")
 
-    if unresolved:
-        by_url = cache["projects"]
-        say(f"--- {len(unresolved)} clusters have no verdict ---")
-        for cluster in unresolved:
-            roots = sorted({root for url in cluster
-                            for root in cache["roots"].get(url, [])})
-            say(f"  cluster {cluster_id(roots)} ({len(roots)} roots)")
-            for url in cluster:
-                r = by_url[url]
-                say(f"      {r['name']:44s} {r['stratum']:14s} {r['size_class']}")
-        say("Each cluster needs one line in shared_history.py: an UPSTREAM entry "
-            "to keep one member, or a DISTINCT_HISTORY entry to keep them all "
-            "and rely on the annotation.")
-        say("Naming a representative is a research decision. Commit count cannot "
-            "decide it, because a copy may hold more commits than the upstream "
-            "or fewer.")
+    if unmeasured:
+        say(f"--- {len(unmeasured)} clusters have no measured direction ---")
+        say("Run `./shared_history.py ancestry` to fill it. It clones the commit "
+            "graph of each cluster member, so it costs one clone per member and "
+            "nothing per candidate.")
         return 1
 
     say("next: ./select_corpus.py emit && ./select_corpus.py sample")
@@ -467,7 +655,14 @@ def main() -> int:
                    help="re-read roots that are already cached")
     s.set_defaults(fn=cmd_scan)
 
-    r = sub.add_parser("report", help="resolve clusters from the cache, no network")
+    a = sub.add_parser("ancestry",
+                       help="measure which member of each cluster came first")
+    a.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
+    a.add_argument("--force", action="store_true",
+                   help="re-measure clusters that already have a direction")
+    a.set_defaults(fn=cmd_ancestry)
+
+    r = sub.add_parser("report", help="read the cache and report, no network")
     r.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
     r.set_defaults(fn=cmd_report)
 
