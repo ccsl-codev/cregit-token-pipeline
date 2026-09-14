@@ -2451,6 +2451,77 @@ def test_sample_frame_keeps_only_included_rows():
     assert [r["repo"] for r in sc.sample_frame()] == ["in"]
 
 
+# ---- one repository, one row. GitHub redirects a renamed repository, so two
+# rosters can name the same project under two owners.
+
+
+@pytest.mark.parametrize("url,owner", [
+    ("https://github.com/apache/doris.git", "apache"),
+    ("https://github.com/apache/doris", "apache"),
+    ("https://github.com/apache/doris/", "apache"),
+    ("https://github.com/Tencent/APIJSON.git", "tencent"),
+    ("nonsense", ""),
+])
+def test_url_owner_reads_the_owner_segment(url, owner):
+    assert sc.url_owner(url) == owner
+
+
+def test_dedupe_keeps_the_row_whose_owner_matches_the_url():
+    """apache/incubator-doris and apache/doris are one repository. The current
+    name is the one the repository answers to."""
+    url = "https://github.com/apache/doris.git"
+    rows = [review_row(owner="apache", repo="incubator-doris", clone_url=url),
+            review_row(owner="apache", repo="doris", clone_url=url)]
+    kept = sc.dedupe_by_clone_url(rows)
+    assert [(r["owner"], r["repo"]) for r in kept] == [("apache", "doris")]
+
+
+def test_dedupe_survives_a_stratum_disagreement_by_taking_the_current_name():
+    """Five real pairs disagree on the stratum, and every one is a donation.
+    pingcap/tikv was community; tikv/tikv is foundation. The frame must not
+    hold both, and the current namespace decides."""
+    url = "https://github.com/tikv/tikv.git"
+    rows = [review_row(owner="pingcap", repo="tikv", clone_url=url,
+                       stratum="community"),
+            review_row(owner="tikv", repo="tikv", clone_url=url,
+                       stratum="foundation")]
+    kept = sc.dedupe_by_clone_url(rows)
+    assert [r["stratum"] for r in kept] == ["foundation"]
+
+
+def test_dedupe_is_deterministic_when_no_owner_matches_the_url():
+    url = "https://github.com/new-home/thing.git"
+    rows = [review_row(owner="zeta", repo="thing", clone_url=url),
+            review_row(owner="alpha", repo="thing", clone_url=url)]
+    assert [r["owner"] for r in sc.dedupe_by_clone_url(rows)] == ["alpha"]
+
+
+def test_dedupe_never_merges_rows_that_have_no_clone_url():
+    """Grouping empty URLs together would collapse unrelated projects."""
+    rows = [review_row(owner="a", repo="one", clone_url=""),
+            review_row(owner="b", repo="two", clone_url="")]
+    assert len(sc.dedupe_by_clone_url(rows)) == 2
+
+
+def test_dedupe_leaves_distinct_repositories_alone():
+    rows = [review_row(owner="a", repo="one",
+                       clone_url="https://github.com/a/one.git"),
+            review_row(owner="b", repo="two",
+                       clone_url="https://github.com/b/two.git")]
+    assert len(sc.dedupe_by_clone_url(rows)) == 2
+
+
+def test_sample_frame_counts_a_redirected_repository_once():
+    """The frame is what the paper reports as N, so a redirect pair must not
+    inflate it."""
+    url = "https://github.com/apache/doris.git"
+    review_csv([review_row(owner="apache", repo="incubator-doris",
+                           clone_url=url, included="True"),
+                review_row(owner="apache", repo="doris",
+                           clone_url=url, included="True")])
+    assert [r["repo"] for r in sc.sample_frame()] == ["doris"]
+
+
 # ---- cells_of: grouping, and an order the seed alone controls
 
 
@@ -2564,6 +2635,44 @@ def test_draw_skips_cells_allocated_nothing():
                                              ("foundation", "Rust", "L"))))
     picked = sc.draw(cells, {("community", "C", "S"): 2}, seed=4)
     assert {r["stratum"] for r in picked} == {"community"}
+
+
+# ---- draw: a phase extends the one before it
+#
+# The corpus runs in phases, so phase 2 must contain phase 1. A project costs
+# hours, and a draw that reshuffled would throw that work away.
+
+
+def test_draw_nests_when_a_cell_is_asked_for_more():
+    cells = sc.cells_of(frame_rows(30))
+    key = ("community", "C", "S")
+    small = {r["repo"] for r in sc.draw(cells, {key: 5}, seed=13)}
+    large = {r["repo"] for r in sc.draw(cells, {key: 11}, seed=13)}
+    assert small <= large
+
+
+def test_draw_nests_across_every_cell():
+    # frame_rows repeats repo names across cells, so the row key is owner+repo.
+    keys = (("community", "C", "S"), ("foundation", "Rust", "L"))
+    cells = sc.cells_of(frame_rows(20, cells=keys))
+    ident = lambda rows: {(r["owner"], r["repo"]) for r in rows}
+    small = ident(sc.draw(cells, dict.fromkeys(keys, 3), seed=5))
+    large = ident(sc.draw(cells, dict.fromkeys(keys, 9), seed=5))
+    assert small <= large and len(small) == 6 and len(large) == 18
+
+
+def test_draw_nests_where_random_sample_would_not():
+    """random.sample picks its algorithm from k against the pool size, so
+    growing k can drop a member. At pool 30 and seed 13 it loses one. The draw
+    must not inherit that, because the earlier phase is already running."""
+    pool = [f"p{i:03d}" for i in range(30)]
+    lost = set(random.Random(13).sample(pool, 5)) - set(random.Random(13).sample(pool, 11))
+    assert lost, "premise gone: random.sample now nests at this seed"
+
+    rng = random.Random(13)
+    order = list(pool)
+    rng.shuffle(order)
+    assert set(order[:5]) <= set(order[:11])
 
 
 # ---- the written artefacts
