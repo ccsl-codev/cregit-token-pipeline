@@ -51,9 +51,25 @@ lags. So UPSTREAM names one representative per cluster, one line each, and a
 cluster with no entry makes the scan exit non-zero and name it. That is one
 decision per cluster, not one per copy.
 
-Output. The cache is the only thing this script writes, and `select_corpus.py`
-reads its `excluded` map so the reason lands in `candidates.csv` and therefore in
-the PRISMA flow. Nothing here edits the frame directly.
+Output. The cache is the only thing this script writes. `select_corpus.py` reads
+two maps from it, so both land in `candidates.csv` and therefore in the PRISMA
+flow. Nothing here edits the frame directly.
+
+    roots      every project ever scanned, keyed by clone URL
+    projects   the name, stratum and size class of each, so a later scan can
+               resolve without being handed the same manifest again
+    excluded   one member of the cluster survives; the rest carry a reason
+    clusters   EVERY member, with its cluster id and the projects it shares a
+               history with, whether or not it was excluded
+
+Resolution runs over the whole cache, never over one manifest. Scoping it to a
+manifest oscillates: exclude a kernel copy, the draw refills the cell with the
+next kernel copy, the first copy leaves the manifest, its exclusion vanishes, and
+the draw takes it back. Measured on the real frame before the fix.
+
+The second map exists because a shared history is a property of the corpus, not
+only a reason to drop something. A reader who wants one project per history can
+filter on the cluster id; a reader who keeps them all can state the overlap.
 
     ./shared_history.py scan          # 1. find the clusters
     ./select_corpus.py emit           # 2. write the exclusions into the record
@@ -110,6 +126,65 @@ UPSTREAM: dict[str, str] = {
     "eb3b1302382b1d0cbe37eeebabfcdd546aa2fc4e": "freebsd/freebsd-src",
 }
 
+# Clusters where every member stays in the corpus, and the shared history is
+# recorded rather than resolved. Author decision, 2026-09-14.
+#
+# The reasoning is that a derivative with its own governance is a project, not a
+# duplicate: MariaDB has had separate governance since 2009, and a vendor JDK is
+# a shipped product. Dropping them would answer a question the dataset should
+# instead let its reader ask. The cost is real -- the same tokens appear under
+# more than one `repo_name` -- so the annotation has to reach the data, not just
+# this file. See EXECUTION-STATE.md D26.
+#
+# Every cluster listed here sits inside ONE stratum, so the duplication costs
+# compute and inflates a within-stratum count. It does not contaminate a
+# comparison ACROSS strata, which is what the excluded kernel copies did.
+DISTINCT_HISTORY: dict[str, str] = {
+    # MySQL descendants, all company-owned: MariaDB/server,
+    # percona/percona-xtrabackup, Tencent/TenDBCluster-Tdbctl,
+    # Tencent/TenDBCluster-TenDB. The upstream, mysql/mysql-server, is not in
+    # the sample, so no member is the cluster's obvious representative.
+    "0175860925a8dc08e831cf54220cc0e7d7387213":
+        "MySQL descendants with separate governance; upstream absent from the sample",
+
+    # OpenJDK descendants, both company-owned: SAP/SapMachine and
+    # Tencent/TencentKona-21. Upstream openjdk/jdk is not in the sample.
+    "29e77aaf0b4ec026f49a6027f045b2429e7e3177":
+        "vendor JDK builds, each a shipped product; upstream absent from the sample",
+
+    # rust-lang/rust and rust-lang/rust-analyzer, both foundation, same owner.
+    # This is a SUBTREE MERGE, not a fork: rust carries rust-analyzer under
+    # src/tools/rust-analyzer, so it holds those tokens as well as its own. The
+    # mechanism differs from a fork and the annotation should say so.
+    "37226273a7a5b2119daaab06d253f93b6813b881":
+        "subtree merge: rust-lang/rust contains rust-analyzer under src/tools",
+}
+
+
+def name_from_url(url: str) -> str:
+    """`https://github.com/Owner/Repo.git` -> `owner__repo`, ctp's project name.
+
+    Needed to backfill a project whose roots were cached before the cache
+    recorded names. The roots are the expensive part and they are already there,
+    so the entry is reconstructed instead of re-cloned. Without the backfill,
+    resolution silently narrows to the latest manifest again, which is the
+    oscillation this module exists to avoid.
+    """
+    parts = url.rstrip("/").removesuffix(".git").split("/")
+    return f"{parts[-2]}__{parts[-1]}".lower() if len(parts) >= 2 else url.lower()
+
+
+def cluster_id(roots: list[str]) -> str:
+    """A cluster's identifier: the lexicographically smallest root it holds.
+
+    Content-addressed, so it needs no registry and it is the same for every
+    member. It is a snapshot value, like `label_date`: the minimum is taken over
+    the roots of the members that were scanned, so a later scan that adds a
+    member holding a smaller root would lower it. Recompute on a re-scan, and
+    read the value in `candidates.csv` as belonging to that frame.
+    """
+    return sorted(roots)[0]
+
 
 def say(*a) -> None:
     print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
@@ -122,11 +197,13 @@ def load_cache() -> dict:
     rebuilds it, and refusing to start because a derived file is corrupt would
     block the corpus on something that costs one command to regenerate.
     """
+    empty = {"roots": {}, "errors": {}, "excluded": {}, "clusters": {},
+             "projects": {}}
     try:
         data = json.loads(CACHE.read_text())
     except (OSError, ValueError):
-        return {"roots": {}, "errors": {}, "excluded": {}}
-    for key in ("roots", "errors", "excluded"):
+        return empty
+    for key in empty:
         data.setdefault(key, {})
     return data
 
@@ -243,33 +320,59 @@ def group_by_root(roots_by_url: dict[str, list[str]]) -> list[list[str]]:
     return [sorted(g) for g in groups.values()]
 
 
-def resolve(rows: list[dict], cache: dict) -> tuple[dict[str, str], list[list[str]]]:
-    """Return (exclusions keyed by owner/repo, clusters with no named upstream).
+def resolve(cache: dict) -> tuple[dict[str, str], dict[str, dict], list[list[str]]]:
+    """Return (exclusions, annotations, clusters with no verdict).
 
-    A cluster of one is not a cluster. A cluster whose upstream is not in
-    UPSTREAM is left alone and reported: excluding a member by guesswork would
-    put the wrong project in the corpus and the wrong stratum with it.
+    Resolves over **everything the cache knows**, not over one manifest. That
+    distinction is load-bearing. A verdict scoped to the current manifest
+    oscillates: exclude a kernel copy, the draw refills the cell with the next
+    kernel copy, the first one leaves the manifest, its exclusion disappears, and
+    the draw takes it back. Roots are cached for ever, so cluster membership is
+    permanent knowledge and the manifest is only the work queue.
+
+    Every member of every cluster is annotated, whether or not it is excluded.
+    The shared history is a property of the corpus, so it belongs in the record
+    even where the project stays: a reader who wants one project per history can
+    then filter, and a reader who wants all of them can state the overlap.
+
+    Only UPSTREAM turns a cluster into an exclusion. DISTINCT_HISTORY keeps every
+    member and relies on the annotation instead. A cluster in neither is reported
+    and left alone: resolving it by guesswork would put the wrong project in the
+    corpus, and the wrong stratum with it.
     """
-    by_url = {r["url"]: r for r in rows}
+    by_url = cache["projects"]
     excluded: dict[str, str] = {}
+    annotations: dict[str, dict] = {}
     unresolved: list[list[str]] = []
 
     for cluster in group_by_root({u: cache["roots"].get(u, [])
                                   for u in by_url if u in cache["roots"]}):
         if len(cluster) < 2:
             continue
-        named = {UPSTREAM[root] for url in cluster
-                 for root in cache["roots"].get(url, []) if root in UPSTREAM}
+        roots = sorted({root for url in cluster
+                        for root in cache["roots"].get(url, [])})
+        cid = cluster_id(roots)
+        # ctp's project name is owner__repo; the frame keys on owner/repo.
+        names = {url: by_url[url]["name"].replace("__", "/", 1).lower()
+                 for url in cluster}
+        for url in cluster:
+            annotations[names[url]] = {
+                "cluster": cid,
+                "shared_with": sorted(n for u, n in names.items() if u != url),
+            }
+
+        if cid in DISTINCT_HISTORY:
+            continue
+
+        named = {UPSTREAM[root] for root in roots if root in UPSTREAM}
         if len(named) != 1:
             unresolved.append(cluster)
             continue
         upstream = named.pop()
         for url in cluster:
-            name = by_url[url]["name"]
-            # ctp's project name is owner__repo, lowercased by select_corpus.
-            if name.replace("__", "/", 1).lower() != upstream.lower():
-                excluded[name.replace("__", "/", 1).lower()] = f"shared-history={upstream}"
-    return excluded, unresolved
+            if names[url] != upstream.lower():
+                excluded[names[url]] = f"shared-history={upstream}"
+    return excluded, annotations, unresolved
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -291,16 +394,39 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def finish(rows: list[dict], cache: dict) -> int:
-    """Resolve, record the verdict in the cache, and report it."""
-    excluded, unresolved = resolve(rows, cache)
+    """Record what this manifest taught the cache, then resolve over all of it."""
+    for r in rows:
+        cache["projects"][r["url"]] = {k: r[k] for k in
+                                       ("name", "stratum", "size_class")}
+    # Anything with cached roots but no recorded name predates the projects map.
+    # Its verdict must still hold, so reconstruct the entry from the URL.
+    for url in cache["roots"]:
+        cache["projects"].setdefault(url, {"name": name_from_url(url),
+                                           "stratum": "?", "size_class": "?"})
+    excluded, annotations, unresolved = resolve(cache)
     cache["excluded"] = excluded
+    cache["clusters"] = annotations
     save_cache(cache)
 
-    by_name = {r["name"].replace("__", "/", 1).lower(): r for r in rows}
-    say(f"--- {len(excluded)} projects carry another project's history ---")
-    for name, reason in sorted(excluded.items()):
+    by_name = {p["name"].replace("__", "/", 1).lower(): p
+               for p in cache["projects"].values()}
+
+    def describe(name: str) -> str:
         r = by_name.get(name, {})
-        say(f"  {name:44s} {r.get('stratum', '?'):14s} {r.get('size_class', '?')}  {reason}")
+        return f"{name:44s} {r.get('stratum', '?'):14s} {r.get('size_class', '?')}"
+
+    kept = {n: a for n, a in annotations.items() if n not in excluded}
+    say(f"--- {len(annotations)} projects share history: "
+        f"{len(kept)} kept and flagged, {len(excluded)} excluded ---")
+    for cid, note in sorted(DISTINCT_HISTORY.items()):
+        members = sorted(n for n, a in kept.items() if a["cluster"] == cid)
+        if not members:
+            continue
+        say(f"  cluster {cid[:12]} — {note}")
+        for name in members:
+            say(f"      {describe(name)}")
+    for name, reason in sorted(excluded.items()):
+        say(f"  {describe(name)}  {reason}")
 
     failed = {u: e for u, e in cache["errors"].items() if u in {r["url"] for r in rows}}
     if failed:
@@ -309,19 +435,21 @@ def finish(rows: list[dict], cache: dict) -> int:
             say(f"  {url} — {err}")
 
     if unresolved:
-        say(f"--- {len(unresolved)} clusters have no named upstream ---")
+        by_url = cache["projects"]
+        say(f"--- {len(unresolved)} clusters have no verdict ---")
         for cluster in unresolved:
-            say("  cluster:")
-            for url in cluster:
-                r = by_name.get(url, {})
-                say(f"    {url}")
             roots = sorted({root for url in cluster
                             for root in cache["roots"].get(url, [])})
-            say(f"    roots: {' '.join(roots[:6])}")
-        say("Add one UPSTREAM entry per cluster in shared_history.py, then re-run.")
-        say("Naming the representative is a research decision: commit count "
-            "cannot decide it, because a copy may hold more commits than the "
-            "upstream or fewer.")
+            say(f"  cluster {cluster_id(roots)} ({len(roots)} roots)")
+            for url in cluster:
+                r = by_url[url]
+                say(f"      {r['name']:44s} {r['stratum']:14s} {r['size_class']}")
+        say("Each cluster needs one line in shared_history.py: an UPSTREAM entry "
+            "to keep one member, or a DISTINCT_HISTORY entry to keep them all "
+            "and rely on the annotation.")
+        say("Naming a representative is a research decision. Commit count cannot "
+            "decide it, because a copy may hold more commits than the upstream "
+            "or fewer.")
         return 1
 
     say("next: ./select_corpus.py emit && ./select_corpus.py sample")

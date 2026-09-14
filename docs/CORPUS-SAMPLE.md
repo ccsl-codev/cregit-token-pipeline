@@ -2,7 +2,7 @@
 
 Generated 2026-09-14 by `select_corpus.py sample`. Do not edit by hand.
 
-- Frame: **3840** eligible projects in `candidates.csv`.
+- Frame: **3838** eligible projects in `candidates.csv`.
 - Target: **200** projects. Drawn: **200**.
 - Seed: **20261110**. Floor: **2** per cell.
 
@@ -14,7 +14,7 @@ so a thin cell caps the draw instead of failing it.
 | --- | --- | --- | --- | --- | --- |
 | community | C | L | 6 | 2 | 33% |
 | community | C | M | 43 | 4 | 9% |
-| community | C | S | 522 | 21 | 4% |
+| community | C | S | 522 | 22 | 4% |
 | community | C++ | L | 7 | 2 | 29% |
 | community | C++ | M | 55 | 4 | 7% |
 | community | C++ | S | 628 | 25 | 4% |
@@ -22,7 +22,7 @@ so a thin cell caps the draw instead of failing it.
 | community | Java | S | 623 | 25 | 4% |
 | community | Rust | M | 7 | 2 | 29% |
 | community | Rust | S | 354 | 15 | 4% |
-| company-owned | C | L | 3 | 2 | 67% |
+| company-owned | C | L | 1 | 1 | 100% |
 | company-owned | C | M | 15 | 3 | 20% |
 | company-owned | C | S | 301 | 13 | 4% |
 | company-owned | C++ | L | 8 | 2 | 25% |
@@ -44,4 +44,4 @@ so a thin cell caps the draw instead of failing it.
 | foundation | Rust | L | 1 | 1 | 100% |
 | foundation | Rust | M | 1 | 1 | 100% |
 | foundation | Rust | S | 35 | 3 | 9% |
-| **total** | | | **3840** | **200** | **5%** |
+| **total** | | | **3838** | **200** | **5%** |

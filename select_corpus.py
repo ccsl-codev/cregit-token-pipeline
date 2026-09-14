@@ -133,18 +133,34 @@ ROOTS_CACHE = CACHE / "roots.json"
 
 
 @functools.cache
-def shared_history_exclusions() -> dict[str, str]:
-    """The scan's verdict, keyed by `owner/repo` lowercased.
+def _scan_verdict() -> dict:
+    """The whole scan cache, or an empty one.
 
-    An absent or unreadable cache means no exclusions. That is the honest
-    reading before the first scan, and it keeps `emit` working for anyone who
-    has not run one. Cached because `judge` runs once per candidate row, and
-    there are 24,405 of them.
+    An absent or unreadable cache means the scan has not run, which excludes
+    nothing and annotates nothing. That is the honest reading, and it keeps
+    `emit` working for anyone who has not scanned. Cached because `judge` runs
+    once per candidate row and there are 24,405 of them.
     """
     try:
-        return dict(json.loads(ROOTS_CACHE.read_text()).get("excluded", {}))
+        data = json.loads(ROOTS_CACHE.read_text())
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def shared_history_exclusions() -> dict[str, str]:
+    """Copies the scan resolved in favour of one member, keyed by `owner/repo`."""
+    return dict(_scan_verdict().get("excluded", {}))
+
+
+def shared_history_clusters() -> dict[str, dict]:
+    """Every project that shares a history, excluded or not, keyed by `owner/repo`.
+
+    A project that stays in the corpus still needs the relationship recorded.
+    Otherwise a reader counting tokens per stratum cannot tell that MariaDB and
+    percona-xtrabackup carry much of the same history.
+    """
+    return dict(_scan_verdict().get("clusters", {}))
 
 ROSTERS = {
     "asf": ("foundation", "https://projects.apache.org/json/foundation/projects.json"),
@@ -1141,6 +1157,14 @@ def judge(c: dict, m: dict) -> dict:
     if m.get("fork"):
         reasons.append("fork")
     key = f"{row.get('owner', '')}/{row.get('repo', '')}".lower()
+
+    # The relationship is recorded for every member of a cluster, including the
+    # ones that stay. A project kept as distinct still shares a history, and a
+    # reader counting tokens per stratum has to be able to see that.
+    cluster = shared_history_clusters().get(key, {})
+    row["history_cluster"] = cluster.get("cluster", "")
+    row["history_shared_with"] = " ".join(cluster.get("shared_with", []))
+
     upstream = SHARED_HISTORY.get(key)
     if upstream:
         reasons.append(f"shared-history={upstream}")
@@ -1183,7 +1207,8 @@ def cmd_emit(args: argparse.Namespace) -> int:
     cols = ["source", "stratum", "fact", "contested", "label_date", "owner", "repo",
             "roster_name", "roster_lang", "language", "commits", "size_class",
             "size_kb", "stars", "pushed_at", "license", "owner_type", "archived",
-            "fork", "clone_url", "included", "excluded_because"]
+            "fork", "clone_url", "history_cluster", "history_shared_with",
+            "included", "excluded_because"]
     with CANDIDATES.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()

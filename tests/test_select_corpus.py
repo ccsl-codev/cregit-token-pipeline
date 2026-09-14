@@ -892,9 +892,9 @@ def roots_cache(tmp_path, monkeypatch):
     """Point select_corpus at a scan cache under tmp_path."""
     path = tmp_path / "roots.json"
     monkeypatch.setattr(sc, "ROOTS_CACHE", path)
-    sc.shared_history_exclusions.cache_clear()
+    sc._scan_verdict.cache_clear()
     yield path
-    sc.shared_history_exclusions.cache_clear()
+    sc._scan_verdict.cache_clear()
 
 
 def test_judge_applies_the_scan_verdict(roots_cache):
@@ -925,6 +925,65 @@ def test_a_corrupt_scan_cache_excludes_nothing(roots_cache):
 def test_a_scan_cache_without_the_key_excludes_nothing(roots_cache):
     roots_cache.write_text(json.dumps({"roots": {"u": ["r"]}}))
     assert sc.shared_history_exclusions() == {}
+
+
+def test_judge_records_the_cluster_of_a_project_it_keeps(roots_cache):
+    """A project kept as distinct still shares a history. Author decision
+    2026-09-14: record the relationship instead of dropping the project."""
+    roots_cache.write_text(json.dumps({"clusters": {
+        "acme/widget": {"cluster": "abc123", "shared_with": ["other/thing"]}}}))
+    row = sc.judge(cand(), good_meta())
+    assert row["included"] is True
+    assert row["history_cluster"] == "abc123"
+    assert row["history_shared_with"] == "other/thing"
+
+
+def test_judge_records_the_cluster_of_a_project_it_excludes(roots_cache):
+    """The relationship belongs in the record either way, so a reader can see
+    which project the excluded one duplicated."""
+    roots_cache.write_text(json.dumps({
+        "excluded": {"acme/widget": "shared-history=torvalds/linux"},
+        "clusters": {"acme/widget": {"cluster": "1da177e4",
+                                     "shared_with": ["torvalds/linux"]}}}))
+    row = sc.judge(cand(), good_meta())
+    assert row["included"] is False
+    assert row["history_cluster"] == "1da177e4"
+    assert row["history_shared_with"] == "torvalds/linux"
+
+
+def test_judge_joins_several_cluster_members_with_a_space(roots_cache):
+    """The MySQL cluster holds four members, so the column is a list."""
+    roots_cache.write_text(json.dumps({"clusters": {"acme/widget": {
+        "cluster": "017586", "shared_with": ["a/one", "b/two", "c/three"]}}}))
+    assert sc.judge(cand(), good_meta())["history_shared_with"] == "a/one b/two c/three"
+
+
+def test_judge_leaves_the_cluster_columns_empty_without_a_scan(roots_cache):
+    assert not roots_cache.exists()
+    row = sc.judge(cand(), good_meta())
+    assert row["history_cluster"] == "" and row["history_shared_with"] == ""
+
+
+def test_a_scan_cache_that_is_not_a_mapping_reads_as_empty(roots_cache):
+    """json.loads accepts a bare list. Indexing it would raise later, in emit,
+    after the caller had already paid for enrichment."""
+    roots_cache.write_text("[1, 2, 3]")
+    assert sc.shared_history_clusters() == {}
+
+
+def test_the_cluster_columns_reach_candidates_csv(sandbox, roots_cache, monkeypatch):
+    """candidates.csv is the record a reviewer reads, so the columns have to
+    reach the file and not only the row dict."""
+    roots_cache.write_text(json.dumps({"clusters": {
+        "acme/widget": {"cluster": "abc123", "shared_with": ["other/thing"]}}}))
+    write(sc.CACHE / "repo-meta.json", json.dumps({"acme/widget": good_meta()}))
+    monkeypatch.setattr(sc, "collect_candidates", lambda: [cand()])
+
+    assert sc.cmd_emit(SimpleNamespace(per_stratum=0, balance_lang=False)) == 0
+    row, = read_csv_rows(sc.CANDIDATES)
+    assert row["history_cluster"] == "abc123"
+    assert row["history_shared_with"] == "other/thing"
+    assert row["included"] == "True"
 
 
 def test_the_hand_list_wins_over_the_scan(roots_cache, monkeypatch):
