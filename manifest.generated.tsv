@@ -1,5 +1,5 @@
 # Corpus manifest (TSV): name	url	category	file_filter	size_class
-# generated 2026-09-14 by select_corpus.py — 3946 projects; labels from control facts
+# generated 2026-09-14 by select_corpus.py — 3944 projects; labels from control facts
 # size_class: S < 30k commits | M 30k-150k | L > 150k
 tensorflow__tensorflow	https://github.com/tensorflow/tensorflow.git	community	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	L
 ultraworkers__claw-code	https://github.com/ultraworkers/claw-code.git	community	\.rs$	S
@@ -2990,7 +2990,6 @@ bytedance__protenix-dock	https://github.com/bytedance/Protenix-Dock.git	company-
 cloudflare__lazyhtml	https://github.com/cloudflare/lazyhtml.git	company-owned	\.rs$	S
 facebook__ocamlrep	https://github.com/facebook/ocamlrep.git	company-owned	\.rs$	S
 googlecloudplatform__healthcare-dicom-dicomweb-adapter	https://github.com/GoogleCloudPlatform/healthcare-dicom-dicomweb-adapter.git	company-owned	\.java$	S
-intel__mos	https://github.com/intel/mOS.git	company-owned	\.[ch]$	L
 nvidia__edk2-nvidia	https://github.com/NVIDIA/edk2-nvidia.git	company-owned	\.[ch]$	S
 nvidia__optix-toolkit	https://github.com/NVIDIA/optix-toolkit.git	company-owned	\.(c|cc|cp|cpp|cxx|h|hh|hpp)$	S
 eclipse-ee4j__jakartaee-tck	https://github.com/jakartaee/platform-tck.git	company-owned	\.java$	S
@@ -3158,7 +3157,6 @@ google__mobly-bundled-snippets	https://github.com/google/mobly-bundled-snippets.
 intel__openlldp	https://github.com/intel/openlldp.git	company-owned	\.[ch]$	S
 apache__jackrabbit-filevault	https://github.com/apache/jackrabbit-filevault.git	company-owned	\.java$	S
 datadog__java-reggie	https://github.com/DataDog/java-reggie.git	company-owned	\.java$	S
-suse__kernel	https://github.com/SUSE/kernel.git	company-owned	\.[ch]$	L
 intel__migtd	https://github.com/intel/MigTD.git	company-owned	\.rs$	S
 mediatek__mtk-openwrt-feeds	https://github.com/mediatek/mtk-openwrt-feeds.git	company-owned	\.[ch]$	S
 oracle__nosql	https://github.com/oracle/nosql.git	company-owned	\.java$	S

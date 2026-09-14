@@ -50,7 +50,8 @@ def sandbox(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_a_missing_cache_reads_as_empty():
-    assert sh.load_cache() == {"roots": {}, "errors": {}, "excluded": {}}
+    assert sh.load_cache() == {"roots": {}, "errors": {}, "excluded": {},
+                               "clusters": {}, "projects": {}}
 
 
 def test_a_corrupt_cache_reads_as_empty_rather_than_stopping(sandbox):
@@ -132,43 +133,61 @@ def test_a_project_with_no_roots_is_left_out_of_every_cluster():
 # resolution. Detection is exact; naming the survivor is a research decision.
 # --------------------------------------------------------------------------- #
 
+def cache_of(rows, roots_by_name):
+    """A cache holding the given roots and projects, keyed by clone URL.
+
+    resolve() reads the cache alone, never a manifest, so the fixture has to
+    populate `projects` as a real scan would.
+    """
+    by_name = {r["name"]: r["url"] for r in rows}
+    return {"roots": {by_name[n]: rs for n, rs in roots_by_name.items()},
+            "projects": {r["url"]: {k: r[k] for k in
+                                    ("name", "stratum", "size_class")}
+                         for r in rows},
+            "errors": {}, "excluded": {}, "clusters": {}}
+
+
 def test_resolve_excludes_every_member_except_the_named_upstream(monkeypatch):
     monkeypatch.setattr(sh, "UPSTREAM", {"r1": "torvalds/linux"})
     rows = [row("torvalds__linux"), row("microsoft__WSL2-Linux-Kernel")]
-    cache = {"roots": {rows[0]["url"]: ["r1"], rows[1]["url"]: ["r1"]},
-             "errors": {}, "excluded": {}}
-    excluded, unresolved = sh.resolve(rows, cache)
+    cache = cache_of(rows, {"torvalds__linux": ["r1"],
+                            "microsoft__WSL2-Linux-Kernel": ["r1"]})
+    excluded, annotations, unresolved = sh.resolve(cache)
     assert excluded == {"microsoft/wsl2-linux-kernel": "shared-history=torvalds/linux"}
     assert unresolved == []
+    # The survivor is annotated too: it shares the history, it just keeps its place.
+    assert set(annotations) == {"torvalds/linux", "microsoft/wsl2-linux-kernel"}
 
 
 def test_resolve_leaves_a_cluster_of_one_alone(monkeypatch):
     monkeypatch.setattr(sh, "UPSTREAM", {"r1": "torvalds/linux"})
     rows = [row("torvalds__linux")]
-    cache = {"roots": {rows[0]["url"]: ["r1"]}, "errors": {}, "excluded": {}}
-    assert sh.resolve(rows, cache) == ({}, [])
+    cache = cache_of(rows, {"torvalds__linux": ["r1"]})
+    assert sh.resolve(cache) == ({}, {}, [])
 
 
-def test_resolve_reports_a_cluster_with_no_named_upstream(monkeypatch):
-    """Excluding a member by guesswork would put the wrong project in the corpus
-    and the wrong stratum with it. MySQL against MariaDB is exactly that case."""
+def test_resolve_reports_a_cluster_with_no_verdict(monkeypatch):
+    """Resolving by guesswork would put the wrong project in the corpus and the
+    wrong stratum with it."""
     monkeypatch.setattr(sh, "UPSTREAM", {})
+    monkeypatch.setattr(sh, "DISTINCT_HISTORY", {})
     rows = [row("mysql__mysql-server"), row("mariadb__server")]
-    cache = {"roots": {rows[0]["url"]: ["r1"], rows[1]["url"]: ["r1"]},
-             "errors": {}, "excluded": {}}
-    excluded, unresolved = sh.resolve(rows, cache)
+    cache = cache_of(rows, {"mysql__mysql-server": ["r1"], "mariadb__server": ["r1"]})
+    excluded, annotations, unresolved = sh.resolve(cache)
     assert excluded == {}
     assert len(unresolved) == 1 and len(unresolved[0]) == 2
+    # Annotated even without a verdict: the relationship is a measurement.
+    assert len(annotations) == 2
 
 
 def test_resolve_reports_a_cluster_that_names_two_upstreams(monkeypatch):
     """Two names for one cluster is a contradiction in the table, not a verdict
     to apply. It must be reported, not resolved by dict order."""
     monkeypatch.setattr(sh, "UPSTREAM", {"r1": "a/one", "r2": "b/two"})
+    monkeypatch.setattr(sh, "DISTINCT_HISTORY", {})
     rows = [row("a__one"), row("b__two")]
-    cache = {"roots": {rows[0]["url"]: ["r1"], rows[1]["url"]: ["r1", "r2"]},
-             "errors": {}, "excluded": {}}
-    excluded, unresolved = sh.resolve(rows, cache)
+    cache = cache_of(rows, {"a__one": ["r1"], "b__two": ["r1", "r2"]})
+    excluded, _annotations, unresolved = sh.resolve(cache)
     assert excluded == {} and len(unresolved) == 1
 
 
@@ -176,9 +195,8 @@ def test_resolve_matches_the_upstream_whatever_the_case(monkeypatch):
     """The manifest lowercases; UPSTREAM is written the way GitHub spells it."""
     monkeypatch.setattr(sh, "UPSTREAM", {"r1": "FreeBSD/FreeBSD-src"})
     rows = [row("freebsd__freebsd-src"), row("freebsd__freebsd")]
-    cache = {"roots": {rows[0]["url"]: ["r1"], rows[1]["url"]: ["r1"]},
-             "errors": {}, "excluded": {}}
-    excluded, _ = sh.resolve(rows, cache)
+    cache = cache_of(rows, {"freebsd__freebsd-src": ["r1"], "freebsd__freebsd": ["r1"]})
+    excluded, _a, _u = sh.resolve(cache)
     assert excluded == {"freebsd/freebsd": "shared-history=FreeBSD/FreeBSD-src"}
 
 
@@ -186,6 +204,67 @@ def test_the_upstream_table_names_no_project_it_also_excludes():
     """A self-inconsistent table would exclude the project it protects."""
     for root, name in sh.UPSTREAM.items():
         assert name.count("/") == 1, f"{root} names {name!r}, not owner/repo"
+
+
+def test_the_two_tables_never_claim_the_same_cluster():
+    """A cluster cannot both keep one member and keep them all."""
+    assert not set(sh.UPSTREAM) & set(sh.DISTINCT_HISTORY)
+
+
+# --------------------------------------------------------------------------- #
+# keeping a cluster whole. Author decision 2026-09-14: a derivative with its own
+# governance is a project, not a duplicate, so record the relationship instead.
+# --------------------------------------------------------------------------- #
+
+def test_a_distinct_history_cluster_excludes_nobody(monkeypatch):
+    monkeypatch.setattr(sh, "UPSTREAM", {})
+    monkeypatch.setattr(sh, "DISTINCT_HISTORY", {"r1": "separate governance"})
+    rows = [row("mariadb__server"), row("percona__percona-xtrabackup")]
+    cache = cache_of(rows, {"mariadb__server": ["r1", "r2"],
+                            "percona__percona-xtrabackup": ["r1"]})
+    excluded, annotations, unresolved = sh.resolve(cache)
+    assert excluded == {} and unresolved == []
+    assert len(annotations) == 2
+
+
+def test_a_kept_cluster_still_records_who_it_shares_with(monkeypatch):
+    """This is the whole point of the decision: the overlap must be visible."""
+    monkeypatch.setattr(sh, "UPSTREAM", {})
+    monkeypatch.setattr(sh, "DISTINCT_HISTORY", {"r1": "separate governance"})
+    rows = [row("mariadb__server"), row("percona__percona-xtrabackup"),
+            row("tencent__tendbcluster-tendb")]
+    cache = cache_of(rows, dict.fromkeys(
+        ["mariadb__server", "percona__percona-xtrabackup",
+         "tencent__tendbcluster-tendb"], ["r1"]))
+    _e, annotations, _u = sh.resolve(cache)
+    assert annotations["mariadb/server"]["shared_with"] == [
+        "percona/percona-xtrabackup", "tencent/tendbcluster-tendb"]
+    assert annotations["mariadb/server"]["cluster"] == "r1"
+
+
+def test_the_cluster_id_is_the_smallest_root_in_the_cluster(monkeypatch):
+    """Content-addressed, so every member reports the same id and no registry
+    is needed."""
+    monkeypatch.setattr(sh, "UPSTREAM", {})
+    monkeypatch.setattr(sh, "DISTINCT_HISTORY", {"aaa": "kept"})
+    rows = [row("a__one"), row("b__two")]
+    cache = cache_of(rows, {"a__one": ["ccc", "aaa"], "b__two": ["aaa", "bbb"]})
+    _e, annotations, _u = sh.resolve(cache)
+    assert {a["cluster"] for a in annotations.values()} == {"aaa"}
+
+
+@pytest.mark.parametrize("roots,expected", [
+    (["b", "a", "c"], "a"),
+    (["only"], "only"),
+    (LINUX_ROOTS, "1da177e4c3f41524e886b7f1b8a0c1fc7321cac2"),
+])
+def test_cluster_id_picks_the_smallest_root(roots, expected):
+    assert sh.cluster_id(roots) == expected
+
+
+def test_the_real_linux_cluster_id_is_the_2_6_12_import():
+    """The id doubles as documentation when it is a commit a reader recognises."""
+    assert sh.cluster_id(LINUX_ROOTS) in sh.UPSTREAM
 
 
 # --------------------------------------------------------------------------- #
@@ -354,12 +433,82 @@ def test_scan_command_writes_the_verdict_into_the_cache(monkeypatch, sandbox, ca
 
 def test_scan_command_exits_non_zero_on_an_unnamed_cluster(monkeypatch, sandbox, capsys):
     monkeypatch.setattr(sh, "UPSTREAM", {})
+    monkeypatch.setattr(sh, "DISTINCT_HISTORY", {})
     monkeypatch.setattr(sh, "root_commits", lambda url, name: ["r1"])
     rows = [row("mysql__mysql-server"), row("mariadb__server")]
     import argparse as _a
     args = _a.Namespace(manifest=write_manifest(sandbox, rows), force=False)
     assert sh.cmd_scan(args) == 1
-    assert "no named upstream" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "no verdict" in out
+    # The report has to name the members, or the author cannot decide.
+    assert "mariadb__server" in out and "mysql__mysql-server" in out
+
+
+def test_a_verdict_survives_the_project_leaving_the_manifest(monkeypatch, sandbox):
+    """The bug this guards against, measured on the real frame on 2026-09-14:
+
+    exclude a kernel copy -> the draw refills the cell with the next kernel copy
+    -> the excluded one leaves the manifest -> its exclusion disappears -> the
+    draw takes it back. The corpus oscillated between intel/mOS and SUSE/kernel.
+
+    Roots are cached for ever, so cluster membership is permanent knowledge.
+    Resolution therefore runs over the cache, not over one manifest.
+    """
+    monkeypatch.setattr(sh, "UPSTREAM", {"r1": "torvalds/linux"})
+    monkeypatch.setattr(sh, "root_commits", lambda url, name: ["r1"])
+    import argparse as _a
+
+    first = [row("torvalds__linux"), row("intel__mos")]
+    sh.cmd_scan(_a.Namespace(manifest=write_manifest(sandbox, first), force=False))
+    assert "intel/mos" in json.loads((sandbox / "roots.json").read_text())["excluded"]
+
+    # The draw drops intel/mos and picks suse/kernel instead.
+    second = [row("torvalds__linux"), row("suse__kernel")]
+    sh.cmd_scan(_a.Namespace(manifest=write_manifest(sandbox, second), force=False))
+    excluded = json.loads((sandbox / "roots.json").read_text())["excluded"]
+    assert excluded == {"intel/mos": "shared-history=torvalds/linux",
+                        "suse/kernel": "shared-history=torvalds/linux"}
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://github.com/Intel/mOS.git", "intel__mos"),
+    ("https://github.com/torvalds/linux", "torvalds__linux"),
+    ("https://github.com/SUSE/kernel.git/", "suse__kernel"),
+    ("nonsense", "nonsense"),
+])
+def test_name_from_url_rebuilds_ctps_project_name(url, expected):
+    assert sh.name_from_url(url) == expected
+
+
+def test_a_verdict_survives_a_cache_written_before_names_were_recorded(monkeypatch, sandbox):
+    """Roots cached by an older version carry no name. Skipping them would
+    narrow resolution to the latest manifest again, which is the oscillation."""
+    monkeypatch.setattr(sh, "UPSTREAM", {"r1": "torvalds/linux"})
+    monkeypatch.setattr(sh, "root_commits", lambda url, name: ["r1"])
+    sh.save_cache({"roots": {"https://github.com/intel/mOS.git": ["r1"]},
+                   "errors": {}, "excluded": {}, "clusters": {}, "projects": {}})
+    import argparse as _a
+    rows = [row("torvalds__linux")]
+    sh.cmd_scan(_a.Namespace(manifest=write_manifest(sandbox, rows), force=False))
+    excluded = json.loads((sandbox / "roots.json").read_text())["excluded"]
+    assert excluded == {"intel/mos": "shared-history=torvalds/linux"}
+
+
+def test_the_scan_records_a_kept_cluster_in_the_cache(monkeypatch, sandbox):
+    """select_corpus reads `clusters`, so a kept cluster must land there even
+    though nothing is excluded."""
+    monkeypatch.setattr(sh, "UPSTREAM", {})
+    monkeypatch.setattr(sh, "DISTINCT_HISTORY", {"r1": "separate governance"})
+    monkeypatch.setattr(sh, "root_commits", lambda url, name: ["r1"])
+    rows = [row("mariadb__server"), row("percona__percona-xtrabackup")]
+    import argparse as _a
+    assert sh.cmd_scan(_a.Namespace(manifest=write_manifest(sandbox, rows),
+                                    force=False)) == 0
+    cache = json.loads((sandbox / "roots.json").read_text())
+    assert cache["excluded"] == {}
+    assert cache["clusters"]["mariadb/server"]["shared_with"] == [
+        "percona/percona-xtrabackup"]
 
 
 def test_scan_command_refuses_a_missing_manifest(sandbox, capsys):
