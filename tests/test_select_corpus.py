@@ -852,6 +852,37 @@ def test_judge_keeps_the_data_of_an_excluded_row():
     assert row["owner"] == "acme"
 
 
+# ---- shared history. GitHub flags none of these as a fork, because each was
+# pushed as an independent repository. A fork is not an independent observation.
+
+
+def test_judge_excludes_a_named_shared_history_repository(monkeypatch):
+    monkeypatch.setitem(sc.SHARED_HISTORY, "acme/widget", "torvalds/linux")
+    row = sc.judge(cand(), good_meta())
+    assert row["included"] is False
+    assert row["excluded_because"] == "shared-history=torvalds/linux"
+
+
+def test_judge_matches_shared_history_whatever_the_case(monkeypatch):
+    """The rosters spell it microsoft/WSL2-Linux-Kernel; the manifest lowercases
+    it. The rule must not depend on which spelling arrives."""
+    monkeypatch.setitem(sc.SHARED_HISTORY, "acme/widget", "torvalds/linux")
+    row = sc.judge(cand(owner="ACME", repo="Widget"), good_meta())
+    assert row["included"] is False
+
+
+def test_judge_leaves_the_upstream_itself_eligible():
+    """Dropping the copies must not drop the original."""
+    row = sc.judge(cand(owner="torvalds", repo="linux"), good_meta())
+    assert row["included"] is True
+    assert row["excluded_because"] == ""
+
+
+def test_the_shared_history_list_names_only_copies_not_the_upstream():
+    """A self-referring entry would exclude the project it protects."""
+    assert not set(sc.SHARED_HISTORY) & {v.lower() for v in sc.SHARED_HISTORY.values()}
+
+
 # ================================================================ small pure functions
 
 
