@@ -4,6 +4,7 @@ ctp.duckdb
 runs.log
 metrics.tsv
 smoke-*.log
+corpus-*.log
 
 # Per-project run state: logs/ and the single-instance lock, one directory per
 # project. Derived from a run. It lives here rather than in the project workdir
