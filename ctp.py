@@ -32,6 +32,7 @@ Benchmarking/visibility contract (shared with the previous shell runner):
 from __future__ import annotations
 
 import argparse
+import csv
 import fcntl
 import os
 import re
@@ -41,7 +42,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import configparser
@@ -654,6 +655,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     return rc
 
 
+def project_state(name: str) -> str:
+    """DONE, RUNNING, FAILED or QUEUED for one project, from the filesystem."""
+    workdir = OUT / name
+    if (workdir / f"{name}.validated").exists():
+        return "DONE"
+    if _lock_held(lock_path(name)):
+        return "RUNNING"
+    # state_dir first: the runner deletes the workdir when the pipeline fails, so
+    # a workdir-only test would report a failed project QUEUED.
+    if state_dir(name).exists() or workdir.exists():
+        return "FAILED"
+    return "QUEUED"
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     projects = read_manifest(CORPUS / args.manifest, None)
     last: dict = {}
@@ -665,17 +680,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"{'PROJECT':<16} {'CLASS':<6} {'STATE':<9} LAST_ACTIVITY")
     done = 0
     for p in projects:
-        workdir = OUT / p["name"]
-        if (workdir / f"{p['name']}.validated").exists():
-            state, done = "DONE", done + 1
-        elif _lock_held(lock_path(p["name"])):
-            state = "RUNNING"
-        elif state_dir(p["name"]).exists() or workdir.exists():
-            # state_dir first: the runner deletes the workdir when the pipeline
-            # fails, so a workdir-only test would report a failed project QUEUED.
-            state = "FAILED"
-        else:
-            state = "QUEUED"
+        state = project_state(p["name"])
+        if state == "DONE":
+            done += 1
         print(f"{p['name']:<16} {p['size_class']:<6} {state:<9} {last.get(p['name'], '—')}")
 
     free_gb = shutil.disk_usage(OUT).free // 2**30
@@ -692,6 +699,115 @@ def _lock_held(lockfile: Path) -> bool:
             return False
         except BlockingIOError:
             return True
+
+
+BAR_WIDTH = 30
+# Only a full run measures the rate. metrics.tsv cannot tell a full run from a
+# --from-step resume, and a resume looks impossibly fast: kamailio's step-10
+# resume took 74 s for 61k commits. The median over projects rejects those.
+MIN_RATE_SAMPLES = 2
+
+
+def bar(done: int, total: int, width: int = BAR_WIDTH) -> str:
+    """A fixed-width progress bar. Never divides by zero on an empty manifest."""
+    filled = round(width * done / total) if total else 0
+    return "█" * filled + "░" * (width - filled)
+
+
+def commit_counts(projects: list[dict]) -> dict:
+    """Commits per project name, read from candidates.csv.
+
+    Joins on `clone_url`, NOT on name: the manifest name is a slug that
+    lowercases and maps `_` and `.` to `-`, so four of the 200 drawn projects do
+    not match by name. Returns {} when the file is absent, so progress still
+    prints without an ETA.
+    """
+    path = CORPUS / "candidates.csv"
+    if not path.exists():
+        return {}
+    by_url = {}
+    with path.open(newline="") as fh:
+        for row in csv.DictReader(fh):
+            if row.get("commits"):
+                by_url[row["clone_url"]] = int(row["commits"])
+    return {p["name"]: by_url[p["url"]] for p in projects if p["url"] in by_url}
+
+
+def finished_runs() -> list[tuple]:
+    """(name, cls, duration_s) for every successful pipeline run, oldest first."""
+    if not METRICS.exists():
+        return []
+    runs = []
+    for line in METRICS.read_text().splitlines()[1:]:
+        _ts, name, cls, phase, dur, rc, _log = line.split("\t")
+        if phase == "pipeline" and rc == "0":
+            runs.append((name, cls, int(dur)))
+    return runs
+
+
+def measured_rate(commits: dict) -> tuple[float, int] | None:
+    """Median seconds per 1000 commits over the finished runs, and the sample size.
+
+    None when too few projects have finished to say anything.
+    """
+    rates = []
+    for name, _cls, dur in finished_runs():
+        if commits.get(name):
+            rates.append(dur / commits[name] * 1000)
+    if len(rates) < MIN_RATE_SAMPLES:
+        return None
+    rates.sort()
+    mid = len(rates) // 2
+    median = rates[mid] if len(rates) % 2 else (rates[mid - 1] + rates[mid]) / 2
+    return median, len(rates)
+
+
+def cmd_progress(args: argparse.Namespace) -> int:
+    """A one-screen progress bar, the last finished projects, and an ETA."""
+    projects = read_manifest(CORPUS / args.manifest, None)
+    states = {p["name"]: project_state(p["name"]) for p in projects}
+    done = [p for p in projects if states[p["name"]] == "DONE"]
+    running = [p for p in projects if states[p["name"]] == "RUNNING"]
+    failed = [p for p in projects if states[p["name"]] == "FAILED"]
+    total = len(projects)
+    pct = 100 * len(done) / total if total else 0.0
+
+    print(f"corpus  [{bar(len(done), total)}]  {len(done)}/{total}  {pct:.1f}%")
+    per_class = []
+    for cls in ("S", "M", "L"):
+        members = [p for p in projects if p["size_class"] == cls]
+        if members:
+            hits = sum(1 for p in members if states[p["name"]] == "DONE")
+            per_class.append(f"{cls} {hits}/{len(members)}")
+    print(f"        {'  '.join(per_class)}"
+          f"{'  |  FAILED ' + str(len(failed)) if failed else ''}")
+
+    commits = commit_counts(projects)
+    rate = measured_rate(commits)
+    if rate and commits:
+        median, samples = rate
+        left = sum(commits[p["name"]] for p in projects
+                   if states[p["name"]] != "DONE" and p["name"] in commits)
+        seconds = left / 1000 * median / max(args.jobs, 1)
+        finish = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        print(f"rate    {median:.1f} s per 1k commits (median of {samples} projects)")
+        print(f"eta     {seconds / 3600:.1f} h at --jobs {args.jobs}"
+              f"  ->  {finish.strftime('%Y-%m-%d %H:%M')} UTC"
+              f"  ({left:,} commits left)")
+    else:
+        print(f"rate    not enough finished projects yet "
+              f"(need {MIN_RATE_SAMPLES}, and candidates.csv for commit counts)")
+
+    if running:
+        print("\nrunning")
+        for p in running:
+            print(f"  {p['name']:<34} {p['size_class']}")
+    recent = finished_runs()[-args.last:]
+    if recent:
+        print(f"\nlast {len(recent)} finished")
+        for name, cls, dur in reversed(recent):
+            print(f"  {name:<34} {cls}  {dur / 60:6.1f} min")
+    return 0
 
 
 def cmd_db(args: argparse.Namespace) -> int:
@@ -761,6 +877,16 @@ def main() -> int:
     st_p = sub.add_parser("status", help="one-screen pipeline status")
     st_p.add_argument("--manifest", default="manifest.tsv")
     st_p.set_defaults(fn=cmd_status)
+
+    pr_p = sub.add_parser("progress",
+                          help="progress bar, last finished projects and an ETA")
+    pr_p.add_argument("--manifest", default="manifest.tsv")
+    pr_p.add_argument("--last", type=int, default=5, metavar="N",
+                      help="how many finished projects to list (default 5)")
+    pr_p.add_argument("--jobs", type=int, default=2,
+                      help="concurrency to assume for the ETA (default 2). Set it "
+                           "to the --jobs the run actually uses")
+    pr_p.set_defaults(fn=cmd_progress)
 
     db_p = sub.add_parser("db", help="rebuild ctp.duckdb (tracking table + unified tokens view)")
     db_p.set_defaults(fn=cmd_db)

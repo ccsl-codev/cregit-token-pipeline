@@ -1690,3 +1690,262 @@ def test_run_accepts_the_memory_flags_on_a_patched_runner(
     assert ctp.cmd_run(run_args(memory_limit="3GB", duckdb_threads=2)) == 0
     assert ctp._OPTS["memory_limit"] == "3GB"
     assert ctp._OPTS["duckdb_threads"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# cmd_progress
+# --------------------------------------------------------------------------- #
+
+def progress_args(**over):
+    """A complete `ctp progress` Namespace."""
+    base = dict(manifest="manifest.tsv", last=5, jobs=2)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def write_candidates(tmp_path: Path, *rows: tuple) -> Path:
+    """candidates.csv with only the columns commit_counts reads."""
+    path = tmp_path / "candidates.csv"
+    lines = ["clone_url,commits"]
+    lines += [f"{url},{commits}" for url, commits in rows]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def write_metrics(tmp_path: Path, *rows: tuple) -> Path:
+    path = tmp_path / "metrics.tsv"
+    head = "iso_start\tproject\tclass\tphase\tduration_s\trc\tlog\n"
+    body = "".join(f"2026-09-15T00:00:00+00:00\t{n}\t{c}\t{ph}\t{d}\t{rc}\tlog\n"
+                   for n, c, ph, d, rc in rows)
+    path.write_text(head + body)
+    return path
+
+
+@pytest.mark.parametrize("done,total,filled", [
+    (0, 10, 0),
+    (5, 10, 15),
+    (10, 10, 30),
+    (0, 0, 0),
+])
+def test_bar_fills_in_proportion(done, total, filled):
+    """A bar is 30 cells wide whatever the numbers."""
+    out = ctp.bar(done, total)
+    assert len(out) == 30
+    assert out.count("█") == filled
+
+
+def test_bar_does_not_divide_by_zero_on_an_empty_manifest():
+    """An empty manifest is a real case: --only can match nothing."""
+    assert ctp.bar(0, 0) == "░" * 30
+
+
+def test_commit_counts_joins_on_clone_url_not_name(sandbox):
+    """The manifest name is a SLUG: it lowercases and maps `_` and `.` to `-`.
+    Joining on name silently drops those projects."""
+    write_candidates(sandbox.root,
+                     ("https://github.com/amd/esmi_oob_library.git", 4321))
+    projects = [dict(name="amd__esmi-oob-library",
+                     url="https://github.com/amd/esmi_oob_library.git",
+                     size_class="S")]
+    assert ctp.commit_counts(projects) == {"amd__esmi-oob-library": 4321}
+
+
+def test_commit_counts_skips_a_row_with_no_commit_count(sandbox):
+    """An un-enriched candidate row has an empty commits field."""
+    write_candidates(sandbox.root, ("https://x/a.git", ""))
+    projects = [dict(name="a", url="https://x/a.git", size_class="S")]
+    assert ctp.commit_counts(projects) == {}
+
+
+def test_commit_counts_returns_empty_without_candidates_csv(sandbox):
+    """Progress must still print. Only the ETA depends on this file."""
+    projects = [dict(name="a", url="https://x/a.git", size_class="S")]
+    assert ctp.commit_counts(projects) == {}
+
+
+def test_finished_runs_returns_empty_without_metrics(sandbox):
+    assert ctp.finished_runs() == []
+
+
+def test_finished_runs_keeps_only_successful_pipeline_rows(sandbox):
+    """A validate row is not a run, and rc!=0 is not a finish."""
+    write_metrics(sandbox.root,
+                  ("a", "S", "pipeline", 100, 0),
+                  ("a", "S", "validate", 0, 0),
+                  ("b", "M", "pipeline", 200, 1),
+                  ("c", "M", "pipeline", 300, 0))
+    assert ctp.finished_runs() == [("a", "S", 100), ("c", "M", 300)]
+
+
+def test_measured_rate_is_none_below_the_sample_floor(sandbox):
+    """One project is an anecdote, not a rate."""
+    write_metrics(sandbox.root, ("a", "S", "pipeline", 100, 0))
+    write_candidates(sandbox.root, ("https://x/a.git", 1000))
+    projects = [dict(name="a", url="https://x/a.git", size_class="S")]
+    assert ctp.measured_rate(ctp.commit_counts(projects)) is None
+
+
+def test_measured_rate_takes_the_median_of_an_odd_sample(sandbox):
+    """The median rejects a --from-step resume, which looks impossibly fast:
+    kamailio's step-10 resume took 74 s for 61k commits."""
+    write_metrics(sandbox.root,
+                  ("resume", "M", "pipeline", 74, 0),
+                  ("a", "M", "pipeline", 100, 0),
+                  ("b", "M", "pipeline", 120, 0))
+    commits = {"resume": 61000, "a": 1000, "b": 1000}
+    median, samples = ctp.measured_rate(commits)
+    assert samples == 3
+    assert median == 100.0, "the 1.2 s/1k resume must not drag the median"
+
+
+def test_measured_rate_averages_the_middle_two_of_an_even_sample(sandbox):
+    write_metrics(sandbox.root,
+                  ("a", "M", "pipeline", 100, 0),
+                  ("b", "M", "pipeline", 120, 0))
+    median, samples = ctp.measured_rate({"a": 1000, "b": 1000})
+    assert (median, samples) == (110.0, 2)
+
+
+def test_measured_rate_ignores_a_project_with_no_commit_count(sandbox):
+    """Two finished runs but one unknown size means one usable point."""
+    write_metrics(sandbox.root,
+                  ("a", "M", "pipeline", 100, 0),
+                  ("unknown", "M", "pipeline", 999, 0))
+    assert ctp.measured_rate({"a": 1000}) is None
+
+
+def test_progress_prints_a_bar_and_the_class_breakdown(sandbox, capsys):
+    """The headline numbers: how many of how many, and per size class."""
+    write_manifest(sandbox.root,
+                   "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
+                   "b\thttps://x/b.git\tcommunity\t\\.c$\tM")
+    (sandbox.out / "a").mkdir()
+    (sandbox.out / "a" / "a.validated").write_text("rows=1\n")
+
+    assert ctp.cmd_progress(progress_args()) == 0
+    out = capsys.readouterr().out
+    assert "1/2" in out
+    assert "50.0%" in out
+    assert "S 1/1" in out
+    assert "M 0/1" in out
+
+
+def test_progress_reports_failed_projects(sandbox, capsys):
+    """A failed project is neither done nor running, and it must be visible."""
+    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
+    (sandbox.root / "state" / "a").mkdir(parents=True)
+
+    assert ctp.cmd_progress(progress_args()) == 0
+    assert "FAILED 1" in capsys.readouterr().out
+
+
+def test_progress_lists_the_running_projects(sandbox, capsys):
+    """A held lock means running."""
+    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
+    with held_lock(ctp.lock_path("a")):
+        assert ctp.cmd_progress(progress_args()) == 0
+    out = capsys.readouterr().out
+    assert "running" in out
+    assert "a" in out
+
+
+def test_progress_lists_the_last_finished_newest_first(sandbox, capsys):
+    """The question is "what just finished", so newest goes first."""
+    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
+    write_metrics(sandbox.root,
+                  ("older", "S", "pipeline", 60, 0),
+                  ("newer", "S", "pipeline", 120, 0))
+
+    assert ctp.cmd_progress(progress_args(last=2)) == 0
+    out = capsys.readouterr().out
+    assert out.index("newer") < out.index("older")
+    assert "2.0 min" in out
+
+
+def test_progress_honours_the_last_limit(sandbox, capsys):
+    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
+    write_metrics(sandbox.root,
+                  ("one", "S", "pipeline", 60, 0),
+                  ("two", "S", "pipeline", 60, 0),
+                  ("three", "S", "pipeline", 60, 0))
+
+    assert ctp.cmd_progress(progress_args(last=1)) == 0
+    out = capsys.readouterr().out
+    assert "three" in out
+    assert "one" not in out
+
+
+def test_progress_estimates_an_eta_from_the_measured_rate(sandbox, capsys):
+    """1000 commits left at 100 s per 1k, over 2 jobs, is 50 s.
+
+    The rate sample is drawn from THIS manifest, because commit_counts only
+    covers manifest rows. A finished project outside the manifest contributes
+    nothing, which is what we want: the rate should describe the work left.
+    """
+    write_manifest(sandbox.root,
+                   "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
+                   "b\thttps://x/b.git\tcommunity\t\\.c$\tS",
+                   "c\thttps://x/c.git\tcommunity\t\\.c$\tS")
+    write_candidates(sandbox.root,
+                     ("https://x/a.git", 1000), ("https://x/b.git", 1000),
+                     ("https://x/c.git", 1000))
+    write_metrics(sandbox.root,
+                  ("a", "S", "pipeline", 100, 0),
+                  ("b", "S", "pipeline", 100, 0))
+    for name in ("a", "b"):
+        (sandbox.out / name).mkdir()
+        (sandbox.out / name / f"{name}.validated").write_text("rows=1\n")
+
+    assert ctp.cmd_progress(progress_args(jobs=2)) == 0
+    out = capsys.readouterr().out
+    assert "100.0 s per 1k commits" in out
+    assert "1,000 commits left" in out, "the two done projects must not count"
+    assert "0.0 h at --jobs 2" in out, "1000 commits / 2 jobs at 100 s/1k = 50 s"
+
+
+def test_progress_eta_treats_zero_jobs_as_one(sandbox, capsys):
+    """--jobs 0 must not divide by zero."""
+    write_manifest(sandbox.root,
+                   "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
+                   "b\thttps://x/b.git\tcommunity\t\\.c$\tS")
+    write_candidates(sandbox.root,
+                     ("https://x/a.git", 1000), ("https://x/b.git", 1000))
+    write_metrics(sandbox.root,
+                  ("a", "S", "pipeline", 100, 0),
+                  ("b", "S", "pipeline", 100, 0))
+
+    assert ctp.cmd_progress(progress_args(jobs=0)) == 0
+    assert "at --jobs 0" in capsys.readouterr().out
+
+
+def test_progress_says_so_when_it_cannot_estimate(sandbox, capsys):
+    """No candidates.csv means no commit counts, so no ETA. Say why."""
+    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
+
+    assert ctp.cmd_progress(progress_args()) == 0
+    assert "not enough finished projects yet" in capsys.readouterr().out
+
+
+def test_progress_survives_an_empty_manifest(sandbox, capsys):
+    """--only can match nothing, and a crash here would be a poor status tool."""
+    write_manifest(sandbox.root)
+
+    assert ctp.cmd_progress(progress_args()) == 0
+    out = capsys.readouterr().out
+    assert "0/0" in out
+    assert "0.0%" in out
+
+
+def test_project_state_reports_each_of_the_four_states(sandbox):
+    """cmd_status and cmd_progress share this, so it is worth pinning directly."""
+    assert ctp.project_state("nothing") == "QUEUED"
+
+    (sandbox.out / "failed").mkdir()
+    assert ctp.project_state("failed") == "FAILED"
+
+    (sandbox.out / "done").mkdir()
+    (sandbox.out / "done" / "done.validated").write_text("rows=1\n")
+    assert ctp.project_state("done") == "DONE"
+
+    with held_lock(ctp.lock_path("busy")):
+        assert ctp.project_state("busy") == "RUNNING"
