@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -154,6 +155,63 @@ def script_supports(flag: str) -> bool:
         return flag in (CREGIT / "run_pipeline_process.sh").read_text()
     except OSError:
         return False
+
+
+_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s?(B|K|M|G|T|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$")
+_SIZE_UNITS = {"B": 1, "K": 1024, "KB": 1024, "KIB": 1024,
+               "M": 1024 ** 2, "MB": 1024 ** 2, "MIB": 1024 ** 2,
+               "G": 1024 ** 3, "GB": 1024 ** 3, "GIB": 1024 ** 3,
+               "T": 1024 ** 4, "TB": 1024 ** 4, "TIB": 1024 ** 4}
+
+# Measured 2026-09-15: memory_limit bounds DuckDB's buffer manager, not the
+# process. RssAnon settled at 11.0-11.6 GB under an 8GB limit.
+SETTLE_RATIO = 1.4
+
+
+def size_to_bytes(text: str) -> int:
+    """Bytes for a DuckDB size string. Raises ValueError on anything else.
+
+    The rule mirrors parse_memory_limit() in generate_dataset.py, so ctp refuses
+    a bad value before the run instead of at step 10, which is hours in.
+    """
+    cleaned = text.strip()
+    if cleaned.endswith("%"):
+        raise ValueError(
+            f"--memory-limit takes an absolute size, not a percentage (got {text!r}). "
+            "A percentage measures total RAM, and only the free part is usable.")
+    m = _SIZE_RE.match(cleaned.upper())
+    if not m:
+        raise ValueError(f"cannot read {text!r} as a memory size. Example: 3GB")
+    return int(float(m.group(1)) * _SIZE_UNITS[m.group(2)])
+
+
+def available_bytes() -> int | None:
+    """MemAvailable from /proc/meminfo, or None when it cannot be read."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def memory_budget_warning(limit: str, jobs: int) -> str | None:
+    """Warn when 1.4 x jobs x limit does not fit in MemAvailable.
+
+    This is the guard whose absence killed the 2026-09-15 run: two projects at
+    the generator's 8GB default need ~22 GB, and this box had 6 GB free.
+    """
+    available = available_bytes()
+    if available is None:
+        return None
+    want = int(size_to_bytes(limit) * SETTLE_RATIO * jobs)
+    if want <= available:
+        return None
+    return (f"memory budget: {jobs} concurrent x {limit} settles at about "
+            f"{retain.human(want)}, but only {retain.human(available)} is available. "
+            f"Step 10 can exhaust RAM and the kernel or the harness will kill the "
+            f"run. Lower --memory-limit or --jobs.")
 
 
 def capture_devenv_env() -> dict:
@@ -437,6 +495,14 @@ def run_project(project: dict) -> str:
             pipeline_args += ["--gc", _OPTS["gc"]]
         if _OPTS.get("blame_jobs"):
             pipeline_args += ["--blame-jobs", str(_OPTS["blame_jobs"])]
+        # Step 10 is the only step that can exhaust RAM. Measured 2026-09-15: at
+        # the generator's own 8GB default, two concurrent projects need ~22 GB and
+        # the run died on this 30 GB box, which already gives ~17 GB to other
+        # software. Budget 1.4 x --jobs x --memory-limit.
+        if _OPTS.get("memory_limit"):
+            pipeline_args += ["--memory-limit", _OPTS["memory_limit"]]
+        if _OPTS.get("duckdb_threads"):
+            pipeline_args += ["--duckdb-threads", str(_OPTS["duckdb_threads"])]
         # FROM_STEP is positional and must come last. The runner only wipes the
         # workdir when it is 1, so a resume keeps whatever finished before.
         from_step = _OPTS.get("from_step", 1)
@@ -520,13 +586,35 @@ def cmd_run(args: argparse.Namespace) -> int:
                  "Patch it before relying on the flag.")
     if args.blame_jobs < 0:
         sys.exit(f"--blame-jobs cannot be negative (got {args.blame_jobs}).")
+    if args.memory_limit and not script_supports("--memory-limit"):
+        sys.exit(f"--memory-limit is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                 "That checkout runs step 10 at the generator's own default, so the\n"
+                 "flag would be silently dropped. Patch it before relying on it.")
+    if args.duckdb_threads and not script_supports("--duckdb-threads"):
+        sys.exit(f"--duckdb-threads is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                 "Patch it before relying on the flag.")
+    if args.duckdb_threads < 0:
+        sys.exit(f"--duckdb-threads cannot be negative (got {args.duckdb_threads}).")
+    # Refuse a bad size now. Step 10 is the last step, so the alternative is
+    # finding the typo after every earlier step has already run.
+    if args.memory_limit:
+        try:
+            size_to_bytes(args.memory_limit)
+        except ValueError as exc:
+            sys.exit(f"--memory-limit: {exc}")
     if args.from_step < 1:
         sys.exit(f"--from-step must be 1 or greater (got {args.from_step}).")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
     _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
                  shards=args.shards, shard_classes=shard_classes,
                  from_step=args.from_step, gc=args.gc,
-                 blame_jobs=args.blame_jobs)
+                 blame_jobs=args.blame_jobs,
+                 memory_limit=args.memory_limit,
+                 duckdb_threads=args.duckdb_threads)
+    if args.memory_limit:
+        warning = memory_budget_warning(args.memory_limit, args.jobs)
+        if warning:
+            say(f"WARNING: {warning}")
     if args.from_step > 1:
         say(f"resuming at step {args.from_step}: the runner keeps the existing workdir")
     if args.shards > 1:
@@ -649,6 +737,19 @@ def main() -> int:
                        help="forward --gc to run_pipeline_process.sh, which packs "
                             "the generated repo after tokenizing. Omit to accept "
                             "the runner's own default")
+    run_p.add_argument("--memory-limit", metavar="SIZE",
+                       help="forward --memory-limit to step 10, the DuckDB "
+                            "generator. Omit to accept that script's own 8GB "
+                            "default. Measured 2026-09-15: the limit bounds "
+                            "DuckDB's buffers, not the process, which settles at "
+                            "about 1.4x the limit. Two projects at 8GB therefore "
+                            "need ~22 GB, and the corpus run died on this 30 GB "
+                            "box. Budget 1.4 x --jobs x SIZE. Takes an absolute "
+                            "size such as 3GB, never a percentage")
+    run_p.add_argument("--duckdb-threads", type=int, default=0, metavar="N",
+                       help="forward --duckdb-threads to step 10. Each sorting "
+                            "thread holds its own buffers, so fewer threads lower "
+                            "the peak. Omit to accept the generator's default")
     run_p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
                        help="run the blame step with N parallel workers. Blame is "
                             "the bottleneck: measured serially on Linux it managed "

@@ -49,6 +49,8 @@ REAL_RUNNER_USAGE = """\
 #   --skip-html       do not generate the HTML views
 #   --gc MODE         how to pack the generated cregit repo after tokenizing
 #   --blame-jobs N    run the blame step with N parallel workers
+#   --memory-limit SIZE    forward the DuckDB heap cap to step 10
+#   --duckdb-threads N     forward the DuckDB sorting thread count to step 10
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
 # unknown arguments exit 2
@@ -928,7 +930,8 @@ def run_args(**over):
     adding one is a single edit rather than one per test."""
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
                 skip_html=False, drop_memo=False, shards=0, shard_classes="L",
-                from_step=1, gc=None, blame_jobs=0)
+                from_step=1, gc=None, blame_jobs=0,
+                memory_limit=None, duckdb_threads=0)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -1454,3 +1457,236 @@ def test_run_accepts_blame_jobs_on_a_patched_runner(
 
     assert ctp.cmd_run(run_args(blame_jobs=12)) == 0
     assert ctp._OPTS["blame_jobs"] == 12
+
+
+# --------------------------------------------------------------------------- #
+# Step 10 memory budget. Added after the 2026-09-15 corpus run was killed for
+# low memory: the generator's own 8GB default, times two concurrent projects,
+# needed ~22 GB on a 30 GB box that already gave ~17 GB to other software.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("text,want", [
+    ("1B", 1),
+    ("2K", 2048),
+    ("2KB", 2048),
+    ("2KiB", 2048),
+    ("3MB", 3 * 1024 ** 2),
+    ("3M", 3 * 1024 ** 2),
+    ("3MiB", 3 * 1024 ** 2),
+    ("8GB", 8 * 1024 ** 3),
+    ("8G", 8 * 1024 ** 3),
+    ("8GiB", 8 * 1024 ** 3),
+    ("1T", 1024 ** 4),
+    ("1TB", 1024 ** 4),
+    ("1TiB", 1024 ** 4),
+    ("1.5 GiB", int(1.5 * 1024 ** 3)),
+    ("  3GB  ", 3 * 1024 ** 3),
+    ("3gb", 3 * 1024 ** 3),
+])
+def test_size_to_bytes_reads_every_unit_duckdb_accepts(text, want):
+    """The budget arithmetic is only as good as the parse, and DuckDB accepts
+    all of these spellings."""
+    assert ctp.size_to_bytes(text) == want
+
+
+def test_size_to_bytes_refuses_a_percentage():
+    """A percentage measures TOTAL RAM. Only the free part is usable, and on
+    this box 17 of 30 GB belongs to other software."""
+    with pytest.raises(ValueError) as exc:
+        ctp.size_to_bytes("80%")
+    assert "not a percentage" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad", ["3gigs", "", "GB", "3 4GB", "-3GB", "3PB"])
+def test_size_to_bytes_refuses_anything_it_cannot_read(bad):
+    """Guessing at a typo would cap the heap at the wrong number silently."""
+    with pytest.raises(ValueError) as exc:
+        ctp.size_to_bytes(bad)
+    assert "cannot read" in str(exc.value)
+
+
+def test_available_bytes_reads_mem_available(tmp_path, monkeypatch):
+    """MemAvailable, not MemFree: the reclaimable page cache is usable."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       31000000 kB\n"
+                       "MemFree:          900000 kB\n"
+                       "MemAvailable:    5500000 kB\n")
+    monkeypatch.setattr(ctp, "Path", lambda _p: meminfo)
+    assert ctp.available_bytes() == 5500000 * 1024
+
+
+def test_available_bytes_returns_none_when_the_key_is_absent(tmp_path, monkeypatch):
+    """An unexpected /proc format must not raise. The warning is advisory."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       31000000 kB\n")
+    monkeypatch.setattr(ctp, "Path", lambda _p: meminfo)
+    assert ctp.available_bytes() is None
+
+
+def test_available_bytes_returns_none_when_proc_cannot_be_read(monkeypatch):
+    """A non-Linux host has no /proc/meminfo. Warn nothing rather than crash."""
+    def boom(_p):
+        raise OSError("no /proc here")
+    monkeypatch.setattr(ctp, "Path", boom)
+    assert ctp.available_bytes() is None
+
+
+def test_available_bytes_returns_none_on_an_unparsable_value(tmp_path, monkeypatch):
+    """A malformed number must not raise either."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemAvailable:    not-a-number kB\n")
+    monkeypatch.setattr(ctp, "Path", lambda _p: meminfo)
+    assert ctp.available_bytes() is None
+
+
+def test_available_bytes_returns_none_on_a_truncated_line(tmp_path, monkeypatch):
+    """A line with no value field must not raise."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemAvailable:\n")
+    monkeypatch.setattr(ctp, "Path", lambda _p: meminfo)
+    assert ctp.available_bytes() is None
+
+
+def test_memory_budget_warning_names_the_shortfall(monkeypatch):
+    """This is the exact case that killed the run: 2 x 8GB against 6 GB free."""
+    monkeypatch.setattr(ctp, "available_bytes", lambda: 6 * 1024 ** 3)
+    warning = ctp.memory_budget_warning("8GB", 2)
+    assert warning is not None
+    assert "2 concurrent x 8GB" in warning
+    assert "22.4 GiB" in warning, "1.4 x 2 x 8GB, the measured settle ratio"
+    assert "6.0 GiB" in warning
+
+
+def test_memory_budget_warning_is_silent_when_the_budget_fits(monkeypatch):
+    """1.4 x 1 x 3GB is 4.2 GiB, which fits in 8 GiB."""
+    monkeypatch.setattr(ctp, "available_bytes", lambda: 8 * 1024 ** 3)
+    assert ctp.memory_budget_warning("3GB", 1) is None
+
+
+def test_memory_budget_warning_is_silent_when_ram_is_unknown(monkeypatch):
+    """No reading means no claim. Refusing to run would be worse."""
+    monkeypatch.setattr(ctp, "available_bytes", lambda: None)
+    assert ctp.memory_budget_warning("8GB", 4) is None
+
+
+def test_memory_budget_counts_every_concurrent_job(monkeypatch):
+    """The limit is per generator, not per run, so --jobs multiplies it."""
+    monkeypatch.setattr(ctp, "available_bytes", lambda: 10 * 1024 ** 3)
+    assert ctp.memory_budget_warning("3GB", 2) is None, "1.4 x 2 x 3GB = 8.4 GiB"
+    assert ctp.memory_budget_warning("3GB", 3) is not None, "1.4 x 3 x 3GB = 12.6 GiB"
+
+
+def test_memory_limit_is_forwarded_to_the_runner(runner, jq):
+    """Step 10 is the only step that can exhaust RAM. The cap only helps if it
+    reaches the runner argv."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, memory_limit="3GB")
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--memory-limit") + 1] == "3GB"
+
+
+def test_duckdb_threads_is_forwarded_to_the_runner(runner, jq):
+    """Each sorting thread holds its own buffers, so the count bounds the peak."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, duckdb_threads=2)
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--duckdb-threads") + 1] == "2"
+
+
+def test_no_memory_flags_leave_the_generator_default_alone(runner, jq):
+    """Unset means "not asked for", so generate_dataset.py keeps its own 8GB."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False,
+                     memory_limit=None, duckdb_threads=0)
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert "--memory-limit" not in argv
+    assert "--duckdb-threads" not in argv
+
+
+def test_run_refuses_memory_limit_on_a_runner_that_ignores_it(
+        sandbox, monkeypatch, runner_script):
+    """Accepting the flag against an unpatched checkout would drop it silently,
+    and step 10 would run at 8GB anyway — the failure this guard exists for."""
+    runner_script(REAL_RUNNER_USAGE.replace("--memory-limit SIZE", "--no-such-flag"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(memory_limit="3GB"))
+    assert "--memory-limit is not implemented" in str(exc.value)
+
+
+def test_run_refuses_duckdb_threads_on_a_runner_that_ignores_it(
+        sandbox, monkeypatch, runner_script):
+    """Same rule as --memory-limit."""
+    runner_script(REAL_RUNNER_USAGE.replace("--duckdb-threads N", "--no-such-flag"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(duckdb_threads=2))
+    assert "--duckdb-threads is not implemented" in str(exc.value)
+
+
+def test_run_rejects_a_negative_duckdb_threads(sandbox, monkeypatch, runner_script):
+    """A negative count is a typo, and step 10 is the last step."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(duckdb_threads=-1))
+    assert "--duckdb-threads cannot be negative" in str(exc.value)
+
+
+def test_run_rejects_a_bad_memory_limit_before_the_run(
+        sandbox, monkeypatch, runner_script):
+    """Step 10 is hours in. A typo must surface now, not after tokenizing."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(memory_limit="80%"))
+    assert "--memory-limit" in str(exc.value)
+    assert "not a percentage" in str(exc.value)
+
+
+def test_run_warns_when_the_memory_budget_does_not_fit(
+        sandbox, monkeypatch, runner_script, capsys):
+    """The warning is the guard whose absence killed the 2026-09-15 run."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "available_bytes", lambda: 6 * 1024 ** 3)
+
+    assert ctp.cmd_run(run_args(memory_limit="8GB", jobs=2)) == 0
+    assert "WARNING: memory budget" in capsys.readouterr().out
+
+
+def test_run_does_not_warn_when_the_memory_budget_fits(
+        sandbox, monkeypatch, runner_script, capsys):
+    """A warning on a safe setting would train the operator to ignore it."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "available_bytes", lambda: 32 * 1024 ** 3)
+
+    assert ctp.cmd_run(run_args(memory_limit="3GB", jobs=2)) == 0
+    assert "memory budget" not in capsys.readouterr().out
+
+
+def test_run_accepts_the_memory_flags_on_a_patched_runner(
+        sandbox, monkeypatch, runner_script):
+    """The refusals must not fire on the patched runner."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "available_bytes", lambda: 32 * 1024 ** 3)
+
+    assert ctp.cmd_run(run_args(memory_limit="3GB", duckdb_threads=2)) == 0
+    assert ctp._OPTS["memory_limit"] == "3GB"
+    assert ctp._OPTS["duckdb_threads"] == 2
