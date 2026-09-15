@@ -2280,15 +2280,31 @@ def test_review_needs_candidates_csv_first(sandbox):
 
 
 def test_review_reports_the_three_totals(sandbox):
-    """The header must reconcile: candidates = eligible + excluded."""
+    """The header must reconcile: candidates = eligible rows + excluded."""
     review_csv([review_row(),
                 review_row(repo="dead", included="False",
                            excluded_because="unreachable")])
     assert sc.cmd_review(SimpleNamespace()) == 0
     text = sc.REVIEW_OUT.read_text()
     assert "- candidates: **2**" in text
-    assert "- eligible: **1**" in text
+    assert "- eligible rows: **1**" in text
     assert "- excluded: **1**" in text
+
+
+def test_review_reports_the_frame_as_well_as_the_row_count(sandbox):
+    """The review counts eligible ROWS and the draw counts REPOSITORIES, and the
+    two differ by the redirect pairs. A reader who meets 3,948 in one document
+    and 3,842 in another has to find the reconciliation here."""
+    url = "https://github.com/apache/doris.git"
+    review_csv([review_row(owner="apache", repo="doris", clone_url=url),
+                review_row(owner="apache", repo="incubator-doris", clone_url=url),
+                review_row(owner="other", repo="thing",
+                           clone_url="https://github.com/other/thing.git")])
+    assert sc.cmd_review(SimpleNamespace()) == 0
+    text = sc.REVIEW_OUT.read_text()
+    assert "- eligible rows: **3**" in text
+    assert "sampling frame: 2 repositories" in text
+    assert "1 of the eligible rows" in text
 
 
 def test_review_warns_when_enrichment_is_incomplete(sandbox):
