@@ -8,6 +8,57 @@ Read this with `docs/DESIGN.md`, which states the intended design, and with
 
 ---
 
+## 2026-09-18
+
+### 1. External validation of the strata against Spinellis et al. MSR'20
+
+| | |
+| --- | --- |
+| Files | `validate_spinellis.py`, `tests/test_validate_spinellis.py`, `docs/SPINELLIS-VALIDATION.md`, `docs/CODEBOOK.md` (G8) |
+| Why | The strata had no external check. Spinellis et al. published labels for the same population, and we already read both of their files, so the check costs nothing but was never run. |
+
+The two label sets do not measure the same thing. They label **contribution**: a
+project is enterprise if several committers share one enterprise email domain.
+We label **control** (`CODEBOOK.md` section 1). So most of the report screens for
+leads and cannot correct a label. Section 4 is the exception, and it is a hard
+check: their registry flags are already a control fact here, emitted by
+`parse_spinellis` as `F1_pool:spinellis-*`.
+
+What it found, and it is a real defect:
+
+`SP_MAX_PER_COMPANY = 12` caps how many strong-tier projects one company
+contributes. 1,322 rows in their file pass our own strong-tier rule; the cap
+admitted 400. The cap is right for sampling. But a capped-out project does not
+leave the pipeline — it re-enters through `ghsearch` or `cncf-landscape` and
+takes that source's stratum. So a cap on *sampling* became an error in
+*labelling*. Seven rows in the eligible frame carry a registry-attested company
+and label `community`, four of them with `F1_residual:none`, which is no control
+fact at all:
+
+`abseil/abseil-cpp`, `awsdocs/aws-doc-sdk-examples`,
+`firecracker-microvm/firecracker`, `googlecontainertools/jib`, `grpc/grpc-java`,
+`spinnaker/spinnaker`, `z3prover/z3`.
+
+Recorded as gap **G8**. Not fixed here: the fix changes strata, so it must be one
+deliberate change with a re-draw, not a side effect of adding a measure.
+
+The reverse direction is not our defect. 138 rows we label `company-owned` sit in
+their non-enterprise cohort, under `google`, `alibaba`, `facebook`, `intel` and
+`oracle`. We hold a namespace fact. Their heuristics need several committers on
+one enterprise domain, so staff who commit from personal addresses defeat them.
+That measures their recall, and it is a result worth reporting.
+
+Evidence:
+
+```sh
+./validate_spinellis.py -o docs/SPINELLIS-VALIDATION.md   # regenerates the report
+./run_tests.sh                                            # 969 passed, validate_spinellis.py 100.0%
+```
+
+The script imports its thresholds from `select_corpus.py` rather than restating
+them, so the audit cannot drift from the selector it audits. A test asserts that
+binding. The first test run found a division by zero on an empty frame, now fixed.
+
 ## 2026-09-13
 
 ### 1. Test harness, and an 80% coverage floor

@@ -201,6 +201,7 @@ Each one is a limitation the paper must state.
 | G5 | **`COMPANY_ORGS` is hand-seeded** | Coverage of company namespaces is not systematic, so F2 recall is unknown. |
 | G6 | **No relicense time-boxing** | Section 7. |
 | G7 | **Unverified organisations are invisible to F2** | GitHub verification is opt-in, so a real company that never verified its namespace is missed. |
+| G8 | **`SP_MAX_PER_COMPANY` leaks from sampling into labelling** | The cap stops one firm dominating the draw, which is correct for sampling. But a capped-out project does not leave the pipeline. It re-enters through a weaker source and takes that source's stratum, so a project our own strong-tier rule attests to a company can label `community`. Seven such rows sit in the eligible frame. `validate_spinellis.py` measures them and `docs/SPINELLIS-VALIDATION.md` section 4 lists them. The cap must bound how many rows *enter*; the registry fact must still attach wherever a row enters. One constant now serves both concerns. **Open.** |
 
 ## 10. Procedure for the second rater
 
