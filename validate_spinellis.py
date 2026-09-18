@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""validate_spinellis — check our strata against Spinellis et al. MSR'20 labels.
+
+    ./validate_spinellis.py                     # print the report
+    ./validate_spinellis.py -o docs/SPINELLIS-VALIDATION.md
+
+Read `docs/SPINELLIS-VALIDATION.md` for the findings. This file is the measure.
+
+The two label sets do not measure the same thing, so this is not an agreement
+test between equals:
+
+  Spinellis labels CONTRIBUTION. A project is "enterprise" if several committers
+  share one enterprise email domain. Their manual check put accuracy at 89%.
+  Their recall is unknown, and a company repository whose staff commit from
+  personal addresses is invisible to it.
+
+  We label CONTROL. See docs/CODEBOOK.md section 1. A stratum must not come from
+  contribution composition, or the firm-concentration finding becomes true by
+  construction.
+
+So a project can be `community` by control and enterprise by contribution, and
+that off-diagonal is a result, not an error. The kernel is the standard example.
+Treat a disagreement as a lead to re-check, never as a correction.
+
+One section is an exception and is a hard check: section 4. Spinellis's registry
+flags (Fortune Global 500, SEC 10-K, SEC 20-F) are already a control fact in this
+pipeline — `parse_spinellis` emits them as `F1_pool:spinellis-*`. So a row that
+our own strong-tier rule would label `company-owned`, and that carries some other
+stratum, is a defect by our rule alone. No appeal to their heuristics is needed.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import select_corpus as sc
+
+HERE = Path(__file__).resolve().parent
+CANDIDATES = HERE / "candidates.csv"
+STRATA = ("company-owned", "foundation", "community")
+VERDICTS = ("enterprise", "cohort", "absent")
+
+
+def norm(url: str) -> str | None:
+    """github.com/Foo/Bar.git -> foo/bar. Both datasets key on the URL."""
+    u = (url or "").strip().lower()
+    for p in ("https://github.com/", "http://github.com/", "git@github.com:", "github.com/"):
+        if u.startswith(p):
+            u = u[len(p):]
+            break
+    if u.endswith(".git"):
+        u = u[:-4]
+    return u.strip("/") or None
+
+
+def load_enterprise() -> dict[str, dict]:
+    if not sc.SPINELLIS_TSV.exists():
+        sys.exit(f"missing {sc.SPINELLIS_TSV}")
+    out = {}
+    for line in sc.SPINELLIS_TSV.read_text(errors="replace").splitlines():
+        f = line.split("\t")
+        if len(f) < len(sc.SPINELLIS_COLS):
+            f += [""] * (len(sc.SPINELLIS_COLS) - len(f))
+        r = dict(zip(sc.SPINELLIS_COLS, f))
+        k = norm(r["url"])
+        if k:
+            out[k] = r
+    return out
+
+
+def load_cohort() -> set[str]:
+    if not sc.COHORT_TSV.exists():
+        sys.exit(f"missing {sc.COHORT_TSV}")
+    return {k for k in (norm(l.split("\t")[0])
+                        for l in sc.COHORT_TSV.read_text(errors="replace").splitlines()) if k}
+
+
+def flag(v: str) -> bool:
+    return (v or "").strip().lower() == "t"
+
+
+def num(v: str) -> int:
+    try:
+        return int((v or "").strip() or 0)
+    except ValueError:
+        return 0
+
+
+def tier(r: dict) -> str | None:
+    """The registry that attests the company. Same precedence as parse_spinellis."""
+    if flag(r["fg500"]):
+        return "fg500"
+    if flag(r["sec10k"]):
+        return "sec10k"
+    if flag(r["sec20f"]):
+        return "sec20f"
+    return None
+
+
+def strong_tier_eligible(r: dict) -> bool:
+    """True if parse_spinellis would keep this row but for SP_MAX_PER_COMPANY.
+
+    Mirrors the `strong` filter and the per-row filters of that function. It
+    deliberately omits the per-company cap, because the cap is what this audit
+    measures.
+    """
+    if not tier(r) or not (r["company_name"] or "").strip():
+        return False
+    if (r["most_recent_commit"] or "")[:4] < sc.SP_MIN_YEAR:
+        return False
+    return (num(r["lines"]) >= sc.SP_MIN_LINES
+            and num(r["commit_count"]) >= sc.SP_MIN_COMMITS)
+
+
+def h(lines: list[str], text: str) -> None:
+    lines += ["", text, ""]
+
+
+def table(lines: list[str], header: list[str], rows: list[list[str]]) -> None:
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("|" + "|".join(" --- " for _ in header) + "|")
+    for r in rows:
+        lines.append("| " + " | ".join(str(c) for c in r) + " |")
+    lines.append("")
+
+
+def build(ent: dict[str, dict], coh: set[str], rows: list[dict]) -> list[str]:
+    eligible = [r for r in rows if r.get("included") == "True"]
+
+    def verdict(k: str | None) -> str:
+        if k in ent:
+            return "enterprise"
+        if k in coh:
+            return "cohort"
+        return "absent"
+
+    def key(r: dict) -> str | None:
+        return norm(r.get("clone_url")) or (
+            f"{r.get('owner', '').lower()}/{r.get('repo', '').lower()}" or None)
+
+    out: list[str] = [
+        "# Validation against Spinellis et al. MSR'20", "",
+        "Generated by `validate_spinellis.py`. Do not edit by hand.", "",
+        "Read that file's docstring first. They label contribution and we label control, "
+        "so sections 1 to 3 and 5 only screen for leads. Section 4 is the one hard check.",
+    ]
+
+    # 1. coverage
+    h(out, "## 1. How much of our frame they can speak to")
+    v = Counter(verdict(key(r)) for r in eligible)
+    n = len(eligible)
+    d = n or 1
+    decidable = v["enterprise"] + v["cohort"]
+    table(out, ["their verdict", "rows", "share of frame"],
+          [[k, f"{v[k]:,}", f"{v[k] / d:.1%}"] for k in VERDICTS]
+          + [["**total**", f"**{n:,}**", "**100%**"]])
+    out += [f"They label {decidable:,} of {n:,} eligible rows ({decidable / d:.1%}). The rest are "
+            f"absent from both of their files, because their snapshot is from 2020 and ours is "
+            f"from 2026. Read every share below against {decidable:,}, not {n:,}.", ""]
+
+    # 2. self-consistency
+    h(out, "## 2. Self-consistency where we read their files directly")
+    tab = defaultdict(Counter)
+    for r in eligible:
+        if r.get("source") in ("spinellis", "cohort"):
+            tab[r["source"]][r.get("stratum", "?")] += 1
+    rws = []
+    for src in ("spinellis", "cohort"):
+        tot = sum(tab[src].values()) or 1
+        top = tab[src].most_common(1)[0] if tab[src] else ("-", 0)
+        rws.append([f"`{src}`", f"{sum(tab[src].values()):,}",
+                    ", ".join(f"{k}={v:,}" for k, v in tab[src].most_common()),
+                    f"{top[1] / tot:.1%} {top[0]}"])
+    table(out, ["our source", "eligible rows", "stratum we then assigned", "dominant"], rws)
+    out += ["We reproduce their split where we read it. This checks the plumbing, "
+            "not the codebook.", ""]
+
+    # 3. cross-tab
+    h(out, "## 3. Our stratum against their verdict")
+    tab = defaultdict(Counter)
+    for r in eligible:
+        tab[r.get("stratum", "?")][verdict(key(r))] += 1
+    rws, tot = [], Counter()
+    for s in STRATA:
+        c = tab[s]
+        rws.append([f"`{s}`"] + [f"{c[x]:,}" for x in VERDICTS] + [f"{sum(c.values()):,}"])
+        tot.update(c)
+    rws.append(["**total**"] + [f"**{tot[x]:,}**" for x in VERDICTS]
+               + [f"**{sum(tot.values()):,}**"])
+    table(out, ["our stratum", "their enterprise", "their cohort", "absent", "total"], rws)
+
+    # 4. the hard check
+    h(out, "## 4. Hard check: registry-attested rows we did not label `company-owned`")
+    would = {k for k, r in ent.items() if strong_tier_eligible(r)}
+    admitted = sum(1 for r in rows if r.get("source") == "spinellis")
+    out += [f"{len(would):,} rows in their file pass our own strong-tier rule "
+            f"(a registry flag, a named company, last commit in {sc.SP_MIN_YEAR} or later, "
+            f"at least {sc.SP_MIN_LINES:,} lines and {sc.SP_MIN_COMMITS} commits). "
+            f"`parse_spinellis` admitted {admitted:,} of them, because "
+            f"`SP_MAX_PER_COMPANY = {sc.SP_MAX_PER_COMPANY}` caps each company.", "",
+            "The cap is a sampling control. It stops one firm dominating the draw. But a "
+            "capped-out project does not leave the pipeline: it re-enters through a weaker "
+            "source and takes that source's stratum. So a cap on *sampling* silently becomes "
+            "an error in *labelling*.", ""]
+    audit = []
+    for r in eligible:
+        k = key(r)
+        if k in would and r.get("stratum") != "company-owned":
+            e = ent[k]
+            audit.append([f"`{k}`", r.get("stratum"), f"`{r.get('source')}`",
+                          f"`{r.get('fact')}`", tier(e), e["company_name"].strip()])
+    audit.sort(key=lambda x: (x[1], x[0]))
+    hits = [r for r in eligible if key(r) in would]
+    out += [f"{len(hits):,} such rows reached our eligible frame. "
+            f"{len(hits) - len(audit):,} label `company-owned`. "
+            f"{len(audit):,} do not, and are listed here.", ""]
+    if audit:
+        table(out, ["project", "our stratum", "our source", "our fact",
+                    "their registry", "their company"], audit)
+    out += ["This count is conservative on purpose. It applies every filter the selector "
+            "applies, so it omits a registry-flagged project that fails any one of them. "
+            "`spring-projects/spring-boot` and `gluster/glusterfs` are both registry-flagged "
+            "and both label `community`, but their rows carry no `company_name`, so our rule "
+            "never claimed them and this audit does not count them.", ""]
+    if any(x[1] == "community" for x in audit):
+        out += ["A `community` row with `F1_residual:none` holds no control fact at all. The "
+                "residual absorbed a project that our own rule attests to a company.", ""]
+    if any(x[1] == "foundation" for x in audit):
+        out += ["A `foundation` row above is not necessarily wrong. A foundation can hold the "
+                "trademark while one firm staffs the work, and control is what we label.", ""]
+
+    # 5. reverse direction
+    h(out, "## 5. The other direction: their recall, not our precision")
+    rev = [r for r in eligible
+           if r.get("stratum") == "company-owned" and key(r) in coh and key(r) not in ent]
+    out += [f"{len(rev):,} rows we label `company-owned` sit in their non-enterprise cohort. "
+            "We hold a namespace fact (F2) for these. Their heuristics need several committers "
+            "on one enterprise domain, so staff who commit from personal addresses defeat them. "
+            "This measures their recall. Owners, most frequent first:", ""]
+    table(out, ["owner org", "rows"],
+          [[f"`{k}`", v] for k, v in Counter(r.get("owner") for r in rev).most_common(15)])
+
+    out += ["## 6. How to rerun", "",
+            "```sh", "./validate_spinellis.py -o docs/SPINELLIS-VALIDATION.md", "```", "",
+            "Inputs: `candidates.csv`, `sources/enterprise_projects.txt`, "
+            "`sources/cohort_project_details.txt`. Thresholds import from "
+            "`select_corpus.py`, so they cannot drift from the selector.", ""]
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-o", "--out", type=Path, help="write markdown here instead of stdout")
+    a = ap.parse_args()
+
+    if not CANDIDATES.exists():
+        sys.exit(f"missing {CANDIDATES}; run ./select_corpus.py emit first")
+    with CANDIDATES.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+
+    text = "\n".join(build(load_enterprise(), load_cohort(), rows)) + "\n"
+    if a.out:
+        a.out.write_text(text, encoding="utf-8")
+        print(f"wrote {a.out}")
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
