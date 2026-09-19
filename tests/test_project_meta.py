@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import project_meta
+from file_mask import UNIVERSAL_MASK
 
 CANDIDATES = (
     "source,stratum,fact,contested,label_date,owner,repo,roster_name,roster_lang,"
@@ -174,3 +175,34 @@ def test_the_committed_sidecar_covers_the_corpus_and_the_fixtures():
     assert all(set(v) == set(project_meta.META_FIELDS) for v in meta.values())
     # Every row carries the mask it was tokenized with, fixtures included.
     assert all(v["file_mask"] for v in meta.values())
+
+
+def test_the_committed_sidecar_records_the_universal_mask_for_every_project():
+    """The sidecar is a generated artefact, and it goes stale silently.
+
+    file_mask is copied out of the manifest when the sidecar is built, and it is
+    injected into all 185 Parquets as a column claiming to say how those tokens
+    were produced. On 2026-09-19 the corpus moved to one universal mask, so a
+    sidecar left over from the four per-language masks would make every Parquet
+    record a mask it was not built with — and nothing downstream reads the
+    manifest again to notice. Regenerate with:
+
+        ./project_meta.py --candidates candidates.csv \\
+            --manifest manifest.sample.tsv \\
+            --fixture-manifest manifest.mvp5.tsv \\
+            --fixture-manifest manifest.tsv \\
+            --fixture-manifest manifest.shardtest.tsv \\
+            --out project_meta.json
+    """
+    root = Path(__file__).resolve().parent.parent
+    meta = json.loads((root / "project_meta.json").read_text())
+
+    stale = {name: row["file_mask"] for name, row in meta.items()
+             if row["file_mask"] != UNIVERSAL_MASK}
+    assert not stale, (
+        f"{len(stale)} project(s) in project_meta.json carry a mask that is not the "
+        f"universal one: {sorted(set(stale.values()))}. Regenerate the sidecar."
+    )
+    # One mask for the whole corpus is the decision, stated as an assertion: the
+    # dataset is a tokenized set of projects, not a set of language exemplars.
+    assert len({row["file_mask"] for row in meta.values()}) == 1

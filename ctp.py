@@ -12,6 +12,10 @@ Disk flags (the corpus does not fit otherwise — see retain.py and DESIGN.md §
   --drop-memo  cleanup, NOT prevention. memo/ is 45-88% of a workdir but the
                tokenizer requires BFG_MEMO_DIR, so memo/ is always written; this
                deletes it (via retain.prune) once the project validates.
+  --memo-dir   the opposite trade: keep each project's memo in DIR/<project>,
+               outside the workdir a step-1 run deletes, so a from-scratch
+               re-run still gets every memo hit. Mutually exclusive with
+               --drop-memo.
 
 Per project: pipeline (devenv shell) -> validate -> stamp. Idempotent — a
 validated project is skipped; a failed/interrupted one resumes via blobExec's
@@ -492,6 +496,28 @@ def run_project(project: dict) -> str:
         ]
         if _OPTS.get("skip_html"):
             pipeline_args.append("--skip-html")
+        # Put the memo outside the work directory, which a FROM_STEP=1 run
+        # deletes. It matters now because the mask changed corpus-wide and
+        # blobExec refuses to resume against a different one (Mapping.open), so
+        # every re-run starts from step 1 — and a memo hit returns without
+        # invoking srcml at all. torvalds__linux holds ~2.6 million memo entries
+        # against 3,228,137 blobs, so preserving them turns a cold tokenize into
+        # a commit walk.
+        #
+        # One SUBDIRECTORY PER PROJECT, never one shared directory: tokenBySha.pl
+        # keys the memo on sha1 of the file contents, with neither the repository
+        # nor the extension in the key. Two projects sharing a directory would
+        # serve each other's entries, and identical bytes under a different
+        # extension are a different language and different tokens.
+        if _OPTS.get("memo_dir"):
+            memo_dir = Path(_OPTS["memo_dir"]).resolve() / name
+            resolved_work = workdir.resolve()
+            if memo_dir == resolved_work or resolved_work in memo_dir.parents:
+                say(f"{name} — refusing to run: --memo-dir puts the memo at "
+                    f"{memo_dir}, inside the work directory the runner deletes. "
+                    "Point --memo-dir outside the corpus output directory.")
+                return "failed"
+            pipeline_args += ["--memo-dir", str(memo_dir)]
         # Sharding is for the L class only. Measured on Linux: --mode pipeline
         # leaves ~14 of 16 cores idle, because the per-blob chain spawns three
         # processes and the pipelined walk never keeps 16 of them in flight. A
@@ -586,6 +612,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.drop_memo and "--no-memo" in sys.argv:
         say("note: --no-memo is an alias for --drop-memo and does NOT prevent the write. "
             "The tokenizer requires BFG_MEMO_DIR, so memo/ is built and then deleted.")
+    # --memo-dir keeps the memo; --drop-memo deletes it. Asking for both is not a
+    # preference to resolve, it is a mistake to report: retain.prune only ever
+    # looks at <workdir>/memo, so the combination would silently preserve
+    # everything and report a prune that pruned nothing.
+    if args.memo_dir and args.drop_memo:
+        sys.exit("--memo-dir and --drop-memo contradict each other: one puts the memo "
+                 "where no wipe can reach it, the other deletes it after each project.\n"
+                 "--drop-memo also only prunes <workdir>/memo, so it would not even find "
+                 "an external memo. Pick one.")
+    if args.memo_dir:
+        if not script_supports("--memo-dir"):
+            sys.exit(f"--memo-dir is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                     "That checkout hard-codes BFG_MEMO_DIR to <work>/memo, which a step-1\n"
+                     "run deletes, so the flag would be silently dropped. Patch it first.")
+        if not Path(args.memo_dir).is_dir():
+            sys.exit(f"--memo-dir {args.memo_dir} is not an existing directory. Create it "
+                     "first: a typo here would quietly start a second corpus of memos "
+                     "instead of reusing the one you meant.")
     # Same rule as --skip-html: refuse before the run rather than discover per
     # project that the configured checkout cannot shard.
     if args.shards > 1:
@@ -649,6 +693,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         sys.exit(f"--from-step must be 1 or greater (got {args.from_step}).")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
     _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
+                 memo_dir=args.memo_dir,
                  shards=args.shards, shard_classes=shard_classes,
                  from_step=args.from_step, gc=args.gc,
                  blame_jobs=args.blame_jobs,
@@ -887,6 +932,20 @@ def main() -> int:
                        help="delete memo/ (45-88%% of the workdir) once a project "
                             "validates. NOT prevention: the tokenizer requires "
                             "BFG_MEMO_DIR, so memo/ is written first, then removed")
+    run_p.add_argument("--memo-dir", default="", metavar="DIR",
+                       help="keep each project's memo in DIR/<project> instead of "
+                            "<workdir>/memo, so a from-scratch run (step 1, which "
+                            "deletes the workdir) still gets every memo hit. A hit "
+                            "returns without invoking srcml at all, so this is the "
+                            "difference between re-walking the commits and "
+                            "tokenizing from cold: torvalds__linux holds ~2.6 "
+                            "million memo entries against 3,228,137 blobs. Needed "
+                            "because a changed mask forces a step-1 rebuild — "
+                            "blobExec records the mask and refuses to resume "
+                            "against a different one. DIR must exist; each project "
+                            "gets its own subdirectory, because the memo key is a "
+                            "content hash that names neither repository nor "
+                            "extension. Cannot be combined with --drop-memo")
     run_p.add_argument("--shards", type=int, default=0,
                        help="tokenize in N shards (needs >1 to take effect). "
                             "Measured: --mode pipeline leaves ~14 of 16 cores idle "
