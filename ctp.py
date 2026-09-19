@@ -508,6 +508,12 @@ def run_project(project: dict) -> str:
             pipeline_args += ["--memory-limit", _OPTS["memory_limit"]]
         if _OPTS.get("duckdb_threads"):
             pipeline_args += ["--duckdb-threads", str(_OPTS["duckdb_threads"])]
+        # Per-project provenance for the Parquet. The sidecar is keyed by the
+        # manifest name, and generate_dataset.py refuses a key it cannot find, so
+        # a stale sidecar fails loudly instead of writing 29 blank columns.
+        if _OPTS.get("project_meta"):
+            pipeline_args += ["--project-meta", str(_OPTS["project_meta"]),
+                              "--project-key", name]
         # FROM_STEP is positional and must come last. The runner only wipes the
         # workdir when it is 1, so a resume keeps whatever finished before.
         from_step = _OPTS.get("from_step", 1)
@@ -606,6 +612,23 @@ def cmd_run(args: argparse.Namespace) -> int:
                  "Patch it before relying on the flag.")
     if args.duckdb_threads < 0:
         sys.exit(f"--duckdb-threads cannot be negative (got {args.duckdb_threads}).")
+    # Same rule again, and the stakes are higher: without the check the run would
+    # produce a corpus of Parquets carrying blank provenance, which no consumer
+    # could tell from provenance that is genuinely unknown.
+    project_meta = ""
+    if args.project_meta:
+        if not Path(args.project_meta).exists():
+            sys.exit(f"--project-meta {args.project_meta} does not exist. "
+                     "Generate it with project_meta.py.")
+        missing = [f for f in ("--project-meta", "--project-key")
+                   if not script_supports(f)]
+        if missing:
+            sys.exit(f"--project-meta needs {', '.join(missing)}, which "
+                     f"{CREGIT}/run_pipeline_process.sh does not accept.")
+        # Absolute, because the runner is started with cwd=CREGIT while this path
+        # was typed relative to this repository. Sending it through unresolved
+        # made the runner reject its own sidecar (rc=2) on the first real run.
+        project_meta = str(Path(args.project_meta).resolve())
     # Refuse a bad size now. Step 10 is the last step, so the alternative is
     # finding the typo after every earlier step has already run.
     if args.memory_limit:
@@ -621,7 +644,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                  from_step=args.from_step, gc=args.gc,
                  blame_jobs=args.blame_jobs,
                  memory_limit=args.memory_limit,
-                 duckdb_threads=args.duckdb_threads)
+                 duckdb_threads=args.duckdb_threads,
+                 project_meta=project_meta)
     if args.memory_limit:
         warning = memory_budget_warning(args.memory_limit, args.jobs)
         if warning:
@@ -876,6 +900,12 @@ def main() -> int:
                        help="forward --duckdb-threads to step 10. Each sorting "
                             "thread holds its own buffers, so fewer threads lower "
                             "the peak. Omit to accept the generator's default")
+    run_p.add_argument("--project-meta", default="", metavar="PATH",
+                       help="JSON sidecar from project_meta.py, carrying each "
+                            "project's provenance (which roster found it, which "
+                            "stratum it was assigned, its shared-history cluster "
+                            "and the mask it was tokenized with) into the "
+                            "Parquet. Omit and those columns are written empty")
     run_p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
                        help="run the blame step with N parallel workers. Blame is "
                             "the bottleneck: measured serially on Linux it managed "

@@ -30,18 +30,66 @@ USAGE = "usage: validate_schema.py [--emit-contract] <dataset.parquet> ..."
 EXIT_DRIFT = 1
 EXIT_USAGE = 2
 
-# The contract, measured from the updated cregit-issue61 output on 2026-09-13.
+# The contract, measured from the updated cregit-issue61 output on 2026-09-13,
+# widened 2026-09-19.
 #
-# 38 columns, not the 23 the earlier kernel snapshot carried. The 15 additions are
-# commit-trailer footers, which matter to this research: Signed-off-by,
-# Reviewed-by and Co-authored-by are attribution evidence that does not appear in
-# authorship alone.
+# 67 columns. It was 38 (and 23 before that; the 15 footer columns are
+# commit-trailer evidence, which matters to this research because Signed-off-by,
+# Reviewed-by and Co-authored-by carry attribution that authorship alone does
+# not).
+#
+# The 29 after repo_name are per-project provenance, injected from
+# project_meta.json: which roster or search found the project, which stratum it
+# was assigned and on what evidence, its shared-history cluster, and the regex
+# mask it was tokenized with. They repeat per row by design — a reader can filter
+# without a second join against candidates.csv, and a column is cheap to drop at
+# publish time but expensive to add later.
+#
+# clone_url is among them because repo_name is a lossy slug. provenance_status
+# separates the 200 corpus projects from the 10 development fixtures that share
+# the output directory: select the corpus with
+#   where provenance_status = 'candidates.csv'
+# file_mask is there because a mask widening is planned, and without it nobody
+# can tell which rows came from which mask.
+#
+# These 29 names and their order must match META_FIELDS in project_meta.py and
+# PROJECT_META_FIELDS in cregit-issue61/generate_dataset/generate_dataset.py.
+# tests/test_meta_field_drift.py checks all three against each other.
 #
 # Still absent: a firm column. Resolving person_domain to an employer is the
 # contribution this dataset is being built for, so its absence is expected here
 # and must not be read as agreement that the schema is finished.
 EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("repo_name", "VARCHAR"),
+    ("clone_url", "VARCHAR"),
+    ("provenance_status", "VARCHAR"),
+    ("source", "VARCHAR"),
+    ("stratum", "VARCHAR"),
+    ("fact", "VARCHAR"),
+    ("contested", "VARCHAR"),
+    ("label_date", "VARCHAR"),
+    ("owner", "VARCHAR"),
+    ("repo", "VARCHAR"),
+    ("roster_name", "VARCHAR"),
+    ("roster_lang", "VARCHAR"),
+    ("language", "VARCHAR"),
+    ("commits", "VARCHAR"),
+    ("size_class", "VARCHAR"),
+    ("size_kb", "VARCHAR"),
+    ("stars", "VARCHAR"),
+    ("pushed_at", "VARCHAR"),
+    ("license", "VARCHAR"),
+    ("owner_type", "VARCHAR"),
+    ("archived", "VARCHAR"),
+    ("fork", "VARCHAR"),
+    ("history_cluster", "VARCHAR"),
+    ("history_shared_with", "VARCHAR"),
+    ("history_relation", "VARCHAR"),
+    ("history_includes", "VARCHAR"),
+    ("history_first", "VARCHAR"),
+    ("history_created", "VARCHAR"),
+    ("manifest_category", "VARCHAR"),
+    ("file_mask", "VARCHAR"),
     ("file_path", "VARCHAR"),
     ("token_index", "BIGINT"),
     ("source_line", "BIGINT"),
@@ -141,7 +189,7 @@ def emit_contract(path: str) -> None:
     """Print a file's schema as a paste-ready EXPECTED_COLUMNS block.
 
     For when the generator legitimately changes: read the new schema, review the
-    diff by eye, then paste. Better than hand-typing 38 rows.
+    diff by eye, then paste. Better than hand-typing 67 rows.
     """
     for name, typ in read_schema(path):
         print(f'    ("{name}", "{typ}"),')

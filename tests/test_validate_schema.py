@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import project_meta
 import validate_schema as vs
 
 
@@ -119,10 +120,23 @@ def test_the_contract_has_no_duplicate_columns():
 
 
 def test_the_contract_records_the_measured_column_count():
-    """38, measured from the updated cregit on 2026-09-13. The earlier kernel
-    snapshot had 23; the 15 additions are commit-trailer footers."""
-    assert len(CONTRACT) == 38
+    """67: the 38 measured from the updated cregit on 2026-09-13, plus the 29
+    per-project provenance columns injected from project_meta.json on 2026-09-19.
+    The earlier kernel snapshot had 23; 15 of the additions to that are
+    commit-trailer footers."""
+    assert len(CONTRACT) == 67
     assert sum(1 for n, _ in CONTRACT if n.startswith("footer_")) == 15
+    assert len(CONTRACT) - len(project_meta.META_FIELDS) == 38
+
+
+def test_the_provenance_columns_match_the_sidecar_field_list():
+    """The sidecar writes these, the generator injects them and this gate checks
+    them. Same names, same order, or the columns are mislabelled rather than
+    missing — see tests/test_meta_field_drift.py for the third copy."""
+    names = [n for n, _ in CONTRACT]
+    start = names.index("repo_name") + 1
+    assert names[start:start + len(project_meta.META_FIELDS)] == \
+        list(project_meta.META_FIELDS)
 
 
 def test_the_contract_still_has_no_firm_column():
