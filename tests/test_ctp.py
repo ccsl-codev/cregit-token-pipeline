@@ -54,6 +54,7 @@ REAL_RUNNER_USAGE = """\
 #   --mask REGEX      regex selecting the files to tokenize; quote it
 #   --work DIR        working/output directory
 #   --skip-html       do not generate the HTML views
+#   --memo-dir DIR    where to memoize tokenized blobs (default: <work>/memo)
 #   --gc MODE         how to pack the generated cregit repo after tokenizing
 #   --memory-limit SIZE    forward the DuckDB heap cap to step 10
 #   --duckdb-threads N     forward the DuckDB sorting thread count to step 10
@@ -609,6 +610,110 @@ def test_drop_memo_reports_when_retain_refuses(monkeypatch, capsys, runner, jq):
 
 
 # --------------------------------------------------------------------------- #
+# --memo-dir: the memo has to survive the wipe.
+#
+# run_pipeline_process.sh deletes the whole work directory at FROM_STEP=1, and
+# the memo used to live inside it. That was affordable while a re-run could
+# resume; it is not any more. The mask changed corpus-wide on 2026-09-19 and
+# Mapping.open refuses to resume against a different stored mask, so all 64
+# re-run projects rebuild from step 1. torvalds__linux holds ~2.6 million memo
+# entries against 3,228,137 blobs, and tokenizeByBlobId/tokenBySha.pl serves a
+# memo hit without invoking srcml at all — so those entries are the difference
+# between a commit walk and a cold tokenize of the largest repository here.
+# --------------------------------------------------------------------------- #
+
+def test_memo_dir_is_forwarded_as_one_subdirectory_per_project(sandbox, runner, jq):
+    """One directory per project, never one shared one: tokenBySha.pl keys the
+    memo on sha1 of the file CONTENTS, with neither the repository nor the
+    extension in the key, so a shared directory would serve one project's tokens
+    to another and identical bytes under a different extension are a different
+    language."""
+    memo_root = sandbox.root / "memos"
+    memo_root.mkdir()
+    ctp._OPTS.update(skip_html=False, drop_memo=False, memo_dir=str(memo_root))
+    ctp.run_project(jq)
+
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--memo-dir") + 1] == str(memo_root / "jq")
+    # And outside the directory the runner deletes, which is the whole point.
+    assert not str(memo_root / "jq").startswith(str(sandbox.out / "jq"))
+
+
+def test_no_memo_dir_sends_no_flag_so_the_default_is_untouched(sandbox, runner, jq):
+    """Nothing existing may change behaviour: without the flag the runner keeps
+    putting the memo in <work>/memo exactly as before."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, memo_dir="")
+    ctp.run_project(jq)
+    assert "--memo-dir" not in runner.argv("pipeline")
+
+
+def test_a_memo_dir_inside_the_work_directory_is_refused(sandbox, runner, jq):
+    """A memo the runner's own wipe can reach is worse than no flag at all: the
+    operator believes it is safe and it is not."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False,
+                     memo_dir=str(sandbox.out / "jq" / "inner"))
+    assert ctp.run_project(jq) == "failed"
+
+
+def test_run_refuses_memo_dir_together_with_drop_memo(
+        sandbox, monkeypatch, runner_script):
+    """One preserves the memo, the other deletes it. retain.prune only looks at
+    <workdir>/memo, so the combination would preserve everything while reporting
+    a prune."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    memo_root = sandbox.root / "memos"
+    memo_root.mkdir()
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(memo_dir=str(memo_root), drop_memo=True))
+    assert "contradict" in str(exc.value)
+
+
+def test_run_refuses_a_memo_dir_that_does_not_exist(
+        sandbox, monkeypatch, runner_script):
+    """A typo would quietly start a second corpus of memos instead of reusing the
+    2.6 million entries the flag exists to reuse."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(memo_dir=str(sandbox.root / "absent")))
+    assert "not an existing directory" in str(exc.value)
+
+
+def test_run_refuses_a_memo_dir_on_a_runner_that_cannot_place_it(
+        sandbox, monkeypatch, runner_script):
+    """Same rule as --memory-limit and --project-meta: an unpatched checkout
+    hard-codes BFG_MEMO_DIR to <work>/memo and would drop the flag, so the memo
+    would be deleted by the very run that was told to keep it."""
+    runner_script(REAL_RUNNER_USAGE.replace("--memo-dir DIR", "--no-such-flag"))
+    write_manifest(sandbox.root, VALID_ROW)
+    memo_root = sandbox.root / "memos"
+    memo_root.mkdir()
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(memo_dir=str(memo_root)))
+    assert "--memo-dir" in str(exc.value)
+
+
+def test_run_accepts_a_memo_dir_on_a_patched_runner(
+        sandbox, monkeypatch, runner_script):
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    memo_root = sandbox.root / "memos"
+    memo_root.mkdir()
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(memo_dir=str(memo_root))) == 0
+    assert ctp._OPTS["memo_dir"] == str(memo_root)
+
+
+# --------------------------------------------------------------------------- #
 # argument construction
 # --------------------------------------------------------------------------- #
 
@@ -938,7 +1043,8 @@ def run_args(**over):
     """A complete `ctp run` Namespace. Every cmd_run option belongs here, so
     adding one is a single edit rather than one per test."""
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
-                skip_html=False, drop_memo=False, shards=0, shard_classes="L",
+                skip_html=False, drop_memo=False, memo_dir="",
+                shards=0, shard_classes="L",
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
                 mask="")
