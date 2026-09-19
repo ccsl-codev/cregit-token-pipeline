@@ -56,6 +56,8 @@ REAL_RUNNER_USAGE = """\
 #   --gc MODE         how to pack the generated cregit repo after tokenizing
 #   --memory-limit SIZE    forward the DuckDB heap cap to step 10
 #   --duckdb-threads N     forward the DuckDB sorting thread count to step 10
+#   --project-meta PATH    forward the provenance sidecar to step 10
+#   --project-key NAME     which key of the sidecar this project is
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
 #   --jobs N      concurrent blame/HTML processes
@@ -937,7 +939,7 @@ def run_args(**over):
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
                 skip_html=False, drop_memo=False, shards=0, shard_classes="L",
                 from_step=1, gc=None, blame_jobs=0,
-                memory_limit=None, duckdb_threads=0)
+                memory_limit=None, duckdb_threads=0, project_meta="")
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -1703,6 +1705,94 @@ def test_run_accepts_the_memory_flags_on_a_patched_runner(
     assert ctp.cmd_run(run_args(memory_limit="3GB", duckdb_threads=2)) == 0
     assert ctp._OPTS["memory_limit"] == "3GB"
     assert ctp._OPTS["duckdb_threads"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# --project-meta: the per-project provenance sidecar. Every Parquet carries 29
+# metadata columns, and the sidecar is what fills them. Getting this wrong is
+# quiet: the run succeeds and the columns are blank.
+# --------------------------------------------------------------------------- #
+
+def test_the_sidecar_is_forwarded_with_this_project_as_the_key(runner, jq):
+    """The sidecar is keyed by the manifest name, which is what the runner is
+    already told through --repo-name, so the key is not the operator's to get
+    wrong."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False,
+                     project_meta="/somewhere/project_meta.json")
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--project-meta") + 1] == "/somewhere/project_meta.json"
+    assert argv[argv.index("--project-key") + 1] == jq["name"]
+
+
+def test_no_sidecar_sends_neither_flag(runner, jq):
+    """Absent means absent: the generator then writes the metadata columns empty
+    and the file still matches the corpus contract."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, project_meta="")
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert "--project-meta" not in argv
+    assert "--project-key" not in argv
+
+
+def test_run_refuses_a_sidecar_path_that_does_not_exist(
+        sandbox, monkeypatch, runner_script):
+    """Without this the whole corpus would be regenerated with blank provenance,
+    which a consumer cannot tell from provenance that is genuinely unknown."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(project_meta=str(sandbox.root / "absent.json")))
+    assert "does not exist" in str(exc.value)
+    assert "project_meta.py" in str(exc.value)
+
+
+def test_run_refuses_a_sidecar_on_a_runner_that_cannot_forward_it(
+        sandbox, monkeypatch, runner_script):
+    """Same rule as --memory-limit: an unpatched checkout would drop the flag and
+    the columns would be blank anyway."""
+    runner_script(REAL_RUNNER_USAGE.replace("--project-key NAME", "--no-such-flag"))
+    write_manifest(sandbox.root, VALID_ROW)
+    meta = sandbox.root / "project_meta.json"
+    meta.write_text("{}")
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(project_meta=str(meta)))
+    assert "--project-key" in str(exc.value)
+
+
+def test_run_accepts_a_sidecar_on_a_patched_runner(
+        sandbox, monkeypatch, runner_script):
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    meta = sandbox.root / "project_meta.json"
+    meta.write_text("{}")
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(project_meta=str(meta))) == 0
+    assert ctp._OPTS["project_meta"] == str(meta)
+
+
+def test_a_relative_sidecar_path_is_made_absolute(
+        sandbox, monkeypatch, runner_script):
+    """The runner is started with cwd=CREGIT, but the path is typed relative to
+    this repository. Unresolved, the runner rejected its own sidecar with rc=2 —
+    which is exactly what happened on the first real run."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    meta = sandbox.root / "project_meta.json"
+    meta.write_text("{}")
+    monkeypatch.chdir(sandbox.root)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(project_meta="project_meta.json")) == 0
+    assert Path(ctp._OPTS["project_meta"]).is_absolute()
+    assert Path(ctp._OPTS["project_meta"]) == meta.resolve()
 
 
 # --------------------------------------------------------------------------- #
