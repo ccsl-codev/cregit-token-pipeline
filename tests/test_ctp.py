@@ -38,6 +38,12 @@ VALID_ROW = "jq\thttps://github.com/jqlang/jq.git\tcommunity\t\\.[ch]$\tS"
 # The flags the configured runner (cregit-issue61/run_pipeline_process.sh)
 # actually advertises. Used to build a stand-in script in tmp_path so no test
 # reads the real checkout.
+#
+# Keep this in step with the real runner's usage() text. It drifted once and the
+# drift was invisible: cregit-issue61 7a70a92 renamed --blame-jobs to --jobs on
+# 2026-09-18, mid-run, and because script_supports() only greps the script while
+# these tests grep this copy, the suite stayed green while every real invocation
+# exited at the preflight. Re-read the runner's usage() when a flag changes.
 REAL_RUNNER_USAGE = """\
 #!/bin/sh
 # usage: run_pipeline_process.sh --repo-url URL [options] [FROM_STEP]
@@ -48,11 +54,11 @@ REAL_RUNNER_USAGE = """\
 #   --work DIR        working/output directory
 #   --skip-html       do not generate the HTML views
 #   --gc MODE         how to pack the generated cregit repo after tokenizing
-#   --blame-jobs N    run the blame step with N parallel workers
 #   --memory-limit SIZE    forward the DuckDB heap cap to step 10
 #   --duckdb-threads N     forward the DuckDB sorting thread count to step 10
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
+#   --jobs N      concurrent blame/HTML processes
 # unknown arguments exit 2
 """
 
@@ -1407,33 +1413,40 @@ def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
     assert ctp.shard_class(L) is False, "an unset _OPTS must not shard"
 
 
-def test_blame_jobs_is_forwarded_to_the_runner(runner, jq):
+def test_blame_jobs_is_sent_to_the_runner_as_jobs(runner, jq):
     """Blame is the bottleneck. The worker count only helps if it reaches the
-    runner argv."""
+    runner argv — and it must use the runner's name for the flag.
+
+    cregit-issue61 7a70a92 renamed the runner's --blame-jobs to --jobs on
+    2026-09-18. ctp.py kept sending the old name, so its preflight refused every
+    project and the corpus run could not be restarted. ctp.py's own CLI name is
+    still --blame-jobs, because ctp.py's --jobs means concurrent projects.
+    """
     ctp._OPTS.update(skip_html=False, drop_memo=False, blame_jobs=8)
     ctp.run_project(jq)
     argv = runner.argv("pipeline")
-    assert argv[argv.index("--blame-jobs") + 1] == "8"
+    assert argv[argv.index("--jobs") + 1] == "8"
+    assert "--blame-jobs" not in argv
 
 
 def test_no_blame_jobs_leaves_the_runner_default_alone(runner, jq):
-    """Zero means "not asked for", so the runner keeps its own default of 1."""
+    """Zero means "not asked for", so the runner keeps its own default."""
     ctp._OPTS.update(skip_html=False, drop_memo=False, blame_jobs=0)
     ctp.run_project(jq)
-    assert "--blame-jobs" not in runner.argv("pipeline")
+    assert "--jobs" not in runner.argv("pipeline")
 
 
 def test_run_refuses_blame_jobs_on_a_runner_that_blames_serially(
         sandbox, monkeypatch, runner_script):
     """Accepting the flag against an unpatched checkout would promise a speedup
     the runner cannot deliver, and the difference is days per project."""
-    runner_script(REAL_RUNNER_USAGE.replace("--blame-jobs N", "--no-such-flag"))
+    runner_script(REAL_RUNNER_USAGE.replace("--jobs N", "--no-such-flag"))
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
 
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(blame_jobs=8))
-    assert "--blame-jobs is not implemented" in str(exc.value)
+    assert "--blame-jobs needs --jobs" in str(exc.value)
 
 
 def test_run_rejects_a_negative_blame_jobs(sandbox, monkeypatch, runner_script):

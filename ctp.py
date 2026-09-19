@@ -494,8 +494,12 @@ def run_project(project: dict) -> str:
             pipeline_args += ["--mode", "sharded", "--shards", str(_OPTS["shards"])]
         if _OPTS.get("gc"):
             pipeline_args += ["--gc", _OPTS["gc"]]
+        # The runner calls this --jobs. cregit-issue61 7a70a92 renamed it from
+        # --blame-jobs on 2026-09-18, mid-run, and ctp.py kept sending the old
+        # name — so every invocation exited at the preflight. ctp.py's own CLI
+        # name stays --blame-jobs, because its --jobs means concurrent projects.
         if _OPTS.get("blame_jobs"):
-            pipeline_args += ["--blame-jobs", str(_OPTS["blame_jobs"])]
+            pipeline_args += ["--jobs", str(_OPTS["blame_jobs"])]
         # Step 10 is the only step that can exhaust RAM. Measured 2026-09-15: at
         # the generator's own 8GB default, two concurrent projects need ~22 GB and
         # the run died on this 30 GB box, which already gives ~17 GB to other
@@ -581,12 +585,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         sys.exit(f"--gc is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
                  "That checkout still packs unconditionally, and an unguarded\n"
                  "repack failure deletes the workdir. Patch it before relying on --gc.")
-    if args.blame_jobs and not script_supports("--blame-jobs"):
-        sys.exit(f"--blame-jobs is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                 "That checkout blames serially, at roughly 3 files per minute.\n"
-                 "Patch it before relying on the flag.")
+    # Validate our own value before probing the runner. A negative count is the
+    # caller's mistake either way, and reporting it as "not implemented" sends
+    # them to patch a checkout that is not the problem.
     if args.blame_jobs < 0:
         sys.exit(f"--blame-jobs cannot be negative (got {args.blame_jobs}).")
+    # The runner calls this --jobs; cregit-issue61 7a70a92 renamed it from
+    # --blame-jobs on 2026-09-18. ctp.py keeps --blame-jobs as its own CLI name,
+    # because ctp.py's --jobs already means concurrent projects.
+    if args.blame_jobs and not script_supports("--jobs"):
+        sys.exit(f"--blame-jobs needs --jobs, which {CREGIT}/run_pipeline_process.sh\n"
+                 "does not advertise. That checkout blames serially, at roughly 3 files\n"
+                 "per minute. Patch it before relying on the flag.")
     if args.memory_limit and not script_supports("--memory-limit"):
         sys.exit(f"--memory-limit is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
                  "That checkout runs step 10 at the generator's own default, so the\n"
