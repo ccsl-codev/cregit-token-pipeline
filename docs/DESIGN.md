@@ -56,7 +56,7 @@ published dataset artifact (provenance for the paper).
 - name: kubernetes
   url: https://github.com/kubernetes/kubernetes.git
   category: enterprise          # enterprise | community | kernel
-  file_filter: '\.go$'          # per-project, from supported-language matrix
+  file_filter: '(?i)\.(c|c\+\+|...|rs|tcc)$'   # the universal mask, same for every project
   pinned_commit: null           # filled by acquire stage at clone time — REPRODUCIBILITY PIN
   size_class: null              # filled after clone: S | M | L (by commit count)
   notes: ""
@@ -66,8 +66,13 @@ Rules:
 
 - `pinned_commit` is stamped at first clone and never changes; every later resume/re-run
   analyzes exactly that commit. The published dataset cites URL + sha.
-- `file_filter` comes from a supported-language matrix (language → tokenizer → regex).
-  Projects whose dominant language has no tokenizer are excluded at selection time.
+- `file_filter` is the SAME universal mask for every project: the union of every
+  extension the tokenizer can parse, derived in `file_mask.py` from one extension
+  list. It used to come from a per-language matrix keyed on GitHub's primary
+  language, which dropped a polyglot project's other languages — 68 of 188
+  projects gained files when that stopped. The column stays because it records
+  which mask a Parquet was built with. Projects whose dominant language has no
+  tokenizer are still excluded at selection time.
 - Selection heuristics (stars/size/language thresholds) are a **separate concern** —
   a `select_corpus.py` that emits candidate rows for manual curation. The runner only
   consumes the curated manifest.

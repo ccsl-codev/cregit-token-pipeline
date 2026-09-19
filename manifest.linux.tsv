@@ -5,4 +5,4 @@
 # Stratum is foundation, not community: select_corpus emit classifies
 # torvalds/linux from the control facts, and this file said community by hand.
 # The hand-written value was the outlier, so it now follows emit.
-torvalds__linux	/local/home/ellianco/Projects/cregit-workspace/staging/linux.git	foundation	\.[ch]$	L
+torvalds__linux	/local/home/ellianco/Projects/cregit-workspace/staging/linux.git	foundation	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	L
