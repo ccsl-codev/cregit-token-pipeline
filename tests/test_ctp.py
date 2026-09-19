@@ -27,6 +27,7 @@ from types import SimpleNamespace
 import pytest
 
 import ctp
+from file_mask import UNIVERSAL_MASK
 
 
 # --------------------------------------------------------------------------- #
@@ -939,7 +940,8 @@ def run_args(**over):
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
                 skip_html=False, drop_memo=False, shards=0, shard_classes="L",
                 from_step=1, gc=None, blame_jobs=0,
-                memory_limit=None, duckdb_threads=0, project_meta="")
+                memory_limit=None, duckdb_threads=0, project_meta="",
+                mask="")
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -2052,3 +2054,50 @@ def test_project_state_reports_each_of_the_four_states(sandbox):
 
     with held_lock(ctp.lock_path("busy")):
         assert ctp.project_state("busy") == "RUNNING"
+
+
+# --------------------------------------------------------------------------- #
+# the universal mask, and the one-project override
+# --------------------------------------------------------------------------- #
+
+def test_a_blank_file_filter_column_falls_back_to_the_universal_mask(tmp_path):
+    """An empty mask is not "no filter": blobExec rejects it, and anything that
+    accepted it would select every file in the repository. A hand-written manifest
+    that leaves the column blank means "whatever the tokenizer can parse"."""
+    row = "jq\thttps://github.com/jqlang/jq.git\tcommunity\t\tS"
+    projects = ctp.read_manifest(write_manifest(tmp_path, row), None)
+    assert projects[0]["file_filter"] == UNIVERSAL_MASK
+
+
+def test_the_manifests_mask_is_what_reaches_the_runner(sandbox, runner, jq):
+    """No override: the manifest column is the mask, because project_meta.py reads
+    that same column for the Parquet's file_mask, and the two must describe the
+    same run."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False)
+    ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--mask") + 1] == UNIVERSAL_MASK
+
+
+def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq):
+    """The escape hatch: one project, one mask, without editing the manifest."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, mask=r"\.java$")
+    ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--mask") + 1] == r"\.java$"
+
+
+def test_an_override_warns_that_the_recorded_mask_will_not_match(sandbox, monkeypatch,
+                                                                capsys):
+    """file_mask in the Parquet comes from the sidecar, which reads the manifest.
+    An override therefore makes the recorded mask a lie about how those tokens
+    were produced, and the operator has to be told."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(mask=r"\.rs$")) == 0
+    out = capsys.readouterr().out
+    assert r"--mask overrides the manifest" in out
+    assert r"\.rs$" in out
+    assert "will not match" in out

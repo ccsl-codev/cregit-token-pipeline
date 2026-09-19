@@ -48,6 +48,7 @@ from pathlib import Path
 import configparser
 
 import retain  # shared prune code path for --drop-memo
+from file_mask import UNIVERSAL_MASK
 
 # .resolve() canonicalizes to /local/home form — blobExec's meta table refuses
 # resume if the command path string drifts (/home vs /local/home symlink alias).
@@ -126,8 +127,14 @@ def read_manifest(path: Path, only: set | None) -> list[dict]:
         name, url, category, file_filter, size_class = line.split("\t")
         if only and name not in only:
             continue
+        # An empty file_filter means "the universal mask". Every generated
+        # manifest now writes it out, so this is the path taken by a hand-written
+        # manifest that leaves the column blank — and it must not send an empty
+        # mask, which blobExec rejects and which would otherwise select every
+        # file in the repository.
         projects.append(dict(name=name, url=url, category=category,
-                             file_filter=file_filter, size_class=size_class))
+                             file_filter=file_filter or UNIVERSAL_MASK,
+                             size_class=size_class))
     return projects
 
 
@@ -479,7 +486,9 @@ def run_project(project: dict) -> str:
             "--repo-url", project["url"],
             "--repo-name", name,
             "--work", str(workdir),
-            "--mask", project["file_filter"],
+            # The manifest's mask, which every generated manifest fills with the
+            # universal mask. --mask overrides it for one deliberate run.
+            "--mask", _OPTS.get("mask") or project["file_filter"],
         ]
         if _OPTS.get("skip_html"):
             pipeline_args.append("--skip-html")
@@ -645,7 +654,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                  blame_jobs=args.blame_jobs,
                  memory_limit=args.memory_limit,
                  duckdb_threads=args.duckdb_threads,
+                 # getattr, because callers build this Namespace directly; an
+                 # absent --mask means "use the manifest's", which is the default.
+                 mask=getattr(args, "mask", ""),
                  project_meta=project_meta)
+    if _OPTS["mask"]:
+        # Loud, because the mask in the Parquet's file_mask column comes from the
+        # sidecar, which reads the manifest — so an override makes the recorded
+        # mask a lie unless the operator updates the manifest too.
+        say(f"WARNING: --mask overrides the manifest for every project in this "
+            f"run: {_OPTS['mask']}")
+        say("         project_meta.json records the MANIFEST's mask, so the "
+            "Parquet's file_mask column will not match this run.")
     if args.memory_limit:
         warning = memory_budget_warning(args.memory_limit, args.jobs)
         if warning:
@@ -906,6 +926,15 @@ def main() -> int:
                             "stratum it was assigned, its shared-history cluster "
                             "and the mask it was tokenized with) into the "
                             "Parquet. Omit and those columns are written empty")
+    run_p.add_argument("--mask", default="", metavar="REGEX",
+                       help="tokenize these files instead of the mask in the "
+                            "manifest, for every project in this invocation. "
+                            "Intended for one project at a time, with --only: "
+                            "changing a project's mask forces a full rebuild, "
+                            "because blobExec records the mask in the blob map "
+                            "and refuses to resume against a different one. The "
+                            "default is the manifest's file_filter column, which "
+                            "generated manifests fill with the universal mask")
     run_p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
                        help="run the blame step with N parallel workers. Blame is "
                             "the bottleneck: measured serially on Linux it managed "

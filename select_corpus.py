@@ -60,6 +60,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from file_mask import TOKENIZABLE_LANGUAGES, UNIVERSAL_MASK
+
 CORPUS = Path(__file__).resolve().parent
 CACHE = CORPUS / ".corpus-cache"
 CANDIDATES = CORPUS / "candidates.csv"
@@ -93,14 +95,19 @@ def project_name(owner: str, repo: str) -> str:
     """
     return f"{_slug(owner)}__{_slug(repo)}"
 
-# Only languages cregit can tokenize. m4 is omitted on purpose: it appears as
-# .am/.ac build files, never as a project's primary language.
-LANG_FILTER = {
-    "C": r"\.[ch]$",
-    "C++": r"\.(c|cc|cp|cpp|cxx|h|hh|hpp)$",
-    "Java": r"\.java$",
-    "Rust": r"\.rs$",
-}
+# Which primary languages make a repository eligible, and which mask each gets.
+#
+# The keys still filter the pool: a repository whose primary language is none of
+# these is not a repository cregit can usefully tokenize. The VALUES are now all
+# the same string, because the mask stopped being derived from the language —
+# every project is tokenized with the union of everything the tokenizer can parse
+# (see file_mask.py). A polyglot Java project's C++ used to be dropped because
+# GitHub called it Java; 68 of 188 projects gained files when this changed.
+#
+# So `LANG_FILTER[lang]` is still the right expression at a manifest-writing site
+# — it just no longer discriminates. Kept as a dict rather than collapsed to a
+# set so those call sites keep saying "the mask for this project".
+LANG_FILTER = {lang: UNIVERSAL_MASK for lang in TOKENIZABLE_LANGUAGES}
 
 # manifest.tsv header: size_class: S < 30k commits | M 30k-150k | L > 150k
 SIZE_S, SIZE_M = 30_000, 150_000
