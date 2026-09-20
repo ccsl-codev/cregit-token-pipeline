@@ -1,449 +1,218 @@
-# The cregit dataset, in two views
+# The cregit token dataset
 
-Two pictures of the same data.
+Reference for the published artefact. Four questions, in order: what the dataset
+is (§1), how to regenerate it (§2), what every column means (§3), and what is
+known to be wrong with it (§5).
 
-1. **The schema view** — the tables and columns as they actually exist on disk,
-   one set per project, plus the two corpus-level files that key them.
-2. **The joined (flat) view** — the single denormalised shape a researcher
-   queries. Part of it exists today (the 70-column Parquet); part of it is only
-   intended. Which is which is marked on every row.
-
-> **Nothing here is copied from another document.** Every table name, column
-> name and count below was read out of the code or measured against a real file
-> on 2026-09-19. The commands are in [§7](#7-how-every-number-here-was-verified).
-> Three documents in this project disagree with what is on disk; they are named
-> in [§8](#8-documents-that-disagree-with-the-data).
-
-Legend used throughout:
-
-| Mark | Meaning |
-| --- | --- |
-| **EXISTS** | verified present in the code and in a real artefact today |
-| **INTENDED** | the analytical shape a consumer wants; no code writes it yet |
-| **STALE** | the artefact exists but its content is known out of date |
+**`validate_schema.py` is the authority on the schema, not this document.**
+`EXPECTED_COLUMNS` there is the contract that every file is gated against; §3.2
+below is a description of it. If the two disagree, the code is right. Regenerate
+the contract from a real file with `./validate_schema.py --emit-contract F.parquet`.
 
 ---
 
-## 1. Schema view — what the pipeline actually builds
+## 1. What the dataset is
 
-Per project, `run_pipeline_process.sh` produces four SQLite databases, two bare
-git repositories, two working clones, a `blame/` tree, and one Parquet. Two
-corpus-level files sit above all of them.
-
-### 1.1 The artefacts, and which step writes each
-
-| Artefact | Written by | Read by step 10? | Status |
-| --- | --- | --- | --- |
-| `<name>-original.git` (bare) | step 1 `git clone --bare` | no | EXISTS |
-| `<name>-blobmap.db` | step 2 `blobExec` | no | EXISTS |
-| `<name>-cregit.git` (bare) | step 2 `blobExec` | no | EXISTS |
-| `<name>-original.db` | step 3 `slickGitLog` | **no** | EXISTS |
-| `<name>-cregit.db` | step 4 `slickGitLog`, step 8 `remapCommits` | **yes** | EXISTS |
-| `<name>-persons.db` / `-persons.xls` | step 5 `persons` (from the **original** bare repo) | **yes** (`.db`) | EXISTS |
-| `<name>-original/`, `<name>-cregit/` (working clones) | step 6 | `-original/` yes, as the source text | EXISTS |
-| `blame/**/*.blame` | step 7 `blameRepoFiles.pl` | **yes** | EXISTS |
-| `html/` | step 9 (skipped with `--skip-html`) | no | EXISTS, disposable |
-| `<name>-dataset.parquet` | step 10 `generate_dataset.py` | — | EXISTS |
-| `sync_*.db` (`token_map`) | step 10, phase 1 | yes, then **deleted** | EXISTS transiently |
-
-Note what step 10 does *not* read: `original.db` and `blobmap.db` contribute
-nothing to the Parquet. `original.db` is kept for audits and re-derivation;
-`blobmap.db` is the incremental-resume ledger.
-
-### 1.2 Per-project SQLite schemas (real column names)
-
-```mermaid
-erDiagram
-    ORIGINAL_DB_commits  ||--o{ ORIGINAL_DB_parents : "cid"
-    ORIGINAL_DB_commits  ||--o| ORIGINAL_DB_logs    : "cid"
-    ORIGINAL_DB_commits  ||--o{ ORIGINAL_DB_footers : "cid"
-
-    CREGIT_DB_commits    ||--o{ CREGIT_DB_parents   : "cid"
-    CREGIT_DB_commits    ||--o| CREGIT_DB_logs      : "cid"
-    CREGIT_DB_commits    ||--o{ CREGIT_DB_footers   : "cid"
-    CREGIT_DB_commits    ||--o| CREGIT_DB_commitmap : "cid"
-    CREGIT_DB_commitmap  }o--|| ORIGINAL_DB_commits : "originalcid = cid"
-
-    PERSONS_DB_persons   ||--o{ PERSONS_DB_emails   : "personid"
-
-    BLOBMAP_DB_commit_map ||--o{ BLOBMAP_DB_ref_map : "orig_commit"
-
-    ORIGINAL_DB_commits {
-        CHAR40 cid PK
-        TEXT autname
-        TEXT autemail
-        TEXT autdate
-        TEXT comname
-        TEXT comemail
-        TEXT comdate
-        TEXT summary
-        BOOLEAN ismerge
-    }
-    ORIGINAL_DB_parents {
-        CHAR40 cid PK
-        INTEGER idx PK
-        CHAR40 parent
-    }
-    ORIGINAL_DB_logs {
-        CHAR40 cid PK
-        TEXT log
-    }
-    ORIGINAL_DB_footers {
-        CHAR40 cid PK
-        INTEGER idx PK
-        TEXT key
-        TEXT value
-    }
-    CREGIT_DB_commits {
-        CHAR40 cid PK
-        TEXT autname
-        TEXT autemail
-        TEXT autdate
-        TEXT comname
-        TEXT comemail
-        TEXT comdate
-        TEXT summary
-        BOOLEAN ismerge
-    }
-    CREGIT_DB_parents {
-        CHAR40 cid PK
-        INTEGER idx PK
-        CHAR40 parent
-    }
-    CREGIT_DB_logs {
-        CHAR40 cid PK
-        TEXT log
-    }
-    CREGIT_DB_footers {
-        CHAR40 cid PK
-        INTEGER idx PK
-        TEXT key
-        TEXT value
-    }
-    CREGIT_DB_commitmap {
-        CHAR40 cid PK
-        CHAR40 originalcid
-        VARCHAR254 repo
-    }
-    PERSONS_DB_persons {
-        TEXT personid PK
-        TEXT personname
-    }
-    PERSONS_DB_emails {
-        INTEGER recordid PK
-        TEXT personid FK
-        TEXT fullemail UK
-        TEXT emailaddr
-        TEXT emailname
-        TEXT lcemail
-        TEXT userid
-        TEXT domain
-        INTEGER autcount
-        INTEGER comcount
-        TEXT dateadded
-        BOOLEAN checked
-        TEXT notes
-    }
-    BLOBMAP_DB_commit_map {
-        TEXT orig_commit PK
-        TEXT new_commit
-        INTEGER processed_at
-    }
-    BLOBMAP_DB_blob_map {
-        TEXT orig_blob PK
-        TEXT path PK
-        TEXT new_blob
-        INTEGER processed_at
-    }
-    BLOBMAP_DB_tree_map {
-        TEXT orig_tree PK
-        TEXT new_tree
-        INTEGER processed_at
-    }
-    BLOBMAP_DB_ref_map {
-        TEXT ref_name PK
-        TEXT kind
-        TEXT orig_target
-        TEXT new_target
-        TEXT orig_commit FK
-        TEXT new_commit
-        INTEGER processed_at
-    }
-    BLOBMAP_DB_meta {
-        TEXT key PK
-        TEXT value
-    }
-```
-
-Counts, all measured (see [§7](#7-how-every-number-here-was-verified)):
-
-| Database | Tables | Table names |
-| --- | --- | --- |
-| `<name>-original.db` | **4** | `commits`, `parents`, `logs`, `footers` |
-| `<name>-cregit.db` | **5** | `commits`, `parents`, `logs`, `footers`, **`commitmap`** |
-| `<name>-persons.db` | **2** | `persons`, `emails` |
-| `<name>-blobmap.db` | **5** | `commit_map`, `blob_map`, `tree_map`, `ref_map`, `meta` |
-
-Three name traps worth stating plainly, because all three are easy to get wrong:
-
-* The cregit→original commit mapping table is **`commitmap`** in `cregit.db`.
-  `commit_map` (with the underscore) is a *different* table, in `blobmap.db`,
-  with different columns, and it maps original→cregit **commits produced by the
-  rewrite**, not the tokenizer's provenance mapping.
-* `persons.db :: persons` has **only two columns** (`personid`, `personname`).
-  Every e-mail address, domain and counter lives in `emails`. So the Parquet's
-  `person_email` and `person_domain` come from `emails`, not from `persons`.
-* There is **no persisted `token_map` table**. It is created in a temporary
-  `sync_*.db` beside the output, indexed, read once, and `unlink`ed at the end of
-  step 10 (`generate_dataset.py:702`, `:905`). The token grain exists on disk
-  only as `blame/**/*.blame` plus the `-original/` working tree, and after that
-  only inside the Parquet.
-
-### 1.3 The transient token table (step 10, phase 1)
-
-```
-token_map (SQLite, temporary — deleted when step 10 finishes)
-  file_path      TEXT       relative path inside the repository
-  token_index    INTEGER    0-based position in the file's blame stream
-  commit_sha     CHAR(40)   the cregit commit that last touched this token
-  token_type     TEXT
-  token_value    TEXT
-  source_text    TEXT
-  source_line    INTEGER
-  source_col     INTEGER
-  is_structural  INTEGER
-  func_name      TEXT       <-- computed, then NOT carried into the Parquet
-```
-
-`func_name` is the one column phase 1 computes and phase 2 drops. It is
-populated only for `DECL` tokens. If a consumer needs function attribution it is
-not in the published data today. INTENDED, not EXISTS.
-
-### 1.4 The two corpus-level files
-
-```mermaid
-flowchart LR
-    R["rosters + GitHub API<br/>sources/, .corpus-cache/"] --> C
-
-    C["candidates.csv<br/>EXISTS<br/>24,405 rows, 28 fields<br/>one row per <i>provenance fact</i>,<br/>NOT one per project"]
-    C -->|"select_corpus.dedupe_by_clone_url()<br/>then included == True,<br/>then stratified draw"| M
-
-    M["manifest.sample.tsv<br/>EXISTS — 200 rows, 5 TSV fields<br/>name, url, category, file_mask, size_class"]
-
-    C --> PM
-    M --> PM
-    PM["project_meta.json<br/>STALE<br/>210 projects x 29 fields<br/>keyed by manifest <i>name</i>,<br/>joined on <b>clone_url</b>"]
-
-    PM -->|"--project-meta + --project-key"| G["generate_dataset.py step 10"]
-    G --> P["&lt;name&gt;-dataset.parquet<br/>EXISTS — 70 columns"]
-```
-
-`candidates.csv` — **EXISTS.** 24,405 rows, 28 fields, 23,707 distinct
-`clone_url`s. **It is not one row per project, and a diagram that drew it that
-way would be wrong.** It keeps one row per *provenance fact*, so a repository
-that two rosters name appears twice:
-
-| Measured on `candidates.csv` | Value |
-| --- | --- |
-| rows | 24,405 |
-| rows with an empty `clone_url` (never grouped) | 500 |
-| distinct non-empty `clone_url`s | 23,707 |
-| `clone_url`s carrying more than one row | **196** (194 pairs + 2 triples) |
-| rows in those groups | 394 (198 surplus rows) |
-| duplicate groups whose rows are byte-identical | **0** |
-| duplicate groups disagreeing on `stratum` | 28 |
-| **of the 200 corpus projects**, those with a duplicate group | **10** |
-| of those 10, groups disagreeing on something | **10 (all of them)** |
-| of those 10, groups disagreeing on `stratum` | **1 — `apache/doris`** |
-
-The resolution rule is `select_corpus.dedupe_by_clone_url` (`select_corpus.py:1314`):
-group by `clone_url`, and **the row whose owner matches the URL wins**. Anything
-that reads `candidates.csv` must apply it, and `project_meta.py:70` does. What
-the ten corpus duplicates disagree about:
-
-| Project (`clone_url` basename) | Fields that disagree between its rows |
-| --- | --- |
-| `util-linux` | source, fact, owner |
-| `Catch2` | source, fact, owner, repo, roster_name, roster_lang |
-| `osquery` | source, fact, owner, roster_lang |
-| `ZLMediaKit` | source, fact, owner, roster_lang, stars |
-| `Lealone` | owner |
-| `Mybatis-PageHelper` | source, fact, owner, roster_lang |
-| `anki` | source, fact, owner, roster_lang |
-| **`doris`** | source, **stratum**, fact, repo, roster_name, roster_lang, commits, size_kb, pushed_at |
-| `incubator-seata` | source, owner, repo, roster_name |
-| `rust-analyzer` | source, owner, roster_lang, stars, history_cluster, history_shared_with, history_relation, history_first, history_created |
-
-`manifest.sample.tsv` — **EXISTS.** 200 rows, exactly five tab-separated fields.
-Three parsers unpack those five positions and four tests assert them, which is
-why the 29 provenance fields had to go in a sidecar instead.
-
-`project_meta.json` — **STALE.** 210 projects (200 with
-`provenance_status = 'candidates.csv'` + 10 development fixtures flagged
-`fixture-needs-rework`), 29 fields each. It is stale on exactly one field:
-`file_mask` still records the four old per-language masks
-(62 `\.java$`, 59 `\.(c|cc|cp|cpp|cxx|h|hh|hpp)$`, 57 `\.[ch]$`, 32 `\.rs$`),
-while all three manifests now carry one universal mask for every row. **It must
-be regenerated before any Parquet is written**; another task owns that.
-
-### 1.5 The join key is `clone_url`. It is never `name`.
-
-`project_meta.py` keys its output by manifest *name* but **joins on
-`clone_url`**, and that is not a stylistic choice.
-
-`select_corpus.project_name(owner, repo)` (`select_corpus.py:79`) builds the name
-as `slug(owner) + "__" + slug(repo)`, where `slug` lowercases and replaces every
-run of characters outside `[a-z0-9-]` with a hyphen — so `_` and `.` both become
-`-`. The transform is **not invertible**, and the owner recorded is the owner the
-roster used, which may no longer own the repository. Measured over the 200 corpus
-rows:
-
-| | count |
-| --- | ---: |
-| names equal to `owner__repo` verbatim | 125 |
-| names that need slugging to match the URL (case, `_`, `.`) | 60 |
-| names that do **not** derive from the clone URL at all — renamed or transferred upstream | **15** |
-
-Those 15, with the URL they actually point at:
-
-```
-erikd__libsndfile          -> libsndfile/libsndfile
-freenet__fred              -> hyphanet/fred
-akarnokd__rxjava2extensions-> akarnokd/RxJavaExtensions
-biezhi__blade              -> lets-blade/blade
-buchen__portfolio          -> portfolio-performance/portfolio
-gitblit__gitblit           -> gitblit-org/gitblit
-timmolter__xchange         -> knowm/XChange
-datafuselabs__databend     -> databendlabs/databend
-graknlabs__grakn           -> typedb/typedb
-m-labs__smoltcp            -> smoltcp-rs/smoltcp
-tomaka__glutin             -> rust-windowing/glutin
-containers__composefs      -> composefs/composefs
-apache__incubator-singa    -> apache/singa
-wereturtle__ghostwriter    -> KDE/ghostwriter
-datasketches__sketches-core-> apache/datasketches-java
-```
-
-So: `repo_name` is a **workdir and filename key** — it is what `ctp.py` locks and
-stamps on, and it must stay filesystem-safe. `clone_url` is the **identity**.
-Join on `clone_url`. Any analysis that joins the Parquet back to a roster on
-`repo_name` silently loses at least those 15 projects.
-
----
-
-## 2. Joined view — the flat Parquet that exists today
-
-**EXISTS. 70 columns.** Authority: `EXPECTED_COLUMNS` in
-`validate_schema.py:79-150`. Confirmed against a real file:
-`qualcomm__qcom-embedded-power-measurement-dataset.parquet` → 70 columns,
-180,971 rows, **0 drifts** from the contract.
-
-It was 67 until 2026-09-20, when the three firm columns landed.
-
-### 2.1 The collapse, in one picture
-
-```mermaid
-flowchart LR
-    subgraph SRC["sources — normalised"]
-        direction TB
-        BL["blame/**/*.blame<br/>+ &lt;name&gt;-original/ tree"]
-        TM["token_map<br/>(temp SQLite)"]
-        CC["cregit.db :: commits"]
-        CM["cregit.db :: commitmap"]
-        CF["cregit.db :: footers"]
-        EM["persons.db :: emails"]
-        PS["persons.db :: persons"]
-        PJ["project_meta.json<br/>29 constants"]
-        BL --> TM
-    end
-
-    subgraph FLAT["&lt;name&gt;-dataset.parquet — 70 columns, one row per token"]
-        direction TB
-        G1["1-30 project identity + provenance (30)<br/>repo_name + the 29 sidecar fields<br/>CONSTANT on every row"]
-        G2["31-38 token grain (8)<br/>file_path .. is_structural"]
-        G3["39-47 commit (9)<br/>cregit_commit_sha .. commit_summary"]
-        G4["48-55 resolved identity + firm (8)<br/>personid .. repo_tag<br/>firm_raw, firm, firm_source are PER ROW"]
-        G5["56-70 commit trailers (15)<br/>footer_* — LIST(VARCHAR)"]
-    end
-
-    TM -->|"one row out per row in"| G2
-    TM -->|"commit_sha = c.cid (INNER)"| G3
-    CC  --> G3
-    CM  -->|"LEFT, c.cid = m.cid"| G3
-    EM  -->|"LEFT, (autname, autemail)"| G4
-    PS  -->|"LEFT, personid"| G4
-    CF  -->|"LEFT, grouped by cid"| G5
-    PJ  -->|"SQL literals, no join"| G1
-```
+One Parquet file per project, all with the same 70 columns.
 
 **The grain is one row per token occurrence per file**, at the blamed revision of
-the cregit working clone — *not* one row per token per commit that touched it.
+the tokenized working tree — not one row per token per commit that touched it.
 `git blame` attributes each token to exactly one commit, so `(file_path,
-token_index)` is unique: 180,971 rows, 180,971 distinct pairs in the verified
-file. There is no history of a token in the Parquet; there is one
-last-touching commit per token.
+token_index)` is unique within a project and each row carries exactly one
+last-touching commit. The dataset holds no history of an individual token.
 
-### 2.2 The 70 columns, exactly
+Each row also carries 29 per-project provenance columns (how the project was
+found, how it was labelled, which mask tokenized it) repeated verbatim on every
+row, so a consumer can filter a corpus without a second join. A column is cheap
+to drop at publish time and expensive to add later.
 
-Block boundaries are 1-based and inclusive. `30 + 8 + 9 + 8 + 15 = 70`.
+### 1.1 The corpus
+
+| | Value | Source |
+| --- | --- | --- |
+| Languages tokenized | C, C++, Java, Rust | `file_mask.TOKENIZABLE_LANGUAGES` |
+| File mask (identical for every project) | `(?i)\.(c\|c\+\+\|cc\|cp\|cpp\|cxx\|h\|h\+\+\|hh\|hpp\|hxx\|java\|rs\|tcc)$` | `file_mask.UNIVERSAL_MASK` |
+| Candidate rows considered | 24,405 (28 fields) | `candidates.csv` |
+| Eligible rows | 3,948 | `candidates.csv`, `included == True` |
+| Sampling frame (distinct repositories) | 3,842 | eligible rows collapsed by `clone_url` |
+| Projects drawn | 200 — 156 S, 31 M, 13 L | `manifest.sample.tsv` |
+| Strata drawn | 103 community, 69 company-owned, 28 foundation | `manifest.sample.tsv` field 3 |
+| Sampling seed | `20261110` | `select_corpus.SAMPLE_SEED` |
+| Cell floor | 2 per `(stratum, language, size_class)` cell | `select_corpus.SAMPLE_FLOOR` |
+| Size classes | S < 30,000 commits; M 30,000–150,000; L > 150,000 | `select_corpus.SIZE_S`, `SIZE_M` |
+
+The draw is stratified by `(stratum, language, size_class)`: a floor of 2 from
+every cell first, then the remainder by largest remainder, and a cell is never
+asked for more than it holds. `docs/CORPUS-SAMPLE.md` is the per-cell allocation.
+One `random.Random` is seeded per cell from `f"{seed}:{cell_key}"`, so adding a
+cell does not re-draw the others.
+
+**The run set is smaller than the draw.** `manifest.phase1-sm.tsv` holds the 187
+S- and M-class projects and `manifest.linux.tsv` holds one L-class project: 188
+of the 200. The other 12 L-class projects are held back on disk grounds (one
+L-class working directory measured 435 GB). Run them from
+`manifest.sample.tsv` once retention has a Parquet-only level.
+
+How a project gets its `stratum` is `docs/CODEBOOK.md`. It is a claim about who
+*controls* a project and never about who contributes to it.
+
+### 1.2 Selecting the corpus out of the output directory
+
+The output directory also holds development fixtures. One predicate separates
+them:
+
+```sql
+CREATE VIEW tokens AS
+SELECT * FROM read_parquet('<output_dir>/*/*-dataset.parquet')
+WHERE provenance_status = 'candidates.csv';   -- drops the fixtures
+```
+
+`provenance_status` is `candidates.csv` for a corpus project and
+`fixture-needs-rework` for a fixture. `project_meta.json` holds 210 entries of 29
+fields: 200 corpus projects and 10 fixtures. A fixture has only four real fields
+— `provenance_status`, `clone_url`, `manifest_category`, `file_mask` — and the
+other **25 are empty strings**. It was never selected, so it has no stratum, no
+draw and no history cluster, and empty strings read as findings rather than as
+absences. `provenance_status` is deliberately the second column, because it
+qualifies everything after it.
+
+A corpus project that is *not* found in `candidates.csv` is a hard error rather
+than a silent blank row.
+
+`./ctp.py db` builds the same view (plus a `projects` tracking table and a
+`phase_metrics` table) into `ctp.duckdb`, over the run set rather than over the
+glob. It is a derived index; the files are the authority.
+
+---
+
+## 2. Regenerating it
+
+`duckdb`, `srcml`, `ctags`, `java` and `perl` come from the cregit checkout's
+`devenv shell`; the orchestrator resolves that environment once per run and
+passes it to every subprocess. Stdlib Python otherwise. Point `pipeline.cfg` at
+a cregit checkout that has `rustTokenizer` and at an output directory.
+
+| Step | Command | Writes |
+| --- | --- | --- |
+| 1. Fetch rosters | `./select_corpus.py rosters` | `.corpus-cache/` |
+| 2. Resolve repositories | `./select_corpus.py enrich` | `.corpus-cache/repo-meta.json` |
+| 3. Find shared histories | `./shared_history.py scan` then `ancestry` | history cluster cache |
+| 4. Emit candidates | `./select_corpus.py emit` | `candidates.csv`, `manifest.tsv` |
+| 5. Draw the sample | `./select_corpus.py sample` | `manifest.sample.tsv`, `docs/CORPUS-SAMPLE.md` |
+| 6. Build the provenance sidecar | `./project_meta.py --candidates candidates.csv --manifest manifest.sample.tsv --fixture-manifest manifest.tsv --fixture-manifest manifest.mvp5.tsv --fixture-manifest manifest.shardtest.tsv --out project_meta.json` | `project_meta.json` (200 + 10) |
+| 7. Build the domain→firm map | `./build_domain_map.py fetch` then `build` | `data/affiliation.merged.csv` |
+| 8. Run the corpus | `./ctp.py run --manifest manifest.phase1-sm.tsv --jobs N --skip-html --drop-memo --project-meta project_meta.json --firm-map data/affiliation.merged.csv --firm-canonical data/firm_canonical.csv` | one Parquet per project, plus a `.validated` stamp |
+| 9. Gate the schema | `./validate_schema.py <out>/*/*-dataset.parquet` | exit 1 on any drift |
+| 10. Build the index | `./ctp.py db` | `ctp.duckdb` |
+| 11. Prune | `./retain.py --apply` | deletes `memo/` and `html/` only |
+| 12. Pseudonymize for release | `./anonymize_parquet.py OUTDIR <in>.parquet ...` | anonymized Parquets + JSON report |
+| 13. Verify the release | `./verify_anon.py OUTDIR` | exit 1 on any residue |
+
+**`--manifest` defaults to `manifest.tsv`, which is four legacy pilot projects.**
+Name the manifest you mean on every `ctp.py` subcommand that takes one.
+
+Runs are idempotent. A validated project is skipped, an interrupted one resumes
+through the tokenizer's incremental blob map, and a failed one is retried on the
+next pass. Resume is sensitive to two strings: the work directory path and the
+mask. Both are recorded in the blob map's meta table and compared character for
+character, so paths are canonicalized before the runner invokes anything, and a
+mask change forces a rebuild unless `--mask-widened` is passed with
+`--from-step 2`.
+
+`./ctp.py status` and `./ctp.py progress` are the progress views. Per-attempt
+logs live under `state/<project>/logs/`, beside `metrics.tsv` and `runs.log` and
+**not** in the project work directory, because a from-scratch run deletes that
+directory.
+
+`./run_tests.sh` runs the suite with an 80% coverage floor; tests needing network
+or an authenticated `gh` are deselected.
+
+### 2.1 Two gates, and they check different things
+
+| Gate | Asks | Checks |
+| --- | --- | --- |
+| `validate.py <parquet> <stamp>` | did this project produce data? | file larger than 10,000 bytes, row count > 0. Writes the `.validated` stamp on success. **It does not check columns.** |
+| `validate_schema.py <parquet> ...` | do all projects agree? | every column name, type and position against `EXPECTED_COLUMNS`. Reports every drift, not the first. |
+
+---
+
+## 3. The columns
+
+### 3.1 Blocks
+
+70 columns in five blocks. Boundaries are 1-based and inclusive;
+`30 + 8 + 9 + 8 + 15 = 70`.
+
+| Columns | Block | Varies by |
+| --- | --- | --- |
+| 1–30 | project identity and provenance | project only — constant on every row |
+| 31–38 | token grain | row |
+| 39–47 | commit | commit |
+| 48–55 | resolved identity and firm | row |
+| 56–70 | commit trailers, `VARCHAR[]` | commit |
+
+The firm trio (52–54) is the only part of the identity block that is not a
+per-project constant: it comes from a per-row join on `person_domain`.
+
+### 3.2 The 70 columns
 
 | # | Column | Type | Comes from | Note |
 | ---: | --- | --- | --- | --- |
-| 1 | `repo_name` | VARCHAR | `--repo-name` CLI | the manifest name, a lossy slug |
+| 1 | `repo_name` | VARCHAR | `--repo-name` | the manifest name; a lossy slug, see §3.5 |
 | 2 | `clone_url` | VARCHAR | sidecar | **the identity. Join on this.** |
 | 3 | `provenance_status` | VARCHAR | sidecar | `candidates.csv` \| `fixture-needs-rework` |
-| 4 | `source` | VARCHAR | sidecar | |
-| 5 | `stratum` | VARCHAR | sidecar | |
-| 6 | `fact` | VARCHAR | sidecar | |
-| 7 | `contested` | VARCHAR | sidecar | |
-| 8 | `label_date` | VARCHAR | sidecar | |
-| 9 | `owner` | VARCHAR | sidecar | |
+| 4 | `source` | VARCHAR | sidecar | which roster or search found the project |
+| 5 | `stratum` | VARCHAR | sidecar | `community` \| `company-owned` \| `foundation` |
+| 6 | `fact` | VARCHAR | sidecar | the control fact that assigned the stratum |
+| 7 | `contested` | VARCHAR | sidecar | non-empty when two facts disagreed |
+| 8 | `label_date` | VARCHAR | sidecar | when the stratum was assigned |
+| 9 | `owner` | VARCHAR | sidecar | the owner the roster recorded |
 | 10 | `repo` | VARCHAR | sidecar | |
-| 11 | `roster_name` | VARCHAR | sidecar | |
-| 12 | `roster_lang` | VARCHAR | sidecar | |
-| 13 | `language` | VARCHAR | sidecar | |
-| 14 | `commits` | VARCHAR | sidecar | |
-| 15 | `size_class` | VARCHAR | sidecar | |
+| 11 | `roster_name` | VARCHAR | sidecar | the name the roster used |
+| 12 | `roster_lang` | VARCHAR | sidecar | the language the roster claimed |
+| 13 | `language` | VARCHAR | sidecar | GitHub's primary language |
+| 14 | `commits` | VARCHAR | sidecar | at selection time |
+| 15 | `size_class` | VARCHAR | sidecar | `S` \| `M` \| `L`, from `commits` |
 | 16 | `size_kb` | VARCHAR | sidecar | |
-| 17 | `stars` | VARCHAR | sidecar | |
+| 17 | `stars` | VARCHAR | sidecar | at selection time |
 | 18 | `pushed_at` | VARCHAR | sidecar | |
-| 19 | `license` | VARCHAR | sidecar | |
-| 20 | `owner_type` | VARCHAR | sidecar | |
+| 19 | `license` | VARCHAR | sidecar | SPDX identifier |
+| 20 | `owner_type` | VARCHAR | sidecar | `User` \| `Organization` |
 | 21 | `archived` | VARCHAR | sidecar | |
-| 22 | `fork` | VARCHAR | sidecar | |
-| 23 | `history_cluster` | VARCHAR | sidecar | |
-| 24 | `history_shared_with` | VARCHAR | sidecar | |
-| 25 | `history_relation` | VARCHAR | sidecar | |
-| 26 | `history_includes` | VARCHAR | sidecar | |
-| 27 | `history_first` | VARCHAR | sidecar | |
+| 22 | `fork` | VARCHAR | sidecar | GitHub's flag only; see §5 |
+| 23 | `history_cluster` | VARCHAR | sidecar | projects sharing one commit history |
+| 24 | `history_shared_with` | VARCHAR | sidecar | space-separated cluster members |
+| 25 | `history_relation` | VARCHAR | sidecar | `includes` \| `included_in` \| `mirror` \| `diverged` — about **inclusion**, not origin |
+| 26 | `history_includes` | VARCHAR | sidecar | projects whose whole history is inside this one |
+| 27 | `history_first` | VARCHAR | sidecar | the cluster's oldest repository — the **origin** signal |
 | 28 | `history_created` | VARCHAR | sidecar | |
-| 29 | `manifest_category` | VARCHAR | **manifest**, not the CSV | need not equal `stratum` |
-| 30 | `file_mask` | VARCHAR | **manifest**, not the CSV | source is STALE in the sidecar |
-| 31 | `file_path` | VARCHAR | blame path | |
+| 29 | `manifest_category` | VARCHAR | **manifest**, not the sidecar | need not equal `stratum` |
+| 30 | `file_mask` | VARCHAR | **manifest**, not the sidecar | which mask tokenized this Parquet |
+| 31 | `file_path` | VARCHAR | blame | repository-relative |
 | 32 | `token_index` | BIGINT | blame | 0-based, per file |
 | 33 | `source_line` | BIGINT | source tree | 1-based |
 | 34 | `source_col` | BIGINT | source tree | 1-based |
-| 35 | `source_text` | VARCHAR | source tree | raw chars incl. trailing whitespace |
-| 36 | `token_type` | VARCHAR | srcml2token | |
-| 37 | `token_value` | VARCHAR | srcml2token | whitespace-stripped |
+| 35 | `source_text` | VARCHAR | source tree | raw characters, trailing whitespace included |
+| 36 | `token_type` | VARCHAR | tokenizer | |
+| 37 | `token_value` | VARCHAR | tokenizer | whitespace-stripped |
 | 38 | `is_structural` | BIGINT | computed | 1 = boundary marker, 0 = real code |
-| 39 | `cregit_commit_sha` | VARCHAR | blame | commit in the **cregit** repo |
+| 39 | `cregit_commit_sha` | VARCHAR | blame | commit in the **tokenized** repository |
 | 40 | `original_commit_sha` | VARCHAR | `commitmap` | `coalesce(m.originalcid, t.commit_sha)` |
-| 41 | `author_name` | VARCHAR | `cregit.db::commits.autname` | raw git string |
+| 41 | `author_name` | VARCHAR | `commits.autname` | raw git string, not resolved |
 | 42 | `author_email` | VARCHAR | `commits.autemail` | |
 | 43 | `author_date` | VARCHAR | `commits.autdate` | **string, not a timestamp** |
 | 44 | `committer_name` | VARCHAR | `commits.comname` | |
 | 45 | `committer_email` | VARCHAR | `commits.comemail` | |
 | 46 | `committer_date` | VARCHAR | `commits.comdate` | **string, not a timestamp** |
-| 47 | `commit_summary` | VARCHAR | `commits.summary` | first line only |
-| 48 | `personid` | VARCHAR | `emails.personid` | LEFT join — may be NULL |
+| 47 | `commit_summary` | VARCHAR | `commits.summary` | subject line only |
+| 48 | `personid` | VARCHAR | `emails.personid` | the identity-merged person. LEFT join — may be NULL |
 | 49 | `person_name` | VARCHAR | `coalesce(persons.personname, emails.personid)` | |
-| 50 | `person_email` | VARCHAR | `emails.emailaddr` | |
+| 50 | `person_email` | VARCHAR | `emails.emailaddr` | **a real address unless the file is anonymized** |
 | 51 | `person_domain` | VARCHAR | `emails.domain` | the key the firm join uses |
 | 52 | `firm_raw` | VARCHAR | `affiliation.merged.csv.company` | the map's string, unaltered. `''` = domain not in the map |
-| 53 | `firm` | VARCHAR | `firm_canonical.csv.firm` | the canonical name; equals `firm_raw` unless the reviewed table renames it |
-| 54 | `firm_source` | VARCHAR | `affiliation.merged.csv.source` | the confidence tier. **`''` = no attribution**; `cncf-gitdm-single` = one person only |
-| 55 | `repo_tag` | VARCHAR | `commitmap.repo` | `''` for a single-repo project |
+| 53 | `firm` | VARCHAR | `firm_canonical.csv.firm` | canonical name; equals `firm_raw` unless the reviewed table renames it |
+| 54 | `firm_source` | VARCHAR | `affiliation.merged.csv.source` | **the confidence tier. `''` = no attribution.** See §3.4 |
+| 55 | `repo_tag` | VARCHAR | `commitmap.repo` | `''` for a single-repository project |
 | 56 | `footer_signed_off_by` | VARCHAR[] | `footers` | |
 | 57 | `footer_co_authored_by` | VARCHAR[] | `footers` | |
 | 58 | `footer_co_developed_by` | VARCHAR[] | `footers` | |
@@ -457,20 +226,22 @@ Block boundaries are 1-based and inclusive. `30 + 8 + 9 + 8 + 15 = 70`.
 | 66 | `footer_mentored_by` | VARCHAR[] | `footers` | |
 | 67 | `footer_assisted_by` | VARCHAR[] | `footers` | |
 | 68 | `footer_thanks_to` | VARCHAR[] | `footers` | |
-| 69 | `footer_personids` | VARCHAR[] | `footers` → `emails` | e-mail extracted from the trailer by regex |
-| 70 | `footer_person_names` | VARCHAR[] | `footers` → `emails` → `persons` | |
+| 69 | `footer_personids` | VARCHAR[] | `footers` → `emails` | resolved **set**: DISTINCT and sorted |
+| 70 | `footer_person_names` | VARCHAR[] | `footers` → `emails` → `persons` | resolved **set**: DISTINCT and sorted |
 
-Footer keys are matched case-insensitively (`LOWER(f.key) = 'signed-off-by'`) and
-each list is ordered by `footers.idx`. `footer_personids` and
-`footer_person_names` are `DISTINCT` and sorted, so they are a set, not aligned
-with the 13 typed lists.
+Columns 41–46 are the raw git strings on the commit; 48–51 are the same person
+after cregit's identity merge across addresses. Use `personid` to count people
+and `author_name` only to see what the commit actually said.
 
-### 2.3 The actual join, as written
+Trailer keys are matched case-insensitively and each typed list (56–68) is
+ordered by the trailer's own index, so element *i* of one list does not
+correspond to element *i* of another. Columns 69 and 70 are DISTINCT and sorted,
+so they are sets and are **not** positionally aligned with the 13 typed lists.
 
-From `generate_dataset.py:712-747`, unedited in structure:
+### 3.3 How the blocks are joined
 
 ```sql
-FROM token_map t
+FROM token_map t                                       -- one row per token
 JOIN      commits c   ON t.commit_sha = c.cid          -- INNER: no commit, no row
 LEFT JOIN commitmap m ON c.cid = m.cid
 LEFT JOIN emails e    ON (c.autname = e.emailname AND c.autemail = e.emailaddr)
@@ -480,420 +251,285 @@ LEFT JOIN ( ... footers f LEFT JOIN emails fe ... GROUP BY f.cid ) ftr
 ORDER BY t.file_path, t.token_index
 ```
 
-Two consequences a consumer must plan for:
+Two consequences to plan for:
 
-* `JOIN commits` is an **inner** join. A blamed commit missing from
-  `cregit.db :: commits` drops its tokens silently. Nothing downstream reports it.
-* `emails` is matched on the **pair** `(emailname, emailaddr)`, both exact. A
-  commit whose author spelling differs from every `emails` row yields
-  `personid = NULL`, and columns 48-51 are all NULL for that token. In the
-  verified file the miss rate is 0 of 180,971 rows, but that project has only 2
-  distinct persons; do not generalise it.
+* `JOIN commits` is an **inner** join. A blamed commit missing from the commit
+  table drops its tokens silently, and nothing downstream reports the loss.
+* `emails` is matched on the exact **pair** `(emailname, emailaddr)`. A commit
+  whose author spelling differs from every `emails` row yields
+  `personid = NULL`, and columns 48–51 are then all NULL for that token. Measure
+  the miss rate on your own slice; it varies with how many distinct people a
+  project has.
 
-### 2.4 What one verified file looks like
+The 29 provenance columns are injected as SQL literals from `project_meta.json`,
+with no join at all. A missing sidecar key is a hard error, so a typo cannot
+silently blank 29 columns.
 
-`qualcomm__qcom-embedded-power-measurement`:
+### 3.4 Firm attribution: always read `firm_source`
 
-| | |
-| --- | ---: |
-| columns | 70 |
-| rows | 180,971 |
-| distinct `(file_path, token_index)` | 180,971 |
-| distinct `file_path` | 298 |
-| distinct `cregit_commit_sha` | 22 |
-| distinct `personid` | 2 |
-| rows with `personid IS NULL` | 0 |
-| `is_structural = 0` (real code) | 158,766 |
-| `is_structural = 1` (markers) | 22,205 |
-| rows with a non-empty `footer_signed_off_by` | 0 |
-| distinct `repo_tag` | 1 (`''`) |
-| distinct metadata tuples | 1 — the 29 provenance columns are constant, by design |
+`firm_raw`/`firm`/`firm_source` resolve `person_domain` through
+`data/affiliation.merged.csv` (4,049 domains, 2,996 distinct company strings),
+canonicalizing the name through the reviewed `data/firm_canonical.csv`. All three
+are `''` when the domain is not in the map, so **an empty `firm_source` means "no
+attribution"** and is the column to filter on.
 
----
+The map is built from person-grain public affiliation data projected onto
+domains, which is lossy: a contributor's employer gets attached to their personal
+domain. Single-person attestations are kept deliberately — dropping them costs
+most of the yield — and tagged so a consumer can restrict to the corroborated
+tier. Counted from `data/affiliation.merged.csv`:
 
-## 3. Joined view — the shape a researcher wants (partly INTENDED)
-
-The published Parquet is *almost* the analytical table. Four things are missing,
-and none of them is written by any code today.
-
-```mermaid
-flowchart TB
-    P["&lt;name&gt;-dataset.parquet<br/>EXISTS — 70 columns, per project"]
-
-    P --> V["corpus token table<br/>PARTLY EXISTS"]
-    A["data/affiliation.merged.csv<br/>EXISTS — 4,049 rows<br/>domain, company, kind, source"] -->|"person_domain = domain<br/>INTENDED — nothing joins it yet"| V
-    V --> F["+ firm / org<br/>INTENDED"]
-    V --> H["+ anonymised person key<br/>INTENDED (anonymize.py, DESIGN.md §7)"]
-    V --> FN["+ func_name<br/>INTENDED (dropped in step 10 phase 2)"]
-    V --> TS["+ typed timestamps<br/>INTENDED (author_date is VARCHAR today)"]
-```
-
-| Piece | Status | Evidence |
-| --- | --- | --- |
-| all 200 projects in one queryable table | **PARTLY EXISTS** | `consolidate.py` builds a DuckDB `tokens` view over `read_parquet([...])` — but it reads **`manifest.tsv`, hardcoded**, which holds 4 projects, and `ctp.py db` takes no `--manifest`. `read_parquet(['…/*-dataset.parquet'])` over the output directory works today without any code. |
-| `firm` / employer per token | **EXISTS** since 2026-09-20 | Three columns, 52-54, joined per row from `data/affiliation.merged.csv` (4,049 rows) on `person_domain`, with `firm` canonicalised through the reviewed `data/firm_canonical.csv`. `generate_dataset.py --firm-map --firm-canonical`. **Only projects regenerated after that date carry it**; the rest hold three empty strings, which is what an empty `firm_source` means. |
-| anonymised person key | **INTENDED** | `docs/DESIGN.md` §7.2 — `anonymize.py`, salted stable hash, salt kept local. Not written. |
-| `func_name` | **INTENDED** | computed in step 10 phase 1, absent from the 70 columns. |
-| dates as `TIMESTAMP` | **INTENDED** | `author_date`/`committer_date` are VARCHAR git strings. A consumer must cast. |
-| `category` / `size_class` at corpus level | **REDUNDANT NOW** | `consolidate.py`'s view adds `p.category, p.size_class` from the manifest. Since the schema widened to 70, `manifest_category` (29) and `size_class` (15) are already in the Parquet, so the view's two extra columns duplicate them. |
-
-The analytical table a consumer should write, on today's data:
-
-```sql
--- EXISTS: works now, no new code. The glob resolves to 197 files today.
-CREATE VIEW tokens AS
-SELECT * FROM read_parquet('<out>/*/*-dataset.parquet')
-WHERE provenance_status = 'candidates.csv';   -- drops the 10 dev fixtures
-
--- EXISTS since 2026-09-20: firm is IN the Parquet, so there is no join to write.
--- The `kind` column is the only part of the map the Parquet does not carry.
-SELECT firm, COUNT(*) AS tokens
-FROM tokens
-WHERE is_structural = 0 AND firm <> ''
-GROUP BY firm ORDER BY tokens DESC;
-```
-
-`provenance_status = 'candidates.csv'` is the one predicate that selects the
-corpus. Without it a consumer mixes in the 10 development fixtures, whose 27
-provenance columns are empty strings — and empty strings read as findings, not as
-absences.
-
-### 3.1 Why `firm_source` is a column and not a footnote — RESOLVED 2026-09-20
-
-The first naive join against one real project produced **one firm for all 180,971
-rows, and it was the wrong firm**:
-
-```
-firm   firm_kind   rows
-CERN   company     180971
-```
-
-The project is `qualcomm__qcom-embedded-power-measurement`; both of its persons
-write from `qti.qualcomm.com`; and `data/affiliation.merged.csv:2866` said
-
-```
-qti.qualcomm.com,CERN,company,cncf-gitdm-single
-```
-
-**Fixed.** That row now reads `qti.qualcomm.com,Qualcomm,company,correction`,
-corrected in `data/affiliation.corrections.csv` — an overlay applied last by
-`build_domain_map.py`, so a `build` keeps it, which a hand edit of the merged
-file would not. The regenerated Parquet reads
-`('qti.qualcomm.com', 'Qualcomm', 'Qualcomm', 'correction')` for all 180,971
-rows. `tests/test_firm_attribution.py` is the named regression.
-
-This was **not** a bug in `build_domain_map.py`. It is the risk that file's own
-docstring names, and it had already materialised. `build_domain_map.py:399-407`
-keeps single-person attestations deliberately — dropping them costs ~92% of the
-yield — and marks them in `source` so a consumer can restrict to the corroborated
-tier. That is why `firm_source` is column 54 rather than a footnote. The
-distribution of the tier:
-
-| `source` | rows | confidence |
+| `source` | rows | Confidence |
 | --- | ---: | --- |
-| `cncf-gitdm-single` (+ `-self-reference`) | 2,771 + 28 = **2,799 of 4,049 (69%)** | **one person only** |
-| `gitdm` (curated, hand-checked for the VEM paper) | 768 | high |
-| `cncf-gitdm` (+ `-self-reference`) | 204 + 5 = 209 | ≥ `--min-persons` people agree |
+| `cncf-gitdm-single` (+ `-self-reference`) | 2,770 + 28 = **2,798 of 4,049 (69%)** | **one person only** |
+| `gitdm` | 768 | curated, hand-checked |
+| `cncf-gitdm` (+ `-self-reference`) | 204 + 5 = 209 | several people agree |
 | `spinellis-sec` (+ `-self-reference`) | 111 + 2 = 113 | published source |
-| `patch` (curated) | 72 | high |
-| `rich`, `builtin` | 55 + 33 | high / definitional |
-
-Three more single-person rows that are plainly wrong on their face:
-`central-intelligence.agency,Microsoft`, `intellisys.info,Takeaway.com` and
-`collibra.com,Medidata` (Collibra is a different company). None is corrected:
-the overlay holds one reviewed row, and a row-by-row audit of 2,771
-single-person inferences is its own task.
-
-The row filter stays available to a consumer, and now needs no join:
+| `patch` | 72 | curated |
+| `rich` | 55 | curated |
+| `builtin` | 33 | definitional |
+| `correction` | 1 | reviewed overlay, `data/affiliation.corrections.csv` |
 
 ```sql
--- Restrict to the corroborated tier. firm_source is IN the Parquet.
+-- Restrict to the corroborated tier.
 SELECT firm, COUNT(*) FROM tokens
 WHERE firm <> '' AND firm_source NOT LIKE 'cncf-gitdm-single%'
 GROUP BY firm;
 ```
 
-A `firm` column with no `firm_source` beside it is not publishable, which is why
-all three landed together, exactly as `file_mask` carries the mask per row and
-for the same reason.
-
-### 3.2 Firm names were split, so firms were double-counted — RESOLVED 2026-09-20
-
-The map holds 2,996 distinct `company` strings. `build_domain_map.norm_company`
-strips legal suffixes but **does not case-fold**, and runs at parse time only, so
-two sources could still disagree. Under a conservative key — case-fold, drop legal
-and descriptive suffixes — **48 firms were counted as 100 separate entities**:
-`NVIDIA`/`NVidia`, `Samsung`/`Samsung Electronics`, `Cisco`/`Cisco Systems`, and
-worst, `IBM` (6 rows) against `International Business Machines` (44).
-
-The fix is `data/firm_canonical.csv`: a **reviewed table, not a rule**. 52 rows
-map a raw spelling to a canonical name, each with its reason; 11 more record a
-candidate merge that was **rejected** — `AWS`→`Amazon` and `Azure`→`Microsoft`
-(parent rollups, out of scope), `Samsung SDS`, `Yahoo! Japan`, `China Mobile
-International` (separate companies), `Hewlett`/`HP` (HP Inc. and HPE split in
-2015), `Independent`/`(Independent)` (one is 15 university domains, the other 58
-free providers). An automatic rule would eventually merge two genuinely different
-firms and nobody would notice; a table can be disagreed with one line at a time.
-
-Note what an automatic rule would have got wrong here: the **all-caps spellings
-come from the Spinellis SEC/Fortune source**, whose filing names are upper case,
-and that is the *higher-confidence* source. A rule preferring the better source
-would have canonicalised to `NETFLIX`, `TWITTER`, `ADOBE`.
-
+`data/firm_canonical.csv` is a **reviewed table, not a rule**: 62 rows, of which
+51 merge a raw spelling into a canonical name and 11 record a candidate merge
+that was examined and **rejected** (parent rollups such as `AWS`→`Amazon`;
+genuinely separate companies such as `Samsung SDS`; `Hewlett` against `HP`, which
+split in 2015). An automatic rule would eventually merge two different firms and
+nobody would notice. Note also that an automatic rule keyed on source confidence
+would canonicalize *towards* the all-caps SEC filing names, because the
+higher-confidence source is the one that spells firms in upper case.
 `firm_raw` is never overwritten, so every merge is reversible by a reader.
 
----
+### 3.5 Join on `clone_url`, never on `repo_name`
 
-## 4. Retention: what a consumer actually receives
+`repo_name` is a **filesystem key**: the runner locks and names work directories
+with it, so it must stay filesystem-safe. It is built as
+`slug(owner) + "__" + slug(repo)`, where `slug` lowercases and replaces every run
+of characters outside `[a-z0-9-]` with a hyphen. `_` and `.` both become `-`, so
+the transform is **not invertible**. The owner recorded is also the owner the
+roster used, which may no longer own the repository.
 
-A published dataset is **the Parquet files and nothing else.** Everything in
-§1.1 above is intermediate, and most of it is deleted before publication.
-`retain.py` is that policy, executable; `docs/DESIGN.md` §6 is the table it
-implements.
+Measured over the 200 drawn projects: 125 names equal `owner__repo` verbatim, 60
+need slugging to match the URL, and **15 do not derive from the clone URL at
+all** because the repository was renamed or transferred upstream. Any analysis
+that joins back to a roster on `repo_name` silently loses at least those 15.
+Reproduce the split with `select_corpus.project_name(owner, repo)` over
+`manifest.sample.tsv`.
 
-Measured across the 198 project workdirs present on this machine today:
-
-| Artefact class | Files | On-disk total | Published? |
-| --- | ---: | ---: | --- |
-| `*-dataset.parquet` | 197 | **5.81 GB** | **YES — this is the product** |
-| `*-blobmap.db` | 198 | 10.12 GB | no — resume ledger |
-| `*-cregit.db` | 198 | 6.08 GB | no |
-| `*-original.db` | 198 | 5.32 GB | no |
-| `*-persons.db` | 198 | 0.04 GB | no — and it holds raw e-mail addresses |
-| `*-persons.xls` | 198 | 0.04 GB | no — same |
-| `*-original.git`, `*-cregit.git` (bare) | 2 per project | — | no |
-| `*-original/`, `*-cregit/` (working clones) | 2 per project | — | no, re-derivable |
-| `blame/` | 1 per project | — | no, consumed by step 10 |
-| `memo/` | 9 projects still have one | Linux: ~2.6 M entries | no, never |
-| `html/` | `--skip-html` | 94-255 MB per project when written | no |
-
-Parquet size distribution: median **4.8 MB**, mean excluding the largest
-**22.9 MB**. Three projects dominate: `torvalds__linux` 1,452 MB,
-`googleapis__google-cloud-java` 980 MB, `elastic__elasticsearch` 299 MB.
-Without Linux the whole corpus is **4.39 GB**.
-
-The intermediates are the expensive part. `torvalds__linux` alone holds
-`original.db` 2.7 GB, `cregit.db` 2.5 GB, `blobmap.db` 2.0 GB, a 1.2 GB
-`pipeline.log` and ~2.6 million memo entries — against a 1.5 GB Parquet. The
-volume is at 1.1 TB used of 2.0 TB.
-
-So, concretely, a consumer receives:
-
-* **one Parquet per project**, 70 columns, ~5.8 GB for 197 projects as built;
-* **not** the git repositories — a project is re-derivable from `clone_url` plus
-  the recorded `file_mask`, which is exactly why `file_mask` is column 30;
-* **not** `persons.db` or `persons.xls`. Those carry raw e-mail addresses.
-  `person_email` is in the Parquet today, so **publishing the Parquet as-is
-  publishes e-mail addresses.** `DESIGN.md` §7.2's `anonymize.py` is the answer,
-  and it is INTENDED, not written. Treat this as a release blocker, not a detail.
+`clone_url` is the identity. `candidates.csv` keeps **one row per provenance
+fact**, not one per project, so a repository that two rosters name appears twice:
+24,405 rows cover 23,707 distinct non-empty `clone_url`s, 196 of which carry more
+than one row. `select_corpus.dedupe_by_clone_url` is the resolution rule — group
+by `clone_url`, and the row whose owner matches the URL wins — and anything
+reading `candidates.csv` must apply it. `project_meta.py` does.
 
 ---
 
-## 5. Reading the two views side by side
+## 4. Intermediate artefacts
 
-| | Schema view (§1) | Joined view (§2) |
+Per project the pipeline writes four SQLite databases, two bare repositories, two
+working clones, a `blame/` tree and one Parquet. **Only the Parquet is
+published.** A project is re-derivable from `clone_url` plus the recorded
+`file_mask`, which is why `file_mask` is a column.
+
+| Artefact | Read to build the Parquet? | Kept because |
 | --- | --- | --- |
-| Files per project | 4 SQLite DBs, 2 bare repos, 2 clones, `blame/` | 1 Parquet |
-| Tables | 4 + 5 + 2 + 5 = **16** | **1** |
-| Grain | commit (`commits`), person (`persons`), blob (`blob_map`), token (`blame` lines) | **one row per token per file** |
-| Identity | `cid` inside a project; `clone_url` across projects | `clone_url` (col 2); `repo_name` (col 1) is a slug |
-| Per-project constants | stored once, in `project_meta.json` | repeated on **every row** (cols 1-30) |
-| Cost | ~22 GB of SQLite + repos + clones | 5.81 GB of Parquet |
-| Published | no | yes |
+| `<name>-dataset.parquet` | — | **it is the product** |
+| `<name>-cregit.db` | yes — commits, commitmap, footers | audits, re-derivation |
+| `<name>-persons.db` | yes — persons, emails | audits. **Holds raw e-mail addresses** |
+| `<name>-original/` working clone | yes — the source text | re-derivable from the bare repo |
+| `blame/**/*.blame` | yes | consumed, re-derivable |
+| `<name>-original.db` | **no** | audits and re-derivation |
+| `<name>-blobmap.db` | **no** | the incremental-resume ledger |
+| `<name>-original.git`, `<name>-cregit.git` | no | cheap incremental re-runs |
+| `memo/` | no | nothing — deleted by `retain.py` |
+| `html/` | no | nothing — never written under `--skip-html` |
+| `sync_*.db` (`token_map`) | yes, then deleted | nothing — transient |
 
-The repetition in columns 1-30 is deliberate, and `validate_schema.py:44` gives
-the reason: a reader can filter a corpus without a second join, and a column is
-cheap to drop at publish time but expensive to add later.
+`retain.py` deletes `memo/` and `html/` and nothing else. It is dry-run by
+default, requires `--apply`, and refuses a project whose keepers are missing.
+Dropping `memo/` costs the tokenizer's blob-to-token cache, so a later
+incremental re-run of that project re-tokenizes from cold; that is accepted
+because a validated project is not re-run.
+
+Three naming traps, all easy to get wrong:
+
+* The tokenized→original commit mapping is **`commitmap`** in `<name>-cregit.db`.
+  `commit_map` (with the underscore) is a *different* table, in
+  `<name>-blobmap.db`, with different columns, mapping original→rewritten
+  commits produced by the rewrite rather than the tokenizer's provenance.
+* `persons.db :: persons` has **only two columns**, `personid` and `personname`.
+  Every address, domain and counter lives in `emails`, so `person_email` and
+  `person_domain` come from `emails`.
+* There is **no persisted token table**. It is created in a temporary `sync_*.db`,
+  indexed, read once, and unlinked. At token grain the data exists on disk only
+  as `blame/**/*.blame` plus the working tree, and after that only in the Parquet.
+
+The temporary token table computes one column the Parquet does not carry:
+`func_name`, populated for declaration tokens only. Function attribution is
+therefore not available in the published data.
 
 ---
 
-## 6. Invariants a future change must not break
+## 5. Known limitations
+
+Ordered by how likely it is to change a result.
+
+**Publishing the Parquet as it stands publishes contributors' e-mail addresses.**
+`person_email` (column 50) is a real address. `anonymize_parquet.py` is the
+release path: it rewrites the e-mail local part to `author_NNNN` and names to
+`Author N`, running every identity string — including each element of the 15
+trailer arrays — through one registry, so a person carries one pseudonym
+everywhere. It classifies **every** input column into pass-through, transform or
+drop and raises on a column it does not recognise, so a schema change stops it
+loudly instead of silently shrinking the release. It also checks its own output:
+row count, `firm`/`repo_name` group counts and every `person_domain` must be
+unchanged, and `count(distinct person_email)` and `count(distinct person_name)`
+must not drop — two real people collapsing onto one pseudonym would lower a
+distinct-contributor count for free.
+
+Two properties to plan a release around. There is **no salt and no key**: ids are
+assigned by sorting the distinct lowercased values, so two runs over the same
+inputs are byte-identical and two releases diff cleanly, but the only thing
+protecting the mapping is not publishing the registry. And the registry spans
+**one invocation**, so pseudonyms are not stable across runs with different input
+sets — pass every file that will be published together in a single command.
+
+Run `verify_anon.py` over the output directory as an independent check: it tests
+the published files alone for any e-mail local part that is not a pseudonym, needs
+no secrets, and so can be run by a reviewer or a depositor. It is a necessary,
+not a sufficient, condition. Two residual risks survive
+anonymization by design and must be disclosed by any analysis: the e-mail
+**domain is preserved on purpose** (it is the firm signal), so a sole contributor
+at a rare or vanity domain is re-identifiable; and `owner`/`repo_name`/
+`clone_url` carry the GitHub namespace, which for a personal repository is a
+person's handle. `source_text` and `token_value` are source code and are not
+scrubbed, so copyright headers and `@author` tags pass through.
+
+**63 of the 188 run projects were tokenized with a narrower mask than the one now
+recorded.** The mask used to be chosen from GitHub's primary-language field,
+which dropped a polyglot project's other languages. `data/mask-impact.csv`
+(188 rows, re-derivable with `./mask_impact.py`) measures the change: 545,957 →
+570,201 files and 7,043.0 → 7,329.7 MiB selected. 63 projects are `gainer` — the
+universal mask selects files at HEAD that their recorded mask did not, so their
+tokenized repository is incomplete and they must be re-tokenized from step 2. The
+other 125 select the same HEAD paths and need only a step-10 regeneration. 17 of
+those 125 gain files only in history, on paths deleted or renamed before HEAD;
+those rows never reach the Parquet, so they are not a Parquet defect. The mask
+never narrows: `delta_files < 0` occurs for no project. Filter on `file_mask`
+(column 30) to tell which rows came from which mask.
+
+`./ctp.py run --mask REGEX` overrides the manifest for a whole run but does
+**not** update `project_meta.json`, so the published `file_mask` will not describe
+what actually ran. The runner warns; nothing enforces it.
+
+**The firm columns are empty for most of the corpus, and an empty value is
+ambiguous.** A project only carries firm attribution if it was generated with
+`--firm-map`; otherwise all three columns are empty strings, which is also what
+"this domain is not in the map" looks like. From columns 52–54 alone a consumer
+**cannot distinguish** "no attribution for this domain" from "this project was
+never regenerated with the map". Cross-check against the project rather than the
+row.
+
+**Some tokenizable source is deliberately excluded, and nothing in the output
+says so.** `.ixx`, `.inl`, `.cppm`, `.cxxm` and `.ipp` are left out of the mask
+because srcML 1.1.0 does not recognise them, ignores `-l C++`, and then writes an
+**empty token file and exits 0** — a silent success. Autotools input (`.am`,
+`.ac`, 1.4 MB across 22 projects) is left out because the m4 tokenizer's lexer
+uses a backtick as its closing quote, so an apostrophe swallows text to the next
+backtick. C++ module and inline-implementation files and autotools source are
+therefore absent from the dataset with nothing in a Parquet to indicate the
+absence. `tests/test_mask_drift.py` holds the extension list to the tokenizer's
+own language table, so adding an extension without probing it is caught.
+
+**Runs are not pinned to a commit.** The manifest carries exactly five fields and
+three parsers plus four tests assert their positions, so the planned
+`pinned_commit` sixth field does not exist. A re-run analyzes whatever HEAD is at
+clone time, so the dataset is reproducible in method but not byte-for-byte, and a
+published Parquet cannot cite the revision it was built from.
+
+**`data/affiliation.merged.csv` is a build artefact and currently predates one of
+its corrections.** `data/affiliation.corrections.csv` holds two reviewed rows but
+only one is present in the merged map: `collibra.com` still resolves to
+`Medidata` rather than `Collibra`. Rerun `./build_domain_map.py build` to apply
+the overlay — it is applied last, so a rebuild keeps it and a hand edit of the
+merged file would be lost. Two further single-person inferences are wrong on
+their face and are **not** corrected: `central-intelligence.agency`→`Microsoft`
+and `intellisys.info`→`Takeaway.com`. A row-by-row audit of 2,770 single-person
+inferences has not been done.
+
+**`community` is a residual stratum, and `contested` is empty for every row.**
+Three of the five control facts in `docs/CODEBOOK.md` are not implemented, so a
+project that no namespace fact reaches stays `community` by default.
+`contested` (column 7) is non-empty in **0 of 24,405** candidate rows, so the
+contested-case protocol in `docs/CODEBOOK.md` §6 has not flagged anything and the
+column cannot currently be used to find disputed labels. `docs/CODEBOOK.md` §9 is
+the full gap list with a worked example per gap;
+`docs/SPINELLIS-VALIDATION.md` §4 names seven eligible rows that an independent
+published registry attests to a company and that this pipeline nonetheless labels
+`community`.
+
+**GitHub's `fork` flag finds nothing.** Among eligible rows `fork = True` counts
+zero, because a tree pushed as an independent repository is not marked. Projects
+that carry another project's history are therefore **kept and flagged**, not
+excluded: filter on `history_cluster` for one project per history, and read
+`history_first` for origin — `history_relation` is about inclusion, and the same
+topology occurs with the origin on either side.
+
+**A stratum is a label at a date.** Namespaces get donated, so two rows for one
+repository can disagree: of the 196 duplicate `clone_url` groups in
+`candidates.csv`, **28 disagree on `stratum`** — **5** of them within the 106
+groups that fall inside the eligible frame. `label_date` (column 8) records when
+the label was assigned, and there is no relicensing time-boxing anywhere in the
+pipeline (`docs/CODEBOOK.md` §7), so a project that changed licence or owner
+mid-history carries one label for all of it.
+
+**`manifest_category` (column 29) has a fourth value outside the stratum
+vocabulary.** The four legacy pilot projects in `manifest.tsv` carry
+`enterprise`, which is not one of `community`/`company-owned`/`foundation`. Those
+four are also still at an older 23-column schema, so `consolidate.py`'s schema
+gate excludes them from the `tokens` view and names them in its summary. Group on
+`stratum` (column 5), not on `manifest_category`.
+
+**A `.validated` stamp does not certify the schema.** `validate.py` is the only
+gate the run invokes, and it checks size and row count only (§2.1). Run
+`validate_schema.py` yourself over the output. Likewise `state = 'DONE'` in
+`ctp.duckdb` means the pipeline finished, not that the data is present: such a
+project is flagged `parquet_missing` and stays out of the `tokens` view, so
+`select name from projects where parquet_missing` finds it.
+
+**Dates are strings.** `author_date` and `committer_date` (43, 46) are raw git
+strings, so a consumer must cast before any temporal query.
+
+**Corpus-level firm and org rollups do not exist.** The firm columns are per
+token; there is no aggregated firm table, no package step and no dataset card
+generator. `docs/DESIGN.md` §7 is the intended shape of those.
+
+**Reproducibility depends on an unpinned sibling checkout.** The per-project
+pipeline, the tokenizer and their flag names live in the cregit checkout that
+`pipeline.cfg` names, at whatever revision it happens to be. A flag rename there
+has already broken a run mid-corpus. Record that checkout's revision alongside
+any published Parquet.
+
+---
+
+## 6. Invariants a change must not break
 
 | Invariant | Enforced by |
 | --- | --- |
-| every Parquet has the same 70 columns, same types, same order | `validate_schema.py` (exit 1 on any drift) |
-| the 29 provenance names agree across three files in two repos | `tests/test_meta_field_drift.py` — checks `project_meta.META_FIELDS`, `validate_schema.EXPECTED_COLUMNS[1:30]`, `generate_dataset.PROJECT_META_FIELDS` |
-| the mask names only extensions with a working parser | `tests/test_mask_drift.py` vs `tokenize/CregitLanguages.pm` |
-| a missing sidecar key fails loudly, never blanks 29 columns | `generate_dataset.load_project_meta` raises `SystemExit` |
+| every Parquet has the same 70 columns, types and order | `validate_schema.py` — exit 1 on any drift |
+| the 29 provenance names agree across three files in two repositories | `tests/test_meta_field_drift.py` — `project_meta.META_FIELDS`, `validate_schema.EXPECTED_COLUMNS[1:30]`, and the generator's own list |
+| the mask names only extensions with a working parser | `tests/test_mask_drift.py`, against the tokenizer's own language table |
+| the mask string is byte-stable | `file_mask.build_mask` sorts the extension list; the blob map compares the mask character for character on every resume |
+| a missing sidecar key fails loudly rather than blanking 29 columns | the generator raises on load |
 | duplicate `clone_url`s resolve the same way everywhere | `select_corpus.dedupe_by_clone_url`, called by `project_meta.build_meta` |
+| anonymization never silently shrinks the schema | `anonymize_parquet.py` classifies every input column and raises on an unknown one |
 
----
-
-## 7. How every number here was verified
-
-Run from `/local/home/ellianco/Projects/cregit-token-pipeline` unless stated.
-
-**The 70-column contract, and that it equals the 29 metadata fields in order:**
-
-```bash
-python3 -c "
-from validate_schema import EXPECTED_COLUMNS as E
-from project_meta import META_FIELDS as M
-names=[n for n,_ in E]
-print(len(E), len(M), names[1:30]==list(M), names.index('file_path'))
-for i,n in enumerate(names): print(i+1, n, dict(E)[n])
-"
-# -> 70 29 True 30
-```
-
-**The live Parquet** (`devenv shell` from `.../cregit-workspace/cregit-issue61`,
-because `duckdb` comes from devenv):
-
-```bash
-devenv shell --quiet -- python3 -c "
-import duckdb, sys
-p='/local/home/ellianco/Projects/cregit-workspace/corpus-files/qualcomm__qcom-embedded-power-measurement/qualcomm__qcom-embedded-power-measurement-dataset.parquet'
-rows=duckdb.sql('describe select * from read_parquet(?)',params=[p]).fetchall()
-print(len(rows), duckdb.sql('select count(*) from read_parquet(?)',params=[p]).fetchone())
-sys.path.insert(0,'/local/home/ellianco/Projects/cregit-token-pipeline')
-from validate_schema import compare_schema
-print(compare_schema([(r[0],r[1]) for r in rows]))
-"
-# -> 70 (180971,) []
-```
-
-**The SQLite schemas** (`sqlite3` is not on `PATH`; read through python, read-only):
-
-```bash
-python3 -c "
-import sqlite3
-base='/local/home/ellianco/Projects/cregit-workspace/corpus-files/torvalds__linux/torvalds__linux'
-for kind in ('original','cregit','blobmap','persons'):
-    c=sqlite3.connect(f'file:{base}-{kind}.db?mode=ro&immutable=1',uri=True)
-    print(kind, [r[0] for r in c.execute(
-        \"select name from sqlite_master where type='table' order by name\")])
-"
-# original: commits, footers, logs, parents
-# cregit:   commitmap, commits, footers, logs, parents
-# blobmap:  blob_map, commit_map, meta, ref_map, tree_map
-# persons:  emails, persons
-```
-
-**`candidates.csv` duplicates, and which corpus projects they hit:**
-
-```bash
-python3 -c "
-import csv, collections, pathlib
-rows=list(csv.DictReader(open('candidates.csv',newline='')))
-g=collections.defaultdict(list)
-for r in rows:
-    if r['clone_url']: g[r['clone_url']].append(r)
-dup={u:v for u,v in g.items() if len(v)>1}
-print(len(rows), len(g), len(dup), collections.Counter(map(len,dup.values())))
-print('identical groups', sum(1 for v in dup.values()
-      if all(tuple(r.values())==tuple(v[0].values()) for r in v)))
-man=[l.split(chr(9)) for l in pathlib.Path('manifest.sample.tsv').read_text().splitlines()
-     if l.strip() and not l.startswith('#')]
-hit=[f[1] for f in man if f[1] in dup]
-print('corpus hits', len(hit),
-      'stratum disagreements', sum(1 for u in hit if len({r['stratum'] for r in g[u]})>1))
-"
-# -> 24405 23707 196 Counter({2: 194, 3: 2}) ; identical groups 0
-# -> corpus hits 10 ; stratum disagreements 1
-```
-
-**Names that do not round-trip from the clone URL:**
-
-```bash
-python3 -c "
-import pathlib, select_corpus as sc
-n=v=b=0
-for l in pathlib.Path('manifest.sample.tsv').read_text().splitlines():
-    if not l.strip() or l.startswith('#'): continue
-    name,url,*_=l.split(chr(9))
-    o,r=url.rstrip('/').removesuffix('.git').split('/')[-2:]
-    if sc.project_name(o,r)!=name: b+=1
-    elif f'{o}__{r}'!=name: v+=1
-    else: n+=1
-print('verbatim',n,'slug-only',v,'renamed/transferred',b)
-"
-# -> verbatim 125 slug-only 60 renamed/transferred 15
-```
-
-**Sidecar staleness, and manifest masks:**
-
-```bash
-python3 -c "
-import json, collections, pathlib
-m=json.load(open('project_meta.json'))
-print(len(m), len(next(iter(m.values()))))
-print(collections.Counter(v['file_mask'] for v in m.values()))
-print(collections.Counter(v['provenance_status'] for v in m.values()))
-for f in ('manifest.sample.tsv','manifest.phase1-sm.tsv','manifest.generated.tsv'):
-    L=[l.split(chr(9)) for l in pathlib.Path(f).read_text().splitlines()
-       if l.strip() and not l.startswith('#')]
-    print(f, len(L), collections.Counter(x[3] for x in L))
-"
-# -> 210 projects, 29 fields; 4 distinct file_mask values (STALE);
-#    200 candidates.csv + 10 fixture-needs-rework;
-#    all three manifests: one universal mask on every row
-```
-
-**The firm join, and the CERN result in §3.1** (devenv, from `cregit-issue61`):
-
-```bash
-devenv shell --quiet -- python3 -c "
-import duckdb
-d='/local/home/ellianco/Projects/cregit-workspace/corpus-files'
-p=f'{d}/qualcomm__qcom-embedded-power-measurement/*-dataset.parquet'
-duckdb.sql(f\"create view tokens as select * from read_parquet('{p}') \"
-           \"where provenance_status='candidates.csv'\")
-duckdb.sql(\"create view twf as select t.*, coalesce(a.company,'(Unknown)') as firm, \"
-  \"a.kind as firm_kind from tokens t left join \"
-  \"read_csv('/local/home/ellianco/Projects/cregit-token-pipeline/data/\"
-  \"affiliation.merged.csv') a on lower(t.person_domain)=lower(a.domain)\")
-print(duckdb.sql('select firm, firm_kind, count(*) from twf group by 1,2').fetchall())
-print('cols', len(duckdb.sql('describe select * from twf').fetchall()))
-print('glob', duckdb.sql(f\"select count(*) from glob('{d}/*/*-dataset.parquet')\").fetchone())
-"
-# -> [('CERN', 'company', 180971)]   cols 69   glob (197,)
-
-python3 -c "
-import csv, collections
-rows=list(csv.DictReader(open('data/affiliation.merged.csv')))
-print(len(rows), collections.Counter(r['source'] for r in rows))
-"
-# -> 4049 ; cncf-gitdm-single 2771, gitdm 768, cncf-gitdm 204, spinellis-sec 111,
-#    patch 72, rich 55, builtin 33, correction 1, *-self-reference 35
-# `correction` is data/affiliation.corrections.csv, this repository's reviewed
-# overlay, applied last by build_domain_map so a rebuild keeps it.
-```
-
-**Artefact sizes** (from `.../cregit-workspace/corpus-files`):
-
-```bash
-python3 -c "
-import os, glob
-k={}
-for p in glob.glob('*/*'):
-    for s in ('-original.db','-cregit.db','-blobmap.db','-persons.db',
-              '-persons.xls','-dataset.parquet'):
-        if os.path.basename(p).endswith(s):
-            a,c=k.get(s,(0,0)); k[s]=(a+os.path.getsize(p), c+1)
-for s,(a,c) in sorted(k.items()): print(f'{s:20} {c:4} {a/2**30:7.2f} GB')
-"
-```
-
-**Suite, before and after this document:** `./run_tests.sh` →
-`1033 passed, 4 xfailed, 1 xpassed`.
-
----
-
-## 8. Documents that disagree with the data
-
-Recorded here so the next reader does not re-derive them.
-
-| Document | What it says | What is true |
-| --- | --- | --- |
-| ~~`ellians-master/2026.2-estudos-pesquisa-sistemas/PHASE-1-CORPUS-REPORT.md` §4~~ | 37 columns, and *"Today those [`history_*`] columns live only in `candidates.csv` and `manifest.sample.tsv` … not joined into the token-level Parquet"* | **FIXED 2026-09-20**, report commit `18774af`. It now documents 70 columns, names `history_*` as columns 23-28 (there since `b1e83d8`), and replaces the four per-language masks with the universal one. Its §1 and §3 run-dependent counts are marked `TODO(task-8c)` rather than guessed. |
-| ~~`cregit-issue61/generate_dataset/DATASET.md`~~ | documented 9 token + 29 provenance + 9 commit + 5 identity = **52** columns | **FIXED 2026-09-20**, CREGIT commit `73a0b6f`. It had reached **55** by then (the 3 firm columns were added on 2026-09-20 after this row was written) and the 15 `footer_*` columns were documented nowhere in it. All 70 are now documented, with the trailer keys and the resolved-set semantics of `footer_personids`. |
-| `project_meta.json` | four per-language `file_mask` values | one universal mask since `57458cb`. Regeneration is owned by another task. |
-| `select_corpus.py:1325` docstring | *"Five pairs also disagree on the stratum"* | 28 duplicate groups disagree on `stratum` across the whole file. The claim is presumably scoped to the eligible subset; it reads as a whole-file claim and is easy to misread. Left unchanged — code was out of scope for this document. |
-| `consolidate.py` | builds the corpus-wide `tokens` view | it reads **`manifest.tsv`, hardcoded** (4 projects), and `ctp.py db` accepts no `--manifest`. The corpus-level view over all 200 does not exist yet. |
-| `README.md` | *"~101 projects"* | the drawn sample is 200; 197 Parquets exist on disk. |
-
----
-
-*Written 2026-09-19 against pipeline `57458cb` and CREGIT `4dbc556`. If you change
-`EXPECTED_COLUMNS`, change §2.2 in the same commit — `validate_schema.py` is the
-contract, this file is only its picture.*
+If you change `EXPECTED_COLUMNS`, change §3.2 in the same commit.
