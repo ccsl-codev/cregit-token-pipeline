@@ -60,17 +60,39 @@ shifts. Consequences, measured on `intel__tsffs` (201,030 rows, 145,125 of them
 | position inside `token_type` agrees with `source_line`/`source_col` | **0 of 144,997** | n/a |
 
 So `token_type` is malformed, `source_line`, `source_col` and `source_text` are
-shifted and wrong, and `is_structural` is effectively dead for Rust. This is a
-property of the tokenizer, not of one project, so it applies to **every `.rs` row
-in the corpus** — including `.rs` files inside projects whose primary language is
-not Rust.
+wrong, and `is_structural` is effectively dead for Rust. This is a property of the
+tokenizer, not of one project, so it applies to **every `.rs` row in the corpus** —
+including `.rs` files inside projects whose primary language is not Rust.
 
-* **Detect**: `token_type LIKE '%' || chr(9) || '%'`, equivalently
-  `file_path LIKE '%.rs'`.
+`source_line` and `source_col` are wrong by a **different mechanism**, and the
+distinction matters when you repair them. They are not shifted fields: nothing ever
+parses a `line:col` string into them. Both come from a cursor walking the original
+source, read at `generate_dataset.py:174` through `reader.location()`, and they are
+never NULL. They are wrong because that cursor desynchronized — the token consumer
+skipped the length of `line:col<TAB>type` instead of the length of the token. So a
+repair substitutes the tokenizer's own embedded position for a corrupted cursor
+reading, rather than un-shifting a field.
+
+* **Detect**: `file_path LIKE '%.rs'`. Do **not** use
+  `token_type LIKE '%' || chr(9) || '%'` alone. It misses the end-of-unit rows: the
+  line `-:-<TAB>end_unit` holds no pipe, so it fails the parse at
+  `generate_dataset.py:243`, lands in the `unknown` branch, and the tab ends up in
+  **`token_value`** while `token_type` reads a clean `unknown`. Test both columns.
 * **Work around**: `split_part(token_type, chr(9), 1)` recovers the true
   `line:col` and `split_part(token_type, chr(9), 2)` the real token type; skip the
-  `-:-` end-of-unit marker. **`token_value` is correct.** `source_text` is not
-  recoverable from the Parquet.
+  `-:-` end-of-unit marker. **`token_value` is correct** on content rows.
+  `source_text` is not recoverable from the Parquet.
+* **`backfill_rust_tokens.py` does this repair**, fails closed on a non-contract
+  schema, and is idempotent. It leaves `source_text` wrong on content rows on
+  purpose, and sets it to `''` on structural rows only, because every structural
+  branch of `classify_and_skip` writes `''` there — so `is_structural = 1` implies
+  `source_text = ''` in correct data, and repairing one without the other would
+  create a new inconsistency.
+* **`is_structural` becomes correct, not useful.** After the repair a Rust file has
+  about 3 structural rows, against roughly 59% of rows in a C file, because the Rust
+  tokenizer emits no `begin_*`/`end_*` tag markers, no `blank` and no `DECL`. A
+  correct re-run gives the same small number. Do not read "repaired" as "structural
+  analysis now works for Rust".
 * **A repair in place cannot match a re-run.** `token_type`, `source_line` and
   `source_col` are backfillable by the rule above, and `is_structural` follows from
   the repaired `token_type`. Two things are not. `source_text` desynchronizes from
