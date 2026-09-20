@@ -102,7 +102,8 @@ def project_name(owner: str, repo: str) -> str:
 # the same string, because the mask stopped being derived from the language —
 # every project is tokenized with the union of everything the tokenizer can parse
 # (see file_mask.py). A polyglot Java project's C++ used to be dropped because
-# GitHub called it Java; 68 of 188 projects gained files when this changed.
+# GitHub called it Java; 63 of 188 projects gained files when this changed, and
+# none lost one. See data/mask-impact.csv, which is the authority on that split.
 #
 # So `LANG_FILTER[lang]` is still the right expression at a manifest-writing site
 # — it just no longer discriminates. Kept as a dict rather than collapsed to a
