@@ -19,6 +19,11 @@ state/
 htmlcov/
 .pytest_cache/
 
+# Left behind by `pip install -e '.[dev]'` and by CI's --junitxml. Both are
+# derived from pyproject.toml and a run.
+*.egg-info/
+junit-*.xml
+
 # Caches. Rebuilt by `select_corpus.py rosters|enrich` and
 # `build_domain_map.py fetch`. Large, machine-specific and derived from public
 # APIs, so they are reproducible rather than source.

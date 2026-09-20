@@ -1,0 +1,85 @@
+# Dependency manifest. Before this file the only way to get duckdb and pytest was
+# ../cregit-workspace/cregit-issue61/devenv.nix — a different repository — so this
+# one could not be built, tested or reviewed on its own. Everything needed to run
+# the suite is now declared here.
+#
+# The dependency set was established by reading the imports of every tracked *.py
+# file, not from memory:
+#
+#   git ls-files '*.py' | xargs grep -hE '^\s*(import|from)\s+' | sort -u
+#
+# Everything that came back is in the standard library except duckdb and pytest.
+# coverage is the third: run_tests.sh drives the suite through it and fails the
+# run under the 80% floor in .coveragerc.
+
+[project]
+name = "cregit-token-pipeline"
+version = "0.1.0"
+description = "Corpus selection, orchestration and validation for the cregit token pipeline"
+readme = "README.md"
+
+# 3.12, measured, not chosen. The floor is set by two standard-library calls in
+# retain.py, and the suite really does fail below it:
+#
+#   retain.py:252  shutil.rmtree(target, onexc=collect)      onexc is 3.12+
+#   retain.py:129  root.stat(follow_symlinks=False)          Path.stat kwarg is 3.10+
+#
+# Under CPython 3.9 every *.py file still compiles, so a syntax check says
+# nothing, but 25+ tests in tests/test_retain.py fail with
+# "TypeError: rmtree() got an unexpected keyword argument 'onexc'" and
+# "TypeError: stat() got an unexpected keyword argument 'follow_symlinks'".
+# Verified passing on 3.12 and 3.14.
+requires-python = ">=3.12"
+
+dependencies = [
+    # The only third-party import in production code. consolidate.py unions the
+    # per-project Parquet files, anonymize_parquet.py rewrites them and
+    # validate_schema.py reads their schema for the 70-column contract — all
+    # through duckdb. It is imported lazily inside the functions that need it, so
+    # the pure logic is unit-testable without it, but five tests in
+    # tests/test_consolidate.py do write a real Parquet and they SKIP when duckdb
+    # is missing. Installing it here is what turns those five skips into runs.
+    "duckdb==1.5.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    # The test runner. pytest.ini sets --strict-markers and the `network` marker,
+    # both of which need a real pytest rather than unittest.
+    "pytest==9.1.1",
+    # run_tests.sh is the documented entry point and it invokes `coverage run -m
+    # pytest` then `coverage report`. .coveragerc sets fail_under = 80, so this is
+    # part of the gate, not a convenience.
+    "coverage==7.16.0",
+]
+
+# Not Python, not installable from here, and deliberately optional:
+#   perl  tests/test_mask_drift.py shells out to `perl tokenize/fileMask.pl` in the
+#         cregit checkout. Self-skips when perl or that checkout is absent.
+#   gh    select_corpus.py and shared_history.py call the GitHub CLI. Every test
+#         fakes subprocess.run, so no test needs it installed.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# The scripts sit at the repository root and form no package; conftest.py puts the
+# root on sys.path for the tests. Listing them keeps `pip install -e .` honest
+# instead of letting setuptools guess at a package layout that does not exist.
+py-modules = [
+    "anonymize_parquet",
+    "build_domain_map",
+    "consolidate",
+    "ctp",
+    "file_mask",
+    "mask_impact",
+    "project_meta",
+    "retain",
+    "select_corpus",
+    "shared_history",
+    "validate",
+    "validate_schema",
+    "validate_spinellis",
+    "verify_anon",
+]
