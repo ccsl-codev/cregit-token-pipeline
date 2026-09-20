@@ -60,6 +60,7 @@ REAL_RUNNER_USAGE = """\
 #   --duckdb-threads N     forward the DuckDB sorting thread count to step 10
 #   --project-meta PATH    forward the provenance sidecar to step 10
 #   --project-key NAME     which key of the sidecar this project is
+#   --mask-widened    resume across a mask change, reusing blob_map
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
 #   --jobs N      concurrent blame/HTML processes
@@ -1047,7 +1048,7 @@ def run_args(**over):
                 shards=0, shard_classes="L",
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
-                mask="")
+                mask="", mask_widened=False)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -2191,6 +2192,102 @@ def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq)
     ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
     argv = runner.argv("pipeline")
     assert argv[argv.index("--mask") + 1] == r"\.java$"
+
+
+# --------------------------------------------------------------------------- #
+# --mask-widened: reuse the tokenizations across a mask change
+#
+# The corpus holds 198 blob maps and every one of them records an OLD per-language
+# mask, so without this flag the re-run tokenizes 13.6 million (blob, path) pairs
+# from cold to reach the 5.6% that are genuinely new. The flag is off by default
+# and the refusal it steps around is correct for every other case, so the tests
+# here are as much about what it refuses as about what it forwards.
+# --------------------------------------------------------------------------- #
+
+def test_mask_widened_is_forwarded_to_the_runner(runner, jq):
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
+                     mask_widened=True)
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert "--mask-widened" in argv
+    # Still before the positional FROM_STEP, which the runner reads from the tail.
+    assert argv[-1] == "2"
+
+
+def test_no_mask_widened_sends_no_flag_so_the_refusal_stays_the_default(runner, jq):
+    """The default is a full rebuild on a mask change. Nothing in this change may
+    make that happen by accident."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
+                     mask_widened=False)
+    ctp.run_project(jq)
+    assert "--mask-widened" not in runner.argv("pipeline")
+
+
+def test_a_missing_mask_widened_option_sends_no_flag(runner, jq):
+    """run_project reads _OPTS directly, so a caller that never set the key must
+    get the safe behaviour rather than a crash."""
+    ctp._OPTS.clear()
+    ctp._OPTS.update(skip_html=False, drop_memo=False)
+    ctp.run_project(jq)
+    assert "--mask-widened" not in runner.argv("pipeline")
+
+
+def test_mask_widened_at_step_one_is_refused_because_step_one_deletes_the_workdir(
+        sandbox, monkeypatch, capsys):
+    """The flag exists to preserve the blob map, and step 1 deletes the directory
+    holding it. Running anyway would preserve nothing and look like a success."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(mask_widened=True, from_step=1))
+    assert "--from-step 2" in str(exc.value)
+
+
+def test_mask_widened_is_refused_on_a_runner_that_cannot_forward_it(
+        sandbox, monkeypatch, runner_script, capsys):
+    """Dropped silently, blobExec refuses every project on the recorded mask and
+    the corpus run reads as broken rather than as a missing feature."""
+    runner_script(REAL_RUNNER_USAGE.replace("--mask-widened", "--nope-widened"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(mask_widened=True, from_step=2))
+    assert "--mask-widened is not implemented" in str(exc.value)
+
+
+def test_mask_widened_is_refused_together_with_sharding(sandbox, monkeypatch):
+    """Each shard builds a fresh blob map, so there is no recorded mask to widen."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(mask_widened=True, from_step=2, shards=4))
+    assert "no recorded mask to widen" in str(exc.value)
+
+
+def test_mask_widened_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
+    """This is the one flag that reuses a cache the tool otherwise refuses. A log
+    a reader cannot tell that from is not good enough."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(mask_widened=True, from_step=2)) == 0
+    out = capsys.readouterr().out
+    assert "REUSE" in out
+    assert "identity rows are discarded" in out
+    assert "raw source" in out
+
+
+def test_no_mask_widened_announces_nothing(sandbox, monkeypatch, capsys):
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(from_step=2)) == 0
+    assert "--mask-widened" not in capsys.readouterr().out
 
 
 def test_an_override_warns_that_the_recorded_mask_will_not_match(sandbox, monkeypatch,

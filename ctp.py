@@ -496,6 +496,11 @@ def run_project(project: dict) -> str:
         ]
         if _OPTS.get("skip_html"):
             pipeline_args.append("--skip-html")
+        # Reuse the tokenizations already in this project's blob map across a mask
+        # change. cmd_run has already checked the runner advertises it and that
+        # --from-step is 2 or more; blobExec does the per-project verification.
+        if _OPTS.get("mask_widened"):
+            pipeline_args.append("--mask-widened")
         # Put the memo outside the work directory, which a FROM_STEP=1 run
         # deletes. It matters now because the mask changed corpus-wide and
         # blobExec refuses to resume against a different one (Mapping.open), so
@@ -727,11 +732,33 @@ def cmd_run(args: argparse.Namespace) -> int:
             sys.exit(f"--memory-limit: {exc}")
     if args.from_step < 1:
         sys.exit(f"--from-step must be 1 or greater (got {args.from_step}).")
+    # --mask-widened, under the same rule as every other forwarded flag, and with
+    # the sharpest stakes of any of them: an unimplemented flag would be dropped
+    # and blobExec would refuse every project on the recorded mask (exit 3), which
+    # reads as a failed corpus rather than as a missing feature.
+    mask_widened = bool(getattr(args, "mask_widened", False))
+    if mask_widened:
+        if not script_supports("--mask-widened"):
+            sys.exit(f"--mask-widened is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                     "That checkout would drop the flag, and blobExec would then refuse every\n"
+                     "project whose recorded mask differs from the manifest's (exit 3).")
+        # The flag exists to preserve the work in the workdir, and step 1 deletes
+        # the workdir. Sending both would run, preserve nothing, and look like a
+        # success. The runner refuses this too; refusing here means it costs one
+        # message rather than one clone per project.
+        if args.from_step < 2:
+            sys.exit("--mask-widened needs --from-step 2 or greater. Step 1 deletes the project\n"
+                     "workdir, taking with it the blob map this flag reuses and the cregit.git\n"
+                     "its new_blob ids live in, so there would be nothing left to preserve.")
+        if args.shards > 1:
+            sys.exit("--mask-widened cannot be combined with sharding: each shard builds a fresh\n"
+                     "blob map, so there is no recorded mask to widen.")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
     _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
                  memo_dir=args.memo_dir,
                  shards=args.shards, shard_classes=shard_classes,
                  from_step=args.from_step, gc=args.gc,
+                 mask_widened=mask_widened,
                  blame_jobs=args.blame_jobs,
                  memory_limit=args.memory_limit,
                  duckdb_threads=args.duckdb_threads,
@@ -758,6 +785,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             say(f"WARNING: {warning}")
     if args.from_step > 1:
         say(f"resuming at step {args.from_step}: the runner keeps the existing workdir")
+    if mask_widened:
+        # Loud, because this is the one flag that lets a blob map recorded under one
+        # mask be reused under another, and the reader of a log should not have to
+        # infer that from the absence of a refusal.
+        say("--mask-widened: step 2 will REUSE each project's existing tokenizations "
+            "instead of redoing them.")
+        say("         blobExec verifies per project, against the rows: every "
+            "already-tokenized path must still be selected by the new mask, and the "
+            "retained new_blob ids must exist in cregit.git. Either check failing "
+            "refuses that project (rc 3) and changes nothing.")
+        say("         tree_map, commit_map, ref_map and blob_map's identity rows are "
+            "discarded, so files the wider mask newly selects are tokenized rather "
+            "than passed through as raw source.")
     if args.shards > 1:
         say(f"sharding {args.shards}-way for size class"
             f"{'es' if len(shard_classes) > 1 else ''} {', '.join(shard_classes)}")
@@ -1003,6 +1043,23 @@ def main() -> int:
                             "lost its repack at the end of step 2 with 15.2 h of "
                             "tokenizing already on disk, and --from-step 3 skips "
                             "the clone, the tokenize and the repack")
+    run_p.add_argument("--mask-widened", action="store_true",
+                       help="reuse each project's existing tokenizations across a "
+                            "MASK CHANGE instead of rebuilding from cold. Needs "
+                            "--from-step 2 or more, because step 1 deletes the "
+                            "workdir that holds both the blob map and the "
+                            "cregit.git its ids point into. Without this flag a "
+                            "mask change is refused, which is the correct default "
+                            "and is not being weakened: blobExec still verifies, "
+                            "per project and against the rows rather than by "
+                            "comparing regexes, that every already-tokenized path "
+                            "is still selected and that the retained new_blob ids "
+                            "resolve in cregit.git. Valid because the mask decides "
+                            "WHICH files are tokenized and never HOW — the language "
+                            "comes from the extension, per file. tree_map, "
+                            "commit_map, ref_map and blob_map's identity rows are "
+                            "discarded, so a newly selected file is tokenized "
+                            "rather than passed through as raw source")
     run_p.add_argument("--gc", choices=("none", "plain", "aggressive"),
                        help="forward --gc to run_pipeline_process.sh, which packs "
                             "the generated repo after tokenizing. Omit to accept "
