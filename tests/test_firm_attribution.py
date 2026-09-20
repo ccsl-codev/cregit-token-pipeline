@@ -79,10 +79,80 @@ def test_the_other_qualcomm_domains_were_already_right_and_still_are():
 def test_the_correction_is_in_the_overlay_so_a_rebuild_keeps_it():
     """A hand edit of the merged file is erased by the next `build`. The point of
     the overlay is that the fix survives, so the fix has to live in it."""
-    assert {r["domain"] for r in rows(CORRECTIONS)} == {"qti.qualcomm.com"}
-    row = rows(CORRECTIONS)[0]
-    assert row["company"] == "Qualcomm"
-    assert "CERN" in row["reason"], "the row must say what it corrects"
+    by_domain = {r["domain"]: r for r in rows(CORRECTIONS)}
+    assert set(by_domain) == {"qti.qualcomm.com", "collibra.com"}
+    assert by_domain["qti.qualcomm.com"]["company"] == "Qualcomm"
+    assert "CERN" in by_domain["qti.qualcomm.com"]["reason"], \
+        "the row must say what it corrects"
+
+
+# --------------------------------------------------------------------------- #
+# the second named regression, same class of error as the first.
+# --------------------------------------------------------------------------- #
+
+def test_collibra_com_resolves_to_collibra_not_medidata():
+    """THE second regression. `collibra.com` is Collibra NV, the data-governance
+    software company. It is not Medidata.
+
+    It read `Medidata,company,cncf-gitdm-single` at data/affiliation.merged.csv:741
+    — one single-person inference attaching a contributor's employer to a domain
+    that firm does not own, exactly the shape of the qti.qualcomm.com error.
+    Medidata Solutions owns mdsol.com, which the map already carries.
+
+    Unlike the Qualcomm row this one was measured to be unreachable before it was
+    touched: 0 of the 185 firm-bearing corpus Parquets hold a `person_domain`
+    matching collibra or a `firm`/`firm_raw` matching medidata. So the fix
+    changes no published number, and no re-run is owed.
+    """
+    row = {r["domain"]: r for r in rows(CORRECTIONS)}["collibra.com"]
+    assert row["company"] == "Collibra"
+    assert row["kind"] == "company"
+    assert row["source"] == "correction"
+    assert "Medidata" in row["reason"], "the row must say what it corrects"
+
+
+def test_the_overlay_row_actually_overrides_the_bad_source_row(tmp_path,
+                                                              monkeypatch):
+    """The overlay row proved against the real merge code, not just read back.
+
+    The source is fed the inference that produced the defect — one person on
+    collibra.com saying `Medidata` — and the LIVE overlay file is the only other
+    input. If precedence ever regressed, the build would emit Medidata again.
+    """
+    monkeypatch.setattr(bdm, "DATA", tmp_path)
+    monkeypatch.setattr(bdm, "OUT", tmp_path / "merged.csv")
+    monkeypatch.setattr(bdm, "CURATED", tmp_path / "curated.csv")
+    monkeypatch.setattr(bdm, "CACHE", tmp_path / "cache")
+    monkeypatch.setattr(bdm, "SPINELLIS_TSV", tmp_path / "absent.tsv")
+    (tmp_path / "cache").mkdir()
+    (tmp_path / "cache" / "developers_affiliations1.txt").write_text(
+        "someone: someone!collibra.com\n\tMedidata\n")
+    (tmp_path / "curated.csv").write_text("domain,company,kind,source\n")
+    (tmp_path / bdm.CORRECTIONS_NAME).write_text(CORRECTIONS.read_text())
+
+    assert bdm.cmd_build(argparse.Namespace(min_persons=2, report=False)) == 0
+    out = {r["domain"]: r for r in rows(tmp_path / "merged.csv")}
+    assert out["collibra.com"]["company"] == "Collibra"
+    assert out["collibra.com"]["source"] == "correction"
+
+
+@pytest.mark.xfail(reason="data/affiliation.merged.csv is an input to the live "
+                          "Task 8c corpus run, so it must not be rewritten "
+                          "until that run ends. Regenerate it with "
+                          "`./build_domain_map.py build` and this test XPASSES, "
+                          "which is the signal to drop the marker.",
+                   strict=False)
+def test_the_committed_artifact_agrees_with_every_overlay_row():
+    """The overlay is only authoritative once the artifact is rebuilt from it.
+
+    A row in the overlay that the merged map contradicts means the artifact is
+    stale, which is the one failure mode the overlay cannot prevent by itself.
+    Currently stale on purpose, for collibra.com only: the merged map is passed
+    to the running corpus job as --firm-map.
+    """
+    merged = {r["domain"]: r for r in rows(MERGED)}
+    for r in rows(CORRECTIONS):
+        assert merged[r["domain"]]["company"] == r["company"], r["domain"]
 
 
 # --------------------------------------------------------------------------- #
@@ -228,15 +298,21 @@ def test_case_only_spellings_resolve_to_one_name():
         assert canon[shouted] == proper
 
 
-def test_the_table_collapses_forty_eight_firms_out_of_a_hundred_strings():
-    """The measurement this task was given: 44 groups over 89 strings under the
-    controller's conservative key. Reviewing by hand found more, not fewer — 48
-    groups over 100 strings — and rejected 11 candidate merges outright.
+def test_the_table_collapses_forty_seven_firms_out_of_ninety_eight_strings():
+    """The measurement this table was built from: 44 groups over 89 strings under
+    the controller's conservative key. Reviewing by hand found more, not fewer —
+    48 groups over 100 strings — and rejected 11 candidate merges outright.
+
+    47 and 98 now, not 48 and 100: `Medidata -> Medidata Solutions` was retired
+    when collibra.com was corrected. `Medidata` occurred on exactly one domain in
+    the map, collibra.com, and that row was the defect; with it gone the merge row
+    is a dead row, which the test below forbids. The rejection count is
+    unchanged — no judgement was revisited.
     """
     merges = [r for r in canonical_rows() if r["decision"] == "merge"]
     targets = {r["firm"] for r in merges}
-    assert len(targets) == 48
-    assert len(targets | {r["firm_raw"] for r in merges}) == 100
+    assert len(targets) == 47
+    assert len(targets | {r["firm_raw"] for r in merges}) == 98
     assert sum(1 for r in canonical_rows() if r["decision"] == "keep") == 11
 
 
