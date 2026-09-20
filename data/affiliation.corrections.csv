@@ -1,0 +1,2 @@
+domain,company,kind,source,reason
+qti.qualcomm.com,Qualcomm,company,correction,"Was `CERN,company,cncf-gitdm-single`. qti.qualcomm.com is Qualcomm Technologies, Inc.; QTI is Qualcomm's own abbreviation and the domain is a subdomain of qualcomm.com. The wrong row came from a single-person inference and attributed all 180,971 tokens of qualcomm__qcom-embedded-power-measurement to CERN. The two other Qualcomm subdomains in the map (oss.qualcomm.com, qca.qualcomm.com) already say Qualcomm, from the curated `patch` source. Reviewed 2026-09-20, task 8c-pre."

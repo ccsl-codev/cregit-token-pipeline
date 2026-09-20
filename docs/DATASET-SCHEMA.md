@@ -5,7 +5,7 @@ Two pictures of the same data.
 1. **The schema view** — the tables and columns as they actually exist on disk,
    one set per project, plus the two corpus-level files that key them.
 2. **The joined (flat) view** — the single denormalised shape a researcher
-   queries. Part of it exists today (the 67-column Parquet); part of it is only
+   queries. Part of it exists today (the 70-column Parquet); part of it is only
    intended. Which is which is marked on every row.
 
 > **Nothing here is copied from another document.** Every table name, column
@@ -195,7 +195,7 @@ Three name traps worth stating plainly, because all three are easy to get wrong:
   `person_email` and `person_domain` come from `emails`, not from `persons`.
 * There is **no persisted `token_map` table**. It is created in a temporary
   `sync_*.db` beside the output, indexed, read once, and `unlink`ed at the end of
-  step 10 (`generate_dataset.py:567`, `:768`). The token grain exists on disk
+  step 10 (`generate_dataset.py:702`, `:905`). The token grain exists on disk
   only as `blame/**/*.blame` plus the `-original/` working tree, and after that
   only inside the Parquet.
 
@@ -235,7 +235,7 @@ flowchart LR
     PM["project_meta.json<br/>STALE<br/>210 projects x 29 fields<br/>keyed by manifest <i>name</i>,<br/>joined on <b>clone_url</b>"]
 
     PM -->|"--project-meta + --project-key"| G["generate_dataset.py step 10"]
-    G --> P["&lt;name&gt;-dataset.parquet<br/>EXISTS — 67 columns"]
+    G --> P["&lt;name&gt;-dataset.parquet<br/>EXISTS — 70 columns"]
 ```
 
 `candidates.csv` — **EXISTS.** 24,405 rows, 28 fields, 23,707 distinct
@@ -333,10 +333,12 @@ Join on `clone_url`. Any analysis that joins the Parquet back to a roster on
 
 ## 2. Joined view — the flat Parquet that exists today
 
-**EXISTS. 67 columns.** Authority: `EXPECTED_COLUMNS` in
-`validate_schema.py:62-130`. Confirmed against a real file:
-`qualcomm__qcom-embedded-power-measurement-dataset.parquet` → 67 columns,
+**EXISTS. 70 columns.** Authority: `EXPECTED_COLUMNS` in
+`validate_schema.py:79-150`. Confirmed against a real file:
+`qualcomm__qcom-embedded-power-measurement-dataset.parquet` → 70 columns,
 180,971 rows, **0 drifts** from the contract.
+
+It was 67 until 2026-09-20, when the three firm columns landed.
 
 ### 2.1 The collapse, in one picture
 
@@ -355,13 +357,13 @@ flowchart LR
         BL --> TM
     end
 
-    subgraph FLAT["&lt;name&gt;-dataset.parquet — 67 columns, one row per token"]
+    subgraph FLAT["&lt;name&gt;-dataset.parquet — 70 columns, one row per token"]
         direction TB
         G1["1-30 project identity + provenance (30)<br/>repo_name + the 29 sidecar fields<br/>CONSTANT on every row"]
         G2["31-38 token grain (8)<br/>file_path .. is_structural"]
         G3["39-47 commit (9)<br/>cregit_commit_sha .. commit_summary"]
-        G4["48-52 resolved identity (5)<br/>personid .. repo_tag"]
-        G5["53-67 commit trailers (15)<br/>footer_* — LIST(VARCHAR)"]
+        G4["48-55 resolved identity + firm (8)<br/>personid .. repo_tag<br/>firm_raw, firm, firm_source are PER ROW"]
+        G5["56-70 commit trailers (15)<br/>footer_* — LIST(VARCHAR)"]
     end
 
     TM -->|"one row out per row in"| G2
@@ -381,9 +383,9 @@ token_index)` is unique: 180,971 rows, 180,971 distinct pairs in the verified
 file. There is no history of a token in the Parquet; there is one
 last-touching commit per token.
 
-### 2.2 The 67 columns, exactly
+### 2.2 The 70 columns, exactly
 
-Block boundaries are 1-based and inclusive. `30 + 8 + 9 + 5 + 15 = 67`.
+Block boundaries are 1-based and inclusive. `30 + 8 + 9 + 8 + 15 = 70`.
 
 | # | Column | Type | Comes from | Note |
 | ---: | --- | --- | --- | --- |
@@ -437,23 +439,26 @@ Block boundaries are 1-based and inclusive. `30 + 8 + 9 + 5 + 15 = 67`.
 | 48 | `personid` | VARCHAR | `emails.personid` | LEFT join — may be NULL |
 | 49 | `person_name` | VARCHAR | `coalesce(persons.personname, emails.personid)` | |
 | 50 | `person_email` | VARCHAR | `emails.emailaddr` | |
-| 51 | `person_domain` | VARCHAR | `emails.domain` | the hook the firm join needs |
-| 52 | `repo_tag` | VARCHAR | `commitmap.repo` | `''` for a single-repo project |
-| 53 | `footer_signed_off_by` | VARCHAR[] | `footers` | |
-| 54 | `footer_co_authored_by` | VARCHAR[] | `footers` | |
-| 55 | `footer_co_developed_by` | VARCHAR[] | `footers` | |
-| 56 | `footer_reviewed_by` | VARCHAR[] | `footers` | |
-| 57 | `footer_acked_by` | VARCHAR[] | `footers` | |
-| 58 | `footer_tested_by` | VARCHAR[] | `footers` | |
-| 59 | `footer_reported_by` | VARCHAR[] | `footers` | |
-| 60 | `footer_suggested_by` | VARCHAR[] | `footers` | |
-| 61 | `footer_based_on_patch_by` | VARCHAR[] | `footers` | |
-| 62 | `footer_helped_by` | VARCHAR[] | `footers` | |
-| 63 | `footer_mentored_by` | VARCHAR[] | `footers` | |
-| 64 | `footer_assisted_by` | VARCHAR[] | `footers` | |
-| 65 | `footer_thanks_to` | VARCHAR[] | `footers` | |
-| 66 | `footer_personids` | VARCHAR[] | `footers` → `emails` | e-mail extracted from the trailer by regex |
-| 67 | `footer_person_names` | VARCHAR[] | `footers` → `emails` → `persons` | |
+| 51 | `person_domain` | VARCHAR | `emails.domain` | the key the firm join uses |
+| 52 | `firm_raw` | VARCHAR | `affiliation.merged.csv.company` | the map's string, unaltered. `''` = domain not in the map |
+| 53 | `firm` | VARCHAR | `firm_canonical.csv.firm` | the canonical name; equals `firm_raw` unless the reviewed table renames it |
+| 54 | `firm_source` | VARCHAR | `affiliation.merged.csv.source` | the confidence tier. **`''` = no attribution**; `cncf-gitdm-single` = one person only |
+| 55 | `repo_tag` | VARCHAR | `commitmap.repo` | `''` for a single-repo project |
+| 56 | `footer_signed_off_by` | VARCHAR[] | `footers` | |
+| 57 | `footer_co_authored_by` | VARCHAR[] | `footers` | |
+| 58 | `footer_co_developed_by` | VARCHAR[] | `footers` | |
+| 59 | `footer_reviewed_by` | VARCHAR[] | `footers` | |
+| 60 | `footer_acked_by` | VARCHAR[] | `footers` | |
+| 61 | `footer_tested_by` | VARCHAR[] | `footers` | |
+| 62 | `footer_reported_by` | VARCHAR[] | `footers` | |
+| 63 | `footer_suggested_by` | VARCHAR[] | `footers` | |
+| 64 | `footer_based_on_patch_by` | VARCHAR[] | `footers` | |
+| 65 | `footer_helped_by` | VARCHAR[] | `footers` | |
+| 66 | `footer_mentored_by` | VARCHAR[] | `footers` | |
+| 67 | `footer_assisted_by` | VARCHAR[] | `footers` | |
+| 68 | `footer_thanks_to` | VARCHAR[] | `footers` | |
+| 69 | `footer_personids` | VARCHAR[] | `footers` → `emails` | e-mail extracted from the trailer by regex |
+| 70 | `footer_person_names` | VARCHAR[] | `footers` → `emails` → `persons` | |
 
 Footer keys are matched case-insensitively (`LOWER(f.key) = 'signed-off-by'`) and
 each list is ordered by `footers.idx`. `footer_personids` and
@@ -491,7 +496,7 @@ Two consequences a consumer must plan for:
 
 | | |
 | --- | ---: |
-| columns | 67 |
+| columns | 70 |
 | rows | 180,971 |
 | distinct `(file_path, token_index)` | 180,971 |
 | distinct `file_path` | 298 |
@@ -513,7 +518,7 @@ and none of them is written by any code today.
 
 ```mermaid
 flowchart TB
-    P["&lt;name&gt;-dataset.parquet<br/>EXISTS — 67 columns, per project"]
+    P["&lt;name&gt;-dataset.parquet<br/>EXISTS — 70 columns, per project"]
 
     P --> V["corpus token table<br/>PARTLY EXISTS"]
     A["data/affiliation.merged.csv<br/>EXISTS — 4,049 rows<br/>domain, company, kind, source"] -->|"person_domain = domain<br/>INTENDED — nothing joins it yet"| V
@@ -526,11 +531,11 @@ flowchart TB
 | Piece | Status | Evidence |
 | --- | --- | --- |
 | all 200 projects in one queryable table | **PARTLY EXISTS** | `consolidate.py` builds a DuckDB `tokens` view over `read_parquet([...])` — but it reads **`manifest.tsv`, hardcoded**, which holds 4 projects, and `ctp.py db` takes no `--manifest`. `read_parquet(['…/*-dataset.parquet'])` over the output directory works today without any code. |
-| `firm` / employer per token | **INTENDED** | `validate_schema.py:59` says so in as many words: *"Still absent: a firm column."* The lookup table exists (`data/affiliation.merged.csv`, 4,049 rows) and `person_domain` is the key, but no code joins them. |
+| `firm` / employer per token | **EXISTS** since 2026-09-20 | Three columns, 52-54, joined per row from `data/affiliation.merged.csv` (4,049 rows) on `person_domain`, with `firm` canonicalised through the reviewed `data/firm_canonical.csv`. `generate_dataset.py --firm-map --firm-canonical`. **Only projects regenerated after that date carry it**; the rest hold three empty strings, which is what an empty `firm_source` means. |
 | anonymised person key | **INTENDED** | `docs/DESIGN.md` §7.2 — `anonymize.py`, salted stable hash, salt kept local. Not written. |
-| `func_name` | **INTENDED** | computed in step 10 phase 1, absent from the 67 columns. |
+| `func_name` | **INTENDED** | computed in step 10 phase 1, absent from the 70 columns. |
 | dates as `TIMESTAMP` | **INTENDED** | `author_date`/`committer_date` are VARCHAR git strings. A consumer must cast. |
-| `category` / `size_class` at corpus level | **REDUNDANT NOW** | `consolidate.py`'s view adds `p.category, p.size_class` from the manifest. Since the schema widened to 67, `manifest_category` (29) and `size_class` (15) are already in the Parquet, so the view's two extra columns duplicate them. |
+| `category` / `size_class` at corpus level | **REDUNDANT NOW** | `consolidate.py`'s view adds `p.category, p.size_class` from the manifest. Since the schema widened to 70, `manifest_category` (29) and `size_class` (15) are already in the Parquet, so the view's two extra columns duplicate them. |
 
 The analytical table a consumer should write, on today's data:
 
@@ -540,13 +545,12 @@ CREATE VIEW tokens AS
 SELECT * FROM read_parquet('<out>/*/*-dataset.parquet')
 WHERE provenance_status = 'candidates.csv';   -- drops the 10 dev fixtures
 
--- INTENDED: the firm dimension. Nothing writes this yet.
--- Verified to execute: 67 + 2 = 69 columns out.
-CREATE VIEW tokens_with_firm AS
-SELECT t.*, coalesce(a.company, '(Unknown)') AS firm, a.kind AS firm_kind
-FROM tokens t
-LEFT JOIN read_csv('data/affiliation.merged.csv') a
-       ON lower(t.person_domain) = lower(a.domain);
+-- EXISTS since 2026-09-20: firm is IN the Parquet, so there is no join to write.
+-- The `kind` column is the only part of the map the Parquet does not carry.
+SELECT firm, COUNT(*) AS tokens
+FROM tokens
+WHERE is_structural = 0 AND firm <> ''
+GROUP BY firm ORDER BY tokens DESC;
 ```
 
 `provenance_status = 'candidates.csv'` is the one predicate that selects the
@@ -554,10 +558,10 @@ corpus. Without it a consumer mixes in the 10 development fixtures, whose 27
 provenance columns are empty strings — and empty strings read as findings, not as
 absences.
 
-### 3.1 Do not ship that firm join without the confidence tier
+### 3.1 Why `firm_source` is a column and not a footnote — RESOLVED 2026-09-20
 
-Running exactly the query above against one real project produced **one firm for
-all 180,971 rows, and it is the wrong firm**:
+The first naive join against one real project produced **one firm for all 180,971
+rows, and it was the wrong firm**:
 
 ```
 firm   firm_kind   rows
@@ -565,17 +569,25 @@ CERN   company     180971
 ```
 
 The project is `qualcomm__qcom-embedded-power-measurement`; both of its persons
-write from `qti.qualcomm.com`; and `data/affiliation.merged.csv:2866` says
+write from `qti.qualcomm.com`; and `data/affiliation.merged.csv:2866` said
 
 ```
 qti.qualcomm.com,CERN,company,cncf-gitdm-single
 ```
 
-This is **not** a bug in `build_domain_map.py`. It is the risk that file's own
-docstring names, and it has already materialised. `build_domain_map.py:360-367`
+**Fixed.** That row now reads `qti.qualcomm.com,Qualcomm,company,correction`,
+corrected in `data/affiliation.corrections.csv` — an overlay applied last by
+`build_domain_map.py`, so a `build` keeps it, which a hand edit of the merged
+file would not. The regenerated Parquet reads
+`('qti.qualcomm.com', 'Qualcomm', 'Qualcomm', 'correction')` for all 180,971
+rows. `tests/test_firm_attribution.py` is the named regression.
+
+This was **not** a bug in `build_domain_map.py`. It is the risk that file's own
+docstring names, and it had already materialised. `build_domain_map.py:399-407`
 keeps single-person attestations deliberately — dropping them costs ~92% of the
 yield — and marks them in `source` so a consumer can restrict to the corroborated
-tier. The distribution of that tier:
+tier. That is why `firm_source` is column 54 rather than a footnote. The
+distribution of the tier:
 
 | `source` | rows | confidence |
 | --- | ---: | --- |
@@ -586,21 +598,49 @@ tier. The distribution of that tier:
 | `patch` (curated) | 72 | high |
 | `rich`, `builtin` | 55 + 33 | high / definitional |
 
-Two more single-person rows that are plainly wrong on their face:
-`central-intelligence.agency,Microsoft` and `intellisys.info,Takeaway.com`.
+Three more single-person rows that are plainly wrong on their face:
+`central-intelligence.agency,Microsoft`, `intellisys.info,Takeaway.com` and
+`collibra.com,Medidata` (Collibra is a different company). None is corrected:
+the overlay holds one reviewed row, and a row-by-row audit of 2,771
+single-person inferences is its own task.
 
-So the INTENDED firm join must carry the tier, not hide it:
+The row filter stays available to a consumer, and now needs no join:
 
 ```sql
--- INTENDED, and this is the shape to build.
-LEFT JOIN read_csv('data/affiliation.merged.csv') a
-       ON lower(t.person_domain) = lower(a.domain)
-      AND a.source NOT LIKE 'cncf-gitdm-single%'    -- or: keep it, but report it
+-- Restrict to the corroborated tier. firm_source is IN the Parquet.
+SELECT firm, COUNT(*) FROM tokens
+WHERE firm <> '' AND firm_source NOT LIKE 'cncf-gitdm-single%'
+GROUP BY firm;
 ```
 
-A `firm` column with no `firm_source` beside it is not publishable. Whatever
-lands as the firm dimension should carry the source tag per row, exactly as
-`file_mask` carries the mask per row and for the same reason.
+A `firm` column with no `firm_source` beside it is not publishable, which is why
+all three landed together, exactly as `file_mask` carries the mask per row and
+for the same reason.
+
+### 3.2 Firm names were split, so firms were double-counted — RESOLVED 2026-09-20
+
+The map holds 2,996 distinct `company` strings. `build_domain_map.norm_company`
+strips legal suffixes but **does not case-fold**, and runs at parse time only, so
+two sources could still disagree. Under a conservative key — case-fold, drop legal
+and descriptive suffixes — **48 firms were counted as 100 separate entities**:
+`NVIDIA`/`NVidia`, `Samsung`/`Samsung Electronics`, `Cisco`/`Cisco Systems`, and
+worst, `IBM` (6 rows) against `International Business Machines` (44).
+
+The fix is `data/firm_canonical.csv`: a **reviewed table, not a rule**. 52 rows
+map a raw spelling to a canonical name, each with its reason; 11 more record a
+candidate merge that was **rejected** — `AWS`→`Amazon` and `Azure`→`Microsoft`
+(parent rollups, out of scope), `Samsung SDS`, `Yahoo! Japan`, `China Mobile
+International` (separate companies), `Hewlett`/`HP` (HP Inc. and HPE split in
+2015), `Independent`/`(Independent)` (one is 15 university domains, the other 58
+free providers). An automatic rule would eventually merge two genuinely different
+firms and nobody would notice; a table can be disagreed with one line at a time.
+
+Note what an automatic rule would have got wrong here: the **all-caps spellings
+come from the Spinellis SEC/Fortune source**, whose filing names are upper case,
+and that is the *higher-confidence* source. A rule preferring the better source
+would have canonicalised to `NETFLIX`, `TWITTER`, `ADOBE`.
+
+`firm_raw` is never overwritten, so every merge is reversible by a reader.
 
 ---
 
@@ -639,7 +679,7 @@ volume is at 1.1 TB used of 2.0 TB.
 
 So, concretely, a consumer receives:
 
-* **one Parquet per project**, 67 columns, ~5.8 GB for 197 projects as built;
+* **one Parquet per project**, 70 columns, ~5.8 GB for 197 projects as built;
 * **not** the git repositories — a project is re-derivable from `clone_url` plus
   the recorded `file_mask`, which is exactly why `file_mask` is column 30;
 * **not** `persons.db` or `persons.xls`. Those carry raw e-mail addresses.
@@ -671,7 +711,7 @@ cheap to drop at publish time but expensive to add later.
 
 | Invariant | Enforced by |
 | --- | --- |
-| every Parquet has the same 67 columns, same types, same order | `validate_schema.py` (exit 1 on any drift) |
+| every Parquet has the same 70 columns, same types, same order | `validate_schema.py` (exit 1 on any drift) |
 | the 29 provenance names agree across three files in two repos | `tests/test_meta_field_drift.py` — checks `project_meta.META_FIELDS`, `validate_schema.EXPECTED_COLUMNS[1:30]`, `generate_dataset.PROJECT_META_FIELDS` |
 | the mask names only extensions with a working parser | `tests/test_mask_drift.py` vs `tokenize/CregitLanguages.pm` |
 | a missing sidecar key fails loudly, never blanks 29 columns | `generate_dataset.load_project_meta` raises `SystemExit` |
@@ -683,7 +723,7 @@ cheap to drop at publish time but expensive to add later.
 
 Run from `/local/home/ellianco/Projects/cregit-token-pipeline` unless stated.
 
-**The 67-column contract, and that it equals the 29 metadata fields in order:**
+**The 70-column contract, and that it equals the 29 metadata fields in order:**
 
 ```bash
 python3 -c "
@@ -693,7 +733,7 @@ names=[n for n,_ in E]
 print(len(E), len(M), names[1:30]==list(M), names.index('file_path'))
 for i,n in enumerate(names): print(i+1, n, dict(E)[n])
 "
-# -> 67 29 True 30
+# -> 70 29 True 30
 ```
 
 **The live Parquet** (`devenv shell` from `.../cregit-workspace/cregit-issue61`,
@@ -709,7 +749,7 @@ sys.path.insert(0,'/local/home/ellianco/Projects/cregit-token-pipeline')
 from validate_schema import compare_schema
 print(compare_schema([(r[0],r[1]) for r in rows]))
 "
-# -> 67 (180971,) []
+# -> 70 (180971,) []
 ```
 
 **The SQLite schemas** (`sqlite3` is not on `PATH`; read through python, read-only):
@@ -814,7 +854,9 @@ rows=list(csv.DictReader(open('data/affiliation.merged.csv')))
 print(len(rows), collections.Counter(r['source'] for r in rows))
 "
 # -> 4049 ; cncf-gitdm-single 2771, gitdm 768, cncf-gitdm 204, spinellis-sec 111,
-#    patch 72, rich 55, builtin 33, *-self-reference 35
+#    patch 72, rich 55, builtin 33, correction 1, *-self-reference 35
+# `correction` is data/affiliation.corrections.csv, this repository's reviewed
+# overlay, applied last by build_domain_map so a rebuild keeps it.
 ```
 
 **Artefact sizes** (from `.../cregit-workspace/corpus-files`):
@@ -843,8 +885,8 @@ Recorded here so the next reader does not re-derive them.
 
 | Document | What it says | What is true |
 | --- | --- | --- |
-| `ellians-master/2026.2-estudos-pesquisa-sistemas/PHASE-1-CORPUS-REPORT.md` §4 | 37 columns, and *"Today those [`history_*`] columns live only in `candidates.csv` and `manifest.sample.tsv` … not joined into the token-level Parquet"* | **67 columns.** The six `history_*` columns are columns 23-28 of the Parquet and have been since `b1e83d8`. |
-| `cregit-issue61/generate_dataset/DATASET.md` | documents 9 token + 29 provenance + 9 commit + 5 identity = **52** columns | 67. The **15 `footer_*` columns are documented nowhere in it** — `grep -c footer DATASET.md` returns 0. |
+| `ellians-master/2026.2-estudos-pesquisa-sistemas/PHASE-1-CORPUS-REPORT.md` §4 | 37 columns, and *"Today those [`history_*`] columns live only in `candidates.csv` and `manifest.sample.tsv` … not joined into the token-level Parquet"* | **70 columns.** The six `history_*` columns are columns 23-28 of the Parquet and have been since `b1e83d8`. |
+| `cregit-issue61/generate_dataset/DATASET.md` | documented 9 token + 29 provenance + 9 commit + 5 identity = **52** columns | 70. The 3 firm columns were added to it on 2026-09-20; the **15 `footer_*` columns are still documented nowhere in it**. |
 | `project_meta.json` | four per-language `file_mask` values | one universal mask since `57458cb`. Regeneration is owned by another task. |
 | `select_corpus.py:1325` docstring | *"Five pairs also disagree on the stratum"* | 28 duplicate groups disagree on `stratum` across the whole file. The claim is presumably scoped to the eligible subset; it reads as a whole-file claim and is easy to misread. Left unchanged — code was out of scope for this document. |
 | `consolidate.py` | builds the corpus-wide `tokens` view | it reads **`manifest.tsv`, hardcoded** (4 projects), and `ctp.py db` accepts no `--manifest`. The corpus-level view over all 200 does not exist yet. |

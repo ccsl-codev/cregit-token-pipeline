@@ -31,9 +31,9 @@ EXIT_DRIFT = 1
 EXIT_USAGE = 2
 
 # The contract, measured from the updated cregit-issue61 output on 2026-09-13,
-# widened 2026-09-19.
+# widened 2026-09-19 and again 2026-09-20.
 #
-# 67 columns. It was 38 (and 23 before that; the 15 footer columns are
+# 70 columns. It was 38 (and 23 before that; the 15 footer columns are
 # commit-trailer evidence, which matters to this research because Signed-off-by,
 # Reviewed-by and Co-authored-by carry attribution that authorship alone does
 # not).
@@ -56,9 +56,26 @@ EXIT_USAGE = 2
 # PROJECT_META_FIELDS in cregit-issue61/generate_dataset/generate_dataset.py.
 # tests/test_meta_field_drift.py checks all three against each other.
 #
-# Still absent: a firm column. Resolving person_domain to an employer is the
-# contribution this dataset is being built for, so its absence is expected here
-# and must not be read as agreement that the schema is finished.
+# The three after person_domain are the firm attribution, added 2026-09-20. They
+# sit there because they are RESOLVED FROM person_domain — the key and its answer
+# belong together — and before repo_tag so the identity block stays contiguous.
+#
+# Unlike the 29 provenance columns they are not per-project constants: they come
+# from a per-row join against data/affiliation.merged.csv, so they are the only
+# columns in this contract whose value can differ between two rows of one
+# project.
+#
+#   firm_raw     the map's `company` string, unaltered
+#   firm         the canonical name, from the reviewed data/firm_canonical.csv
+#   firm_source  the map's `source`, so a reader can tell a hand-curated
+#                attribution (patch, gitdm, rich, correction) from a
+#                single-person inference (cncf-gitdm-single, 2,771 of 4,049 rows)
+#
+# All three are '' when person_domain is not in the map, so an empty firm_source
+# means "no attribution" and is the column to filter on.
+#
+# Still absent: person_email is published as it stands. That is a release
+# decision, not a schema defect, and it is not settled here.
 EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("repo_name", "VARCHAR"),
     ("clone_url", "VARCHAR"),
@@ -111,6 +128,9 @@ EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("person_name", "VARCHAR"),
     ("person_email", "VARCHAR"),
     ("person_domain", "VARCHAR"),
+    ("firm_raw", "VARCHAR"),
+    ("firm", "VARCHAR"),
+    ("firm_source", "VARCHAR"),
     ("repo_tag", "VARCHAR"),
     ("footer_signed_off_by", "VARCHAR[]"),
     ("footer_co_authored_by", "VARCHAR[]"),
@@ -189,7 +209,7 @@ def emit_contract(path: str) -> None:
     """Print a file's schema as a paste-ready EXPECTED_COLUMNS block.
 
     For when the generator legitimately changes: read the new schema, review the
-    diff by eye, then paste. Better than hand-typing 67 rows.
+    diff by eye, then paste. Better than hand-typing 70 rows.
     """
     for name, typ in read_schema(path):
         print(f'    ("{name}", "{typ}"),')
