@@ -51,6 +51,24 @@ REAL_ADDRESS = re.compile(
 # presence means that tool hit a bug, so it is checked here too.
 MISSING_MARKER = "(ANON-MISSING)"
 
+# An e-mail column after anonymization. The domain is optional because a git
+# author field is not required to hold an address: measured over the 196 corpus
+# parquets, 36 of them carry a bare user name in author_email / committer_email /
+# person_email -- 'robertmartin', 'deanwampler', 'nashjain' -- for 1,332,252 rows
+# in total. anonymize_parquet.py maps such a value whole to 'author_NNNN' with no
+# domain to re-attach, which is correct: the entire string was the local part and
+# the whole of it is replaced.
+#
+# Requiring a domain here made this script contradict the tool it verifies. It
+# reported 'not a pseudonym' for 'author_0109' -- a correctly pseudonymized
+# value -- and so failed 36 of 196 files that anonymize_parquet.py passed. A
+# release script running both gates could never go green, which trains a reader
+# to ignore the verifier. That is the failure this optional group removes.
+#
+# Nothing is weakened: the value must still be a pseudonym END TO END. A real
+# local part, a real name and a real address are all still rejected.
+PSEUDO_EMAIL = PSEUDO_LOCAL + r"(@.+)?"
+
 # Columns whose every value must be exactly a pseudonym, not merely free of
 # addresses. A real name carries no '@' and would otherwise pass unnoticed.
 EXACT_SHAPE = {
@@ -60,9 +78,9 @@ EXACT_SHAPE = {
     "footer_person_names": PSEUDO_NAME,
     "personid": PSEUDO_ID,
     "footer_personids": PSEUDO_ID,
-    "author_email": PSEUDO_LOCAL + r"@.+",
-    "committer_email": PSEUDO_LOCAL + r"@.+",
-    "person_email": PSEUDO_LOCAL + r"@.+",
+    "author_email": PSEUDO_EMAIL,
+    "committer_email": PSEUDO_EMAIL,
+    "person_email": PSEUDO_EMAIL,
 }
 
 # Source code and repository namespace. An address in a copyright header is real
