@@ -136,19 +136,16 @@ def test_the_overlay_row_actually_overrides_the_bad_source_row(tmp_path,
     assert out["collibra.com"]["source"] == "correction"
 
 
-@pytest.mark.xfail(reason="data/affiliation.merged.csv is an input to the live "
-                          "Task 8c corpus run, so it must not be rewritten "
-                          "until that run ends. Regenerate it with "
-                          "`./build_domain_map.py build` and this test XPASSES, "
-                          "which is the signal to drop the marker.",
-                   strict=False)
 def test_the_committed_artifact_agrees_with_every_overlay_row():
     """The overlay is only authoritative once the artifact is rebuilt from it.
 
     A row in the overlay that the merged map contradicts means the artifact is
     stale, which is the one failure mode the overlay cannot prevent by itself.
-    Currently stale on purpose, for collibra.com only: the merged map is passed
-    to the running corpus job as --firm-map.
+
+    This was xfailed while data/affiliation.merged.csv was an input to a live
+    corpus run and could not be rewritten. The map was regenerated on 2026-09-20
+    — 9 rows of 4,049 changed, 8 malformed keys dropped and collibra.com
+    corrected — so the marker is gone and this is an ordinary assertion again.
     """
     merged = {r["domain"]: r for r in rows(MERGED)}
     for r in rows(CORRECTIONS):
