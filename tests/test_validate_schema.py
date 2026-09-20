@@ -45,9 +45,11 @@ def test_a_missing_column_is_reported():
 def test_an_extra_column_is_reported():
     """An unexpected column is not harmless: it means the generator changed and
     nobody recorded why."""
-    drifts = vs.compare_schema(GOOD + [("firm", "VARCHAR")])
+    # The sentinel used to be "firm". It became a real contract column on
+    # 2026-09-20, so this test needed a name the contract does not hold.
+    drifts = vs.compare_schema(GOOD + [("employer", "VARCHAR")])
     assert kinds(drifts) == ["unexpected"]
-    assert drifts[0].column == "firm"
+    assert drifts[0].column == "employer"
 
 
 def test_a_changed_type_is_reported():
@@ -120,13 +122,14 @@ def test_the_contract_has_no_duplicate_columns():
 
 
 def test_the_contract_records_the_measured_column_count():
-    """67: the 38 measured from the updated cregit on 2026-09-13, plus the 29
-    per-project provenance columns injected from project_meta.json on 2026-09-19.
+    """70: the 38 measured from the updated cregit on 2026-09-13, plus the 29
+    per-project provenance columns injected from project_meta.json on 2026-09-19,
+    plus the 3 firm columns joined from data/affiliation.merged.csv on 2026-09-20.
     The earlier kernel snapshot had 23; 15 of the additions to that are
     commit-trailer footers."""
-    assert len(CONTRACT) == 67
+    assert len(CONTRACT) == 70
     assert sum(1 for n, _ in CONTRACT if n.startswith("footer_")) == 15
-    assert len(CONTRACT) - len(project_meta.META_FIELDS) == 38
+    assert len(CONTRACT) - len(project_meta.META_FIELDS) == 41
 
 
 def test_the_provenance_columns_match_the_sidecar_field_list():
@@ -139,12 +142,21 @@ def test_the_provenance_columns_match_the_sidecar_field_list():
         list(project_meta.META_FIELDS)
 
 
-def test_the_contract_still_has_no_firm_column():
-    """Resolving person_domain to an employer is the contribution this dataset is
-    being built for. This test fails the day it lands, which is the reminder to
-    update the contract deliberately rather than by accident."""
-    assert "firm" not in {n for n, _ in CONTRACT}
-    assert "person_domain" in {n for n, _ in CONTRACT}
+def test_the_firm_columns_sit_directly_after_the_key_they_are_resolved_from():
+    """Replaces test_the_contract_still_has_no_firm_column, whose docstring asked
+    for exactly this the day a firm column landed (2026-09-20, task 8c-pre).
+
+    Position is the claim: firm is resolved FROM person_domain, so the key and its
+    three answers are adjacent and a reader filtering on one finds the others in
+    the next columns. They are also the only per-ROW columns in the contract —
+    everything before file_path is a per-project constant.
+    """
+    names = [n for n, _ in CONTRACT]
+    i = names.index("person_domain")
+    assert names[i:i + 4] == ["person_domain", "firm_raw", "firm", "firm_source"]
+    assert names[i + 4] == "repo_tag"
+    assert {t for n, t in CONTRACT
+            if n in ("firm_raw", "firm", "firm_source")} == {"VARCHAR"}
 
 
 # --------------------------------------------------------------------------- #

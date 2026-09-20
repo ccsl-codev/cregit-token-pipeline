@@ -31,10 +31,12 @@ The curated kernel map always wins on conflict — it was hand-checked for the
 VEM paper and carries identity-level corrections this source cannot express.
 
 Output matches the existing schema exactly: domain,company,kind,source
-`source` is `gitdm` (curated, pre-existing), `patch` (curated), `builtin` (R1,
-straight from FREE_PROVIDERS), `cncf-gitdm[-single]` or `spinellis[-sec]`
-(imported here), so provenance stays visible per row. A `-self-reference` suffix
-marks an R4 tag, so a consumer can audit or exclude those rows.
+`source` is `gitdm` / `patch` / `rich` (all curated and pre-existing, read from
+CURATED), `builtin` (R1, straight from FREE_PROVIDERS), `cncf-gitdm[-single]` or
+`spinellis[-sec]` (imported here), or `correction` (this repository's own
+reviewed overlay, see CORRECTIONS), so provenance stays visible per row. A
+`-self-reference` suffix marks an R4 tag, so a consumer can audit or exclude
+those rows.
 
 Stdlib only.
 """
@@ -58,6 +60,21 @@ OUT = DATA / "affiliation.merged.csv"
 # The curated map from the VEM paper. Authoritative on any conflict.
 CURATED = Path("/local/home/ellianco/Projects/cregit-workspace/"
                "cbsoft-vem2026-corporate-truck-factor/pipeline/data/affiliation.csv")
+
+# This repository's own correction overlay, applied AFTER `curated` and so
+# authoritative over everything. It exists because `CURATED` lives in a third
+# checkout that this repository does not version: a fix made there is invisible
+# to anyone who clones only this one, and a fix made by hand in OUT is erased by
+# the next `build`. A row here is a reviewed, committed override with its reason
+# in the file.
+#
+# Columns: domain,company,kind,source,reason — `reason` is documentation and is
+# not written to OUT.
+#
+# Resolved from DATA at call time, not bound here: the tests redirect DATA into
+# tmp_path, and a constant captured at import would make every sandboxed build
+# read the live overlay.
+CORRECTIONS_NAME = "affiliation.corrections.csv"
 
 SRC_URL = ("https://raw.githubusercontent.com/cncf/gitdm/master/"
            "developers_affiliations{}.txt")
@@ -317,6 +334,29 @@ def load_curated() -> dict[str, tuple[str, str, str]]:
     return out
 
 
+def load_corrections() -> dict[str, tuple[str, str, str]]:
+    """Reviewed overrides from this repository, authoritative over every source.
+
+    Kept separate from `curated` on purpose. `curated` is another project's
+    artifact that we read; this is ours, so a correction is reviewable in the
+    same commit as the code that consumes it. A missing file is normal and means
+    "no corrections", not an error — the overlay is additive.
+    """
+    path = DATA / CORRECTIONS_NAME
+    if not path.exists():
+        return {}
+    out = {}
+    with path.open() as f:
+        for row in csv.DictReader(f):
+            d = (row.get("domain") or "").strip().lower()
+            if d and not d.startswith("#"):
+                out[d] = (row.get("company") or "",
+                          row.get("kind") or "company",
+                          row.get("source") or "correction")
+    say(f"corrections overlay: {len(out)} domains (authoritative over curated)")
+    return out
+
+
 def write_refusal(merged: dict, curated: dict) -> str:
     """Reason to refuse the write, or '' to go ahead.
 
@@ -389,6 +429,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         if src.startswith("spinellis-sec") or d not in merged:
             merged[d] = (co, "company", src)
     merged.update(curated)
+    # Last, so a reviewed correction outranks every source including `curated`.
+    # `qti.qualcomm.com -> CERN` is why this layer exists: one cncf-gitdm-single
+    # row attributed all 180,971 tokens of
+    # qualcomm__qcom-embedded-power-measurement to CERN.
+    merged.update(load_corrections())
 
     reason = write_refusal(merged, curated)
     if reason:

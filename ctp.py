@@ -549,6 +549,16 @@ def run_project(project: dict) -> str:
         if _OPTS.get("project_meta"):
             pipeline_args += ["--project-meta", str(_OPTS["project_meta"]),
                               "--project-key", name]
+        # Firm attribution. The same file for every project — it is keyed by
+        # e-mail domain, not by project — so unlike --project-key there is
+        # nothing per-project to send. The generator refuses a map with a
+        # repeated domain, because a duplicate key would multiply token rows
+        # through the LEFT JOIN and nothing downstream would notice.
+        if _OPTS.get("firm_map"):
+            pipeline_args += ["--firm-map", str(_OPTS["firm_map"])]
+            if _OPTS.get("firm_canonical"):
+                pipeline_args += ["--firm-canonical",
+                                  str(_OPTS["firm_canonical"])]
         # FROM_STEP is positional and must come last. The runner only wipes the
         # workdir when it is 1, so a resume keeps whatever finished before.
         from_step = _OPTS.get("from_step", 1)
@@ -682,6 +692,32 @@ def cmd_run(args: argparse.Namespace) -> int:
         # was typed relative to this repository. Sending it through unresolved
         # made the runner reject its own sidecar (rc=2) on the first real run.
         project_meta = str(Path(args.project_meta).resolve())
+    # The firm map, under the same rules and for a sharper reason: a map that
+    # never arrives does not fail the run, it publishes blank firm columns across
+    # the whole corpus, and firm attribution is the measurement this corpus
+    # exists for. getattr, because callers build this Namespace directly.
+    firm_map = firm_canonical = ""
+    if getattr(args, "firm_map", ""):
+        if not Path(args.firm_map).is_file():
+            sys.exit(f"--firm-map {args.firm_map} is not a file. Build it with "
+                     "build_domain_map.py.")
+        missing = [f for f in ("--firm-map", "--firm-canonical")
+                   if not script_supports(f)]
+        if missing:
+            sys.exit(f"--firm-map needs {', '.join(missing)}, which "
+                     f"{CREGIT}/run_pipeline_process.sh does not accept.\n"
+                     "That checkout would run step 10 without the firm join, so "
+                     "every Parquet would carry three blank firm columns.")
+        # Absolute, for the same reason as --project-meta: the runner is started
+        # with cwd=CREGIT while this path was typed relative to this repository.
+        firm_map = str(Path(args.firm_map).resolve())
+        if getattr(args, "firm_canonical", ""):
+            if not Path(args.firm_canonical).is_file():
+                sys.exit(f"--firm-canonical {args.firm_canonical} is not a file.")
+            firm_canonical = str(Path(args.firm_canonical).resolve())
+    elif getattr(args, "firm_canonical", ""):
+        sys.exit("--firm-canonical without --firm-map has no firm_raw to "
+                 "canonicalise. Pass data/affiliation.merged.csv too.")
     # Refuse a bad size now. Step 10 is the last step, so the alternative is
     # finding the typo after every earlier step has already run.
     if args.memory_limit:
@@ -702,7 +738,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                  # getattr, because callers build this Namespace directly; an
                  # absent --mask means "use the manifest's", which is the default.
                  mask=getattr(args, "mask", ""),
-                 project_meta=project_meta)
+                 project_meta=project_meta,
+                 firm_map=firm_map, firm_canonical=firm_canonical)
+    if not firm_map:
+        say("note: no --firm-map, so firm_raw, firm and firm_source will be "
+            "written as empty strings. Pass --firm-map data/affiliation.merged.csv "
+            "--firm-canonical data/firm_canonical.csv to attribute firms.")
     if _OPTS["mask"]:
         # Loud, because the mask in the Parquet's file_mask column comes from the
         # sidecar, which reads the manifest — so an override makes the recorded
@@ -985,6 +1026,18 @@ def main() -> int:
                             "stratum it was assigned, its shared-history cluster "
                             "and the mask it was tokenized with) into the "
                             "Parquet. Omit and those columns are written empty")
+    run_p.add_argument("--firm-map", default="", metavar="PATH",
+                       help="domain->firm CSV (data/affiliation.merged.csv) to "
+                            "join per row against person_domain, filling "
+                            "firm_raw and firm_source. Unlike --project-meta "
+                            "this is not a per-project constant: it is a real "
+                            "join, so the map stays an external auditable file. "
+                            "Omit and those columns are written empty")
+    run_p.add_argument("--firm-canonical", default="", metavar="PATH",
+                       help="the reviewed canonical-name table "
+                            "(data/firm_canonical.csv) that fills the `firm` "
+                            "column. Needs --firm-map. Omit and `firm` repeats "
+                            "`firm_raw`, so the 48 split spellings stay split")
     run_p.add_argument("--mask", default="", metavar="REGEX",
                        help="tokenize these files instead of the mask in the "
                             "manifest, for every project in this invocation. "
