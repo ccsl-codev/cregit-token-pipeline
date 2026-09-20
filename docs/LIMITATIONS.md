@@ -30,16 +30,37 @@ The project is excluded rather than published with gaps it cannot report. The co
 is therefore **186 published of 187 in scope**, and the row stays in the manifest with
 its reason so the sampling record remains complete.
 
-**The same crash mechanism reaches published data.** In
-`sumatrapdfreader__sumatrapdf`, which **is** published, all seven of its zero-byte
-tokenizations are parser crashes — including one on a 1,263-byte file, so it is not a
-size limit. A corpus-wide count of affected files is **not yet established**; it is
-being measured, and this entry will carry the number when it is. Until then, treat a
-file present in a repository but absent from the dataset as possibly a parser crash
-rather than evidence that the file held no tokens.
+**The same crash mechanism reaches published data, and the corpus-wide count is
+36 files in 19 of the 186 published projects.** Measured 2026-09-20 over every
+published Parquet: **446,060** mask-selected regular files exist at HEAD and
+**36** of them have no row, which is **0.008%**. Every one of the 36 is a parser
+crash. No other cause contributes a single file, so the residual is zero. The
+largest single project loss is `sumatrapdfreader__sumatrapdf` with 7, including
+one on a 1,263-byte file, so it is not a size limit. `elfmz__far2l`,
+`texasinstruments__simplelink-zephyr` (6) and `util-linux__util-linux` (3) follow.
+All 36 blobs are now on the blob denylist by sha, so a re-run reports them instead
+of losing them.
 
-* **Detect**: a path that exists at HEAD, matches the file mask, and has no row in
-  the Parquet.
+**A file absent from the dataset is not, by itself, a gap.** Of the paths that a
+naive detector reports as missing, **354 are symlinks or submodule gitlinks**, not
+source. `powerdns__pdns` alone carries **331** masked symlinks in
+`pdns/dnsdistdist/`; counting them makes its Parquet look 29% incomplete when it
+is complete, because the Parquet holds exactly its 806 regular files.
+`nvidia__opensma` (10) and `facebookincubator__qemu-wearables` (4) are the same
+artefact. So the naive count is 390 and the true count is 36.
+
+* **Detect**: a path that exists at HEAD, matches the file mask, **and is mode
+  100644 or 100755**, and has no row in the Parquet. Read the mode: use
+  `git ls-tree -r HEAD` and drop 120000 (symlink) and 160000 (gitlink). Do **not**
+  use `ls-tree -r --name-only`, which cannot distinguish them.
+* **The 36 are HEAD only.** A historical revision that crashed is not visible to
+  this measurement, because the detector compares against HEAD. The denylist
+  covers **197** historical blobs of these same 36 paths, so history is worse than
+  HEAD by at least that much. No corpus-wide historical count exists.
+* **A silently empty tokenization contributes nothing at HEAD.** The separate
+  mechanism below — a mask-selected file that tokenizes to an empty result with a
+  zero exit status — accounts for **0** of the 36. It is unmeasured for historical
+  revisions.
 * **Work around**: none from the data. The file's tokens do not exist in the dataset.
 
 ---
@@ -155,8 +176,15 @@ so it yields no blame line and therefore no dataset row:
 Only the third is visible from outside, as a missing project. The counters count
 `(sha, path)` pairs rather than files, so a count of 4 can be one file at two
 paths across two revisions. Separately, a mask-selected file can tokenize to an
-**empty** result with a zero exit status and produce zero rows silently; the
-corpus-wide count of that has not been measured.
+**empty** result with a zero exit status and produce zero rows silently. At HEAD
+that mechanism accounts for **0 files**: all 36 HEAD files absent from the 186
+published Parquets are parser crashes, measured 2026-09-20. Its count over
+historical revisions is still unmeasured.
+
+**A fourth mechanism removes a path with no row, and it is not a defect.** A
+symlink or a submodule gitlink whose name matches the mask is not source and is
+never tokenized. There are **354** of them at HEAD, **331** in `powerdns__pdns`
+alone. Any completeness check must read the git mode, not the file name.
 
 **Two of the 188 run-set projects have no Parquet:** `tencent__tencentkona-21`
 and `torvalds__linux`. 186 do, all conforming to the 70-column contract. Verify
