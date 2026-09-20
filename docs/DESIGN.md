@@ -1,218 +1,210 @@
-# Corpus Execution Pipeline — Design
+# Design
 
-**Goal:** run cregit end-to-end over ~101 large FLOSS projects (50 enterprise-backed,
-50 community-backed, 1 Linux) and produce two published datasets with a shared schema,
-for the MSR 2027 Data & Tool Track (paper deadline 10 Nov 2026).
+Why the pipeline is built the way it is. For what it produces, read
+[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md); for how a project is labelled, read
+[`CODEBOOK.md`](CODEBOOK.md).
 
-**Milestone alignment (PLAN.md):** design 28 Aug ✓ · pipeline build 4 Sep · corpus runs
-11 Sep – 2 Oct · paper from 2 Oct.
+**Goal.** Run cregit end-to-end over a stratified corpus of FLOSS projects and
+produce per-project token-authorship datasets that share one schema, on a single
+workstation (16 cores, 30 GB RAM, one NVMe).
 
-**Hardware assumption:** single dev-desk — 16 cores, 30 GB RAM, ~1.2 TB free on one NVMe.
+## 1. Two layers
 
----
+This repository is an **orchestrator around cregit's existing per-project
+pipeline**, not a reimplementation of it. cregit internals are untouched except
+for forwarded flags (§4).
 
-## 1. What already exists (reuse, don't rebuild)
+1. **Per-project layer** — cregit's `run_pipeline_process.sh`, one work directory
+   per project, embarrassingly parallel across projects.
+2. **Corpus layer** — selection, provenance, validation, retention and
+   anonymization. Pure functions over committed inputs or finished artefacts, so
+   each is cheap and re-runnable at any time.
 
-| Asset | Role | Status |
+What already existed and is reused rather than rebuilt:
+
+| Asset | Role |
+| --- | --- |
+| `run_pipeline_process.sh` | parameterized per-project pipeline, incremental and resumable |
+| the blob-map incremental engine | source repo → tokenized repo, with a resume frontier |
+| `tokenize.pl` | dispatches by extension (srcML for C-family, a Rust lexer for `.rs`, ctags) |
+| `generate_dataset.py` | blame + SQLite → one Parquet |
+
+```
+manifest.*.tsv ──► ctp.py run ──► run_pipeline_process.sh ──► <name>-dataset.parquet
+                                                                    │
+                        validate.py ──► .validated stamp ◄──────────┤
+                        retain.py   ──► delete memo/ and html/  ◄────┤
+                        consolidate.py ──► ctp.duckdb (derived index)
+                        anonymize_parquet.py ──► verify_anon.py ──► release
+```
+
+## 2. The manifest is a five-field contract
+
+```
+name	url	category	file_mask	size_class
+```
+
+Three parsers unpack exactly those five positions and four tests assert them.
+That rigidity has two consequences:
+
+- The 29 per-project provenance fields could not be added as manifest columns.
+  They live in `project_meta.json`, a **sidecar keyed by manifest name and joined
+  on `clone_url`**, passed to the generator with `--project-meta`.
+- A sixth `pinned_commit` field cannot be added either, so runs are not pinned to
+  a revision. This is a known limitation, not a decision; see
+  `DATASET-SCHEMA.md` §5.
+
+`file_mask` is the **same universal mask for every project**: the union of every
+extension the tokenizer can parse, derived in `file_mask.py` from one extension
+list rather than typed out, because a mask and an extension list maintained
+separately drift in both directions and both directions are silent. It used to
+come from a per-language matrix keyed on GitHub's primary language, which dropped
+a polyglot project's other languages; `data/mask-impact.csv` measures what that
+cost. The column stays because it records which mask a Parquet was built with.
+Projects whose primary language has no tokenizer are still excluded at selection
+time.
+
+Selection heuristics are a separate concern: `select_corpus.py` emits candidate
+rows for curation, and the runner only consumes a curated manifest.
+
+## 3. Per-project pipeline: the delta
+
+Three flags forwarded to `run_pipeline_process.sh`:
+
+| Flag | What it really does |
+| --- | --- |
+| `--skip-html` | **Prevention.** The HTML view step is guarded, so `html/` (94–255 MB per project) is never created. Nothing downstream reads it. |
+| `--drop-memo` | **Cleanup, not prevention.** The tokenizer dies without a memo directory, so `memo/` is always written, then deleted once the project validates. `--no-memo` is an alias and warns about this. |
+| `--mask-widened` | Lets a resume accept a wider mask instead of rebuilding. Needs `--from-step 2`, because a step-1 run deletes the work directory first. |
+
+Blame **cannot** be skipped: the generator consumes `--blame-dir`.
+
+## 4. Runner: files are the ground truth
+
+Stdlib Python, no SQLite state authority. Snakemake was evaluated and rejected as
+not a tool this research community reads; GNU Parallel was built, validated, then
+superseded by Python for transparency.
+
+State lives in files:
+
+| File | Role |
+| --- | --- |
+| `manifest.*.tsv` | one row per project |
+| `<out>/<name>/<name>.validated` | written only after the validation gate passes |
+| `metrics.tsv` | append-only, one row per phase attempt. Seven fields, asserted by a test |
+| `resources.tsv` | append-only resource samples, every 15 s. A second ledger on purpose, so the seven-field contract above stays fixed |
+| `runs.log` | one start/end row per runner invocation |
+| `ctp.duckdb` | **derived index**, rebuilt on demand by `./ctp.py db`. The runner never dual-writes state |
+
+Scheduling is a `ThreadPoolExecutor` with a global `--jobs N`, plus retry passes
+over failures. Four things are load-bearing:
+
+- **flock per project**, held for the whole job, so two runner invocations never
+  collide.
+- **A disk floor**: below the threshold a project is deferred rather than started.
+- **Environment capture**: the cregit environment is resolved *once* per run and
+  passed to every subprocess. Concurrent `devenv shell` invocations race on a
+  shared Nix GC root and kill each other.
+- **Path canonicalization**: every path is resolved before the tokenizer is
+  invoked, because the blob map stores its invocation string in a meta table and
+  refuses resume when that string differs. Home-directory symlink aliasing has
+  caused a refusal in practice.
+
+Logs live under `state/<project>/logs/`, beside `metrics.tsv` — **not** in the
+project work directory, which a from-scratch run deletes.
+
+## 5. Disk lifecycle
+
+`memo/` plus `html/` is 68–96% of a work directory. Measured on four pilots,
+`memo/` alone was 45–88%. Keeping both across a large corpus does not fit on the
+disk; dropping both is what makes the corpus feasible.
+
+| Artefact | Keep? | Why |
 | --- | --- | --- |
-| `cregit/run_pipeline_process.sh` | Parameterized 11-step per-project pipeline (`--repo-url/--repo-name/--work-dir/--file-filter`), incremental + resumable | Working (kernel-proven) |
-| blobExec incremental engine | src.git → dst.git with `blobmap.db` frontier; resume-safe; parallel pipeline (PR #56 work) | Working |
-| `tokenize/tokenize.pl` dispatcher | Fans out by language (srcML for C/H, rustTokenizer for .rs, ctags, …) | Working |
-| `generate_dataset.py` | blame + DBs → per-project Parquet | Working |
-| `run_kernel_cregit.sh` | flock single-instance guard + log + resume launcher pattern | Template for the runner |
+| `<name>-dataset.parquet` | yes, forever | the product |
+| `<name>-original.db`, `-cregit.db`, `-persons.db` | yes | cheap, needed for audits and re-derivation |
+| `<name>-original.git`, `<name>-cregit.git` (bare) | yes, until publication | re-derivation and review responses |
+| `<name>-blobmap.db` | yes, until publication | cheap resume and incremental re-runs |
+| `memo/` | **no** | proven negligible value; `retain.py` deletes it |
+| `html/` | **no** | never generated under `--skip-html` |
+| working clones, `blame/` | re-derivable | not deleted by `retain.py` today |
 
-The corpus pipeline is therefore an **orchestrator around the existing per-project
-pipeline**, plus new corpus-level stages (enrich, anonymize, merge, package). We do not
-touch cregit internals except two small flags (§4).
+`retain.py` implements exactly the two deletions: `memo/` and `html/`, and
+nothing else. It is dry-run by default, needs `--apply`, refuses a project whose
+keepers are missing or empty, and refuses a subtree that holds a protected name.
+The cost of dropping `memo/` is that a later incremental re-run of that project
+re-tokenizes from cold — accepted, because the Parquet is the product and a
+validated project is not re-run.
 
-## 2. Architecture overview
+## 6. Validation
 
-```mermaid
-flowchart TD
-    M[manifest.tsv<br/>corpus manifest] --> SCHED[Scheduler<br/>ctp.py run]
-    SCHED -->|slot S/M/L| P1[Project pipeline<br/>run_pipeline_process.sh]
-    P1 --> V[validate.py<br/>invariants gate]
-    V --> R[retain.py<br/>delete memo/blame/clones<br/>keep parquet + DBs + bare repos]
-    R --> AGG[Corpus stages]
-    AGG --> E[enrich.py<br/>person→firm mapping]
-    E --> A[anonymize.py<br/>salted person ids]
-    A --> MT[metadata table<br/>per-project provenance]
-    MT --> PKG[package.py<br/>enterprise.parquet + community.parquet<br/>+ publication bundle]
-```
+Two gates, deliberately separate:
 
-Two layers:
+- `validate.py` asks *did this project produce data* — file size and row count.
+  It writes the `.validated` stamp, and it does **not** check columns.
+- `validate_schema.py` asks *do all projects agree* — every column name, type and
+  position against `EXPECTED_COLUMNS`, reporting every drift rather than the
+  first. A corpus is unusable if one project has 38 columns and another 70, or if
+  `token_index` is BIGINT in one file and VARCHAR in another: a consumer would
+  union them and get silent nulls.
 
-1. **Per-project layer** — existing `run_pipeline_process.sh`, one workdir per project,
-   embarrassingly parallel across projects.
-2. **Corpus layer** — new scripts that only read finished per-project artifacts.
-   Deterministic, cheap, re-runnable any time.
+The run invokes only the first, so the schema gate has to be run over the corpus
+explicitly. Both keep the parquet path as a bound query parameter rather than
+pasting it into SQL, because project names come from a manifest.
 
-## 3. Corpus manifest (`manifest.tsv`)
+The checks are plain `if` statements rather than `assert`, because `assert`
+vanishes under `python -O` and a gate an interpreter flag can delete is not a
+gate.
 
-One entry per project; the manifest is the single source of truth and is itself a
-published dataset artifact (provenance for the paper).
+## 7. Corpus-level stages
 
-```
-- name: kubernetes
-  url: https://github.com/kubernetes/kubernetes.git
-  category: enterprise          # enterprise | community | kernel
-  file_filter: '(?i)\.(c|c\+\+|...|rs|tcc)$'   # the universal mask, same for every project
-  pinned_commit: null           # filled by acquire stage at clone time — REPRODUCIBILITY PIN
-  size_class: null              # filled after clone: S | M | L (by commit count)
-  notes: ""
-```
+Built:
 
-Rules:
+1. **`select_corpus.py`** — rosters and searches → control facts → `candidates.csv`
+   → a stratified `manifest.sample.tsv`. See `CODEBOOK.md`.
+2. **`shared_history.py`** — finds projects that carry another project's history,
+   which GitHub's fork flag does not. They are flagged, not excluded.
+3. **`project_meta.py`** — the 29-field provenance sidecar.
+4. **`build_domain_map.py`** — the domain→firm map, from public affiliation data
+   plus a curated overlay applied last, so a rebuild keeps the corrections.
+5. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
+   and a `tokens` view over every Parquet whose schema matches the contract. The
+   manifests indexed are selectable and default to the corpus run set; a
+   non-conforming file is excluded **by name, counted in the summary**, because a
+   silent exclusion is worse than the crash it replaces — the row count then
+   looks plausible.
+6. **`anonymize_parquet.py`** / **`verify_anon.py`** — the release path. The
+   e-mail local part becomes `author_NNNN` and names become `Author N`, through a
+   single registry so one person has one pseudonym everywhere, including inside
+   the trailer arrays. **The e-mail domain is preserved on purpose**: firm
+   attribution resolves from the domain, so replacing it would collapse every
+   firm to unknown and destroy the analysis the dataset exists to support. Column
+   handling is fail-closed. There is no salt and no key — ids come from sorting
+   the distinct values, so output is reproducible and two releases diff cleanly,
+   and the protection is simply not publishing the registry. `verify_anon.py`
+   checks the published files alone, needs no secrets, and is therefore the check
+   worth putting in a release script.
 
-- `pinned_commit` is stamped at first clone and never changes; every later resume/re-run
-  analyzes exactly that commit. The published dataset cites URL + sha.
-- `file_filter` is the SAME universal mask for every project: the union of every
-  extension the tokenizer can parse, derived in `file_mask.py` from one extension
-  list. It used to come from a per-language matrix keyed on GitHub's primary
-  language, which dropped a polyglot project's other languages — 68 of 188
-  projects gained files when that stopped. The column stays because it records
-  which mask a Parquet was built with. Projects whose dominant language has no
-  tokenizer are still excluded at selection time.
-- Selection heuristics (stars/size/language thresholds) are a **separate concern** —
-  a `select_corpus.py` that emits candidate rows for manual curation. The runner only
-  consumes the curated manifest.
+Not built. Each is a gap, not a plan:
 
-## 4. Per-project pipeline (delta vs today)
+- **A corpus-level firm or organisation rollup.** Attribution is per token only.
+- **A per-project metadata table / dataset card** — name, category, URL, pinned
+  sha, commit count, token rows, file count, languages, run duration, and the
+  cregit and tokenizer versions.
+- **A packaging step** emitting per-stratum trees with checksums and a schema
+  document.
+- **Provenance pinning.** No `provenance.json` per run, so a published Parquet
+  cannot cite the cregit revision, tool versions and pinned commit it was built
+  from. This is the single largest reproducibility gap.
 
-Stages 1–11 stay as-is. Two small additions to `run_pipeline_process.sh`:
-
-- `--skip-html` — step 10 (prettyPrint HTML views) is browsing output, not needed for
-  the dataset. Saves hours and GBs per project. Blame (step 8) **cannot** be skipped —
-  `generate_dataset.py` consumes `--blame-dir`.
-- `--no-memo` (or `BFG_MEMO_DIR=` empty → tmpfs) — kernel evidence: 301 GB of memos
-  bought ~80 ms/moved-blob. At 100 projects the memo dirs are the #1 disk risk for
-  near-zero value. Default OFF for corpus runs; `blobmap.db` (level-1 cache) remains and
-  is what makes resume cheap.
-
-Plus one new post-step, outside cregit:
-
-- **validate** — hard gate before a project is marked DONE:
-  parquet exists and is non-trivial; token rows > 0; `persons.db` rows > 0;
-  commit count in `-original.db` == `git rev-list --count pinned_commit`;
-  schema columns match the corpus schema version.
-
-## 5. Orchestrator (`ctp.py`) — AS BUILT
-
-Stdlib Python, no SQLite state authority. Snakemake was evaluated and rejected
-(bioinformatics-origin, not an MSR-community tool); GNU Parallel was built and
-validated, then superseded by Python for readability and transparency.
-
-**State model — files are the ground truth, the DB is derived:**
-
-- `manifest.tsv` — one row per project (name, url, category, file_filter, size_class)
-- `<out>/<name>/<name>.validated` — stamp written only after the validation gate passes
-- `metrics.tsv` — append-only ledger, one row per phase attempt
-  (`iso_start  project  class  phase  duration_s  rc  log`)
-- `runs.log` — one start/end row per runner invocation
-- `ctp.duckdb` — derived index rebuilt on demand by `./ctp.py db` (`consolidate.py`):
-  `projects` state table (DONE/RUNNING/FAILED/QUEUED), `phase_metrics`, and a unified
-  `tokens` view over all validated parquets. The runner never dual-writes state.
-
-**Scheduling (as built):** `ThreadPoolExecutor` with a global `--jobs N` slot count,
-plus retry passes over failures (`--retries`, default 1). The per-class weighted
-S/M/L packing above remains the target for mixed corpora; current calibration data
-(S-class wall time varies 9×: jq 4 min vs zstd 36 min) lives in `metrics.tsv`.
-
-- **flock per project** (held for the whole job) so two runner invocations never collide.
-- **Disk floor:** below 150 GB free a project is deferred, not started.
-- **Environment capture:** the cregit devenv environment is resolved ONCE per run and
-  passed to every phase subprocess — concurrent `devenv shell` invocations race on a
-  shared nix GC root and kill each other (found in the first concurrency smoke).
-- **Visibility:** event lines per phase start/finish, 30 s heartbeat (running projects
-  with elapsed time, done/failed counts, disk free), `./ctp.py status` one-screener,
-  per-attempt logs with a live `-latest` symlink.
-
-**Path canonicalization:** the runner resolves every path through
-`Path.resolve()` → canonical form before invoking blobExec. This is load-bearing:
-blobExec's meta table refuses resume when the command string differs, and
-`/home` vs `/local/home` aliasing has already caused a refusal once.
-
-## 6. Disk lifecycle & retention
-
-Kernel evidence: essentials ≈ 11.7 GB (bare original + dst.git + blobmap.db); memos were
-301 GB of dead weight. Per-project retention after DONE:
-
-| Artifact | Keep? | Why |
-| --- | --- | --- |
-| `<name>-dataset.parquet` | ✅ forever | The product |
-| `<name>-original.db`, `-cregit.db`, `-persons.db` | ✅ forever | Cheap, needed for enrich/anonymize + audits |
-| `<name>-original.git` (bare) | ✅ until publication | Re-derivation + review responses |
-| `<name>-cregit.git` (dst) | ✅ until publication | Incremental re-runs if tokenizer fix lands |
-| `blobmap.db` | ✅ until publication | Resume/re-run cheaply |
-| memo/ | ❌ delete (ideally never written) | Proven negligible value |
-| working clones (non-bare) | ❌ delete after parquet | Re-derivable from bare |
-| blame/ dir | ❌ delete after parquet | Consumed by generate_dataset; re-derivable |
-| html/ | ❌ never generated (`--skip-html`) | Not a dataset artifact |
-
-Budget check: 100 projects × (typical 0.5–5 GB essentials) + kernel 11.7 GB ≈
-**150–400 GB retained** — comfortably inside 1.2 TB *only if* compaction is eager and
-memos are off. Without those two policies the run dies on disk mid-corpus.
-
-## 7. Corpus-level stages (new code)
-
-All pure functions over finished per-project artifacts; each re-runnable in minutes.
-
-1. **enrich.py** — person → firm mapping across the employer-employee fold: email-domain
-   table + manual overrides (same approach as the kernel corporate-TF work). Output:
-   `firms.parquet` join table. The domain→firm mapping table is itself curated + versioned.
-2. **anonymize.py** — weak anonymization for publication: salted stable hash of person id;
-   private salt + reverse mapping kept local, never published. Firm names stay (public data).
-3. **metadata table** — one row per project: name, category, url, pinned sha, commit
-   count, token rows, file count, language(s), run duration, cregit version, tokenizer
-   versions. This is the Data-track "dataset card" backbone.
-4. **package.py** — emits `enterprise/` and `community/` dataset trees with the **same
-   schema** (+ kernel as its own labeled member), a `SCHEMA.md`, the manifest, the
-   metadata table, and checksums, packaged for the eventual data release.
-
-**Provenance pinning (MSR reviewers care):** every per-project run writes a
-`provenance.json` — cregit git sha, blobExec jar sha256, srcml/ctags versions, file
-filter, pinned commit, wall time. Aggregated into the metadata table.
-
-## 8. Observability
-
-- Per-project logs under `<workdir>/pipeline.log` (already exists) + runner log.
-- `ctp.py status` — one-screen table from `ctp.duckdb`: DONE/RUNNING/QUEUED/QUARANTINED
-  counts, ETA from median stage durations, disk free. A MeshClaw cron can post the
-  digest daily during the 11 Sep–2 Oct window.
-- QUARANTINED projects listed with last 30 log lines for fast triage.
-
-## 9. Throughput sanity check
-
-Assume medians: S ≈ 20 min, M ≈ 2 h, L ≈ 12 h wall (blobExec parallel; kernel as the
-known worst case already done separately). With the slot mix running 24/7:
-
-- ~50 S + ~35 M + ~15 L ≈ 17 h + 35 h + 180 h of L-serial time ≈ **10–12 days** wall.
-- Fits the 3-week window with ~40% slack for quarantine triage and re-runs. The kernel
-  does not need re-running (existing artifacts are reused as-is).
-
-Biggest schedule risk is a handful of mega-projects (LLVM/gcc-scale). Mitigation:
-size cap at selection time, and the L class is measured after clone — anything that
-projects > 36 h gets flagged before burning the slot.
-
-## 10. Failure modes considered
+## 8. Failure modes and how they are handled
 
 | Failure | Handling |
 | --- | --- |
-| Crash mid-blobExec | blobmap frontier resume; runner relaunches with same canonical command |
-| Disk full | Disk guard halts launches; eager compaction; memos off by default |
-| One project poisons the run | QUARANTINED state; corpus continues |
-| Tokenizer bug found mid-corpus | dst.git + blobmap retained → incremental re-tokenize only affected blobs; parquet regenerate |
-| Meta mismatch refusal | Canonical `/local/home` realpath enforced at the runner boundary |
-| Dev-desk reboot | Idempotent tick loop + flock; cron restarts the runner |
-
-## 11. Build plan (target: runnable by 4 Sep)
-
-1. `--skip-html` + `--no-memo` flags in `run_pipeline_process.sh` (small, test on jq).
-2. `ctp.py` + `ctp.duckdb` schema + flock/tick loop; smoke on 2 S projects.
-3. `validate.py` + `retain.py`; wire as post-stages.
-4. `select_corpus.py` heuristics → candidate list → manual curation → `manifest.tsv`.
-5. `ctp.py status` + daily digest cron.
-6. Corpus-level: `enrich.py`, `anonymize.py`, metadata, `package.py` (can land during
-   the run window — they only need finished projects).
-
-MVP-first: steps 1–3 validated on jq + one M-class project end-to-end before any batch.
+| Crash mid-tokenize | blob-map frontier resume; the runner relaunches with the same canonical command |
+| Disk full | disk-floor guard defers launches; `memo/` and `html/` dropped |
+| One project poisons the run | that project fails and is retried; the corpus continues |
+| Tokenizer fix lands mid-corpus | the tokenized repo and blob map are retained, so only affected blobs are re-tokenized and the Parquet is regenerated |
+| Resume refused on a meta mismatch | canonical paths enforced at the runner boundary; `--mask-widened` for a deliberate mask change |
+| Machine reboot | idempotent tick loop plus flock; the runner is restartable |
+| A malformed stamp or a missing Parquet | indexed anyway, flagged (`rows_unreadable`, `parquet_missing`), named in the summary, and the exit status goes non-zero |

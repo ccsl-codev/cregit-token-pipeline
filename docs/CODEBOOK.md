@@ -1,12 +1,13 @@
-# Codebook v1 — control facts and strata
+# Codebook — control facts and strata
 
-Discharges `CORPUS-HEURISTICS-PLAN.md` P2, which was planned and never written.
+How a project gets the `stratum` value carried in every dataset row. This is the
+design decision the dataset rests on, because the stratum defines the population
+under study: if this document is wrong, every result built on the strata is wrong
+in the same direction.
 
-This document defines how a project gets its stratum. It is the design decision
-the dataset rests on, because the stratum defines the population under study. If
-this document is wrong, every result is wrong in the same direction.
-
-A second rater must be able to label a project from this file alone.
+A second rater must be able to label a project from this file alone. The
+implementation is `select_corpus.judge()`; the per-project result and the fact
+that decided it are in `candidates.csv`.
 
 ---
 
@@ -41,8 +42,9 @@ organisation label would hide that.
 | **`company-owned`** | A single for-profit company owns the namespace, the trademark, or the copyright, and can change the licence or the roadmap without asking anyone. |
 | **`community`** | Neither of the above. No single legal entity controls the project. Maintainership is earned inside the project. |
 
-`community` is a **residual**. Say so in the paper. Section 9 explains why that
-is a limitation and what it costs.
+`community` is a **residual**: it is defined by the absence of evidence, not by
+positive evidence of community control. Section 9 explains what that costs and
+must be stated by any analysis using the strata.
 
 > **Naming.** The third stratum is `company-owned`, not `single-vendor`. F2 proves
 > only that one company owns the namespace. True single-vendor control needs F3,
@@ -172,8 +174,10 @@ Redis in 2024, MongoDB earlier.
 the relicense date. Do not label a project `company-owned` for its whole history
 because of a change in its last year.
 
-**Not implemented.** No time-boxing exists in the pipeline today. A rater must
-apply it by hand, and the paper must state the gap.
+**Not implemented.** No time-boxing exists in the pipeline. A rater must apply it
+by hand, and any analysis must state the gap: a project that changed licence or
+owner mid-history carries one label for all of it. `label_date` records when the
+label was assigned.
 
 ## 8. Worked examples
 
@@ -190,7 +194,7 @@ Real rows from `candidates.csv`.
 
 ## 9. Known gaps
 
-Each one is a limitation the paper must state.
+Every one of these is a limitation an analysis using the strata must state.
 
 | # | Gap | How it bites |
 | --- | --- | --- |
@@ -205,7 +209,7 @@ Each one is a limitation the paper must state.
 
 ## 10. Procedure for the second rater
 
-Gate: **Cohen's κ ≥ 0.7** (`CORPUS-HEURISTICS-PLAN.md:57`).
+Agreement gate: **Cohen's κ ≥ 0.7.**
 
 1. Draw 30 projects: 10 per stratum, **including every contested case** that
    falls in the sample.
@@ -222,19 +226,22 @@ Gate: **Cohen's κ ≥ 0.7** (`CORPUS-HEURISTICS-PLAN.md:57`).
 
 Benchmark to beat: the published enterprise dataset reports **κ = 0.29**.
 
-## 11. Deviations from `CORPUS-HEURISTICS-PLAN.md`
+## 11. Scope note: language is not a stratum, but it confounds one
 
-| Planned | Actual | Reason |
-| --- | --- | --- |
-| languages C/C++/Java/C#/Go, Rust if tree-sitter lands | **C, C++, Java, M4, Rust** | verified in `cregit-issue61/tokenize/tokenize.pl`. Rust works through `ra-ap-rustc_lexer`, not tree-sitter. C# is absent. Go has a tokenizer file but no extension mapping, so it is unreachable. |
-| stratum `single-vendor` | **`company-owned`** | F2 proves namespace ownership, not single-vendor control. Section 3. |
-| community rosters SFC and SPI | **3 rows total** | SFC links to homepages, not repositories. Replaced by the published non-enterprise cohort as a pool. |
-| ~101 projects including Linux | **1,808 and rising** | the cost model showed compute is not the constraint. Disk was, and `retain.py` removed it. |
-| resolvability bar, at most 40% unknown | **not yet measured** | needs Gate 2, the pipeline pilot. |
-| Avelino truck-factor corpus intersection | **not done** | comparability check still open. |
+Eligibility is restricted to what the tokenizer can parse: **C, C++, Java and
+Rust** (m4 is also parsed but is never a primary language, so it is not a
+selection key). The authority is the tokenizer's own language table in the
+configured cregit checkout, and `tests/test_mask_drift.py` holds `file_mask.py`'s
+extension list equal to it. Rust is handled by a Rust lexer, not tree-sitter. C#
+is absent. Go has a tokenizer file but no extension mapping, so it is
+unreachable.
 
-## 12. Change history
+**Language confounds stratum.** The ASF roster is majority Java, while the
+mailing-list community world is overwhelmingly C. If `foundation` comes out mostly
+Java and `community` mostly C, a difference between strata may be a language
+effect. `candidates.csv` and the Parquet both carry `language` so it can enter a
+model as a covariate, and the draw is stratified by language for the same reason.
 
-| Version | Date | Change |
-| --- | --- | --- |
-| v1 | 2026-09-13 | First written version. F1 and F2 automated; F3, F4, F5 manual. CNCF landscape demoted from roster to pool, which moved 734 candidates out of `foundation`. |
+The community rosters (SFC, SPI) yielded **3 rows in total**, because SFC links to
+project homepages rather than repositories. The published non-enterprise cohort
+replaced them as a candidate pool — see section 5.

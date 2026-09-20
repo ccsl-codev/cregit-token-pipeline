@@ -1,3 +1,25 @@
+# Third-party source data
+
+The two large files in this directory are **not produced by this pipeline.** They
+are the published enterprise/cohort dataset of Spinellis et al., MSR 2020
+(Zenodo `10.5281/zenodo.3742962`, CC-BY-4.0), vendored here so that corpus
+selection is reproducible without a network fetch:
+
+| File | Rows | Read by |
+| --- | ---: | --- |
+| `enterprise_projects.txt` | 17,264 | `select_corpus.parse_spinellis` → `F1_pool:spinellis-*` |
+| `cohort_project_details.txt` | 311,223 | `select_corpus.parse_spinellis_cohort` → `F1_pool:spinellis-cohort` |
+
+Both are used as **candidate pools only, never as stratum labels**: they label
+contribution composition, and this pipeline labels control. `docs/CODEBOOK.md`
+§5 states the rule and why; `docs/SPINELLIS-VALIDATION.md` is the generated
+comparison between the two labellings.
+
+The rest of this file is the upstream authors' own description of those files,
+reproduced verbatim.
+
+---
+
 We present a dataset of open source software developed mainly by
 enterprises rather than volunteers.  This can be used to address known
 generalizability concerns, and, also, to perform research on open
