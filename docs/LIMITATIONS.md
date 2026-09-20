@@ -102,7 +102,7 @@ project is present.
 project only carries firm attribution if it was generated with `--firm-map`;
 otherwise all three columns are empty strings, which is also what "this domain is
 not in the map" looks like. From columns 52–54 alone a consumer **cannot
-distinguish** the two. And `(Independent)` is a category, not a firm (§3.4), so
+distinguish** the two. And `(Independent)` is a category, not a firm ([`DATASET-SCHEMA.md`](DATASET-SCHEMA.md) §3.4), so
 `firm <> ''` is not a count of firm-attributed rows.
 
 **Nothing in a Parquet records which revision of the firm map produced its firm
@@ -143,7 +143,7 @@ conclusion.
 **Seven columns carry no information and five more are constant.** `repo_tag` is
 **structurally** empty, not accidentally: it comes from the multi-repository
 import tag, which only cregit's Linux-specific import populates. `contested` is
-empty for every row (see below). Five trailer arrays —
+empty for every row, as the stratum entry below explains. Five trailer arrays —
 `footer_suggested_by`, `footer_based_on_patch_by`, `footer_helped_by`,
 `footer_mentored_by`, `footer_thanks_to` — are empty throughout, and the trailer
 block as a whole is dominated by `footer_co_authored_by`: the
@@ -214,7 +214,7 @@ gate excludes them from the `tokens` view and names them in its summary. Group o
 `stratum` (column 5), not on `manifest_category`.
 
 **A `.validated` stamp does not certify the schema.** `validate.py` is the only
-gate the run invokes, and it checks size and row count only (§2.1). Run
+gate the run invokes, and it checks size and row count only ([`DATASET-SCHEMA.md`](DATASET-SCHEMA.md) §2.1). Run
 `validate_schema.py` yourself over the output. Likewise `state = 'DONE'` in
 `ctp.duckdb` means the pipeline finished, not that the data is present: such a
 project is flagged `parquet_missing` and stays out of the `tokens` view, so
