@@ -11,6 +11,39 @@ magnitude says so rather than guessing.
 
 ---
 
+**One drawn project is excluded from the dataset: `tencent__tencentkona-21`.** It was
+selected by the sampling procedure and it is not published. Two independent reasons,
+both measured:
+
+* **53 historical revisions of `src/hotspot/share/runtime/continuationFreezeThaw.cpp`
+  do not terminate under the parser.** Re-confirmed at a 120-second budget: zero
+  bytes of output, resident memory flat at 9.7 MB, one core saturated. Minimal
+  reproducer, 41 bytes, from HotSpot's unexpanded macro idiom — an unexpanded
+  function-like macro standing where a declaration is expected, inside a template.
+  This is ordinary production source, not a stress test.
+* **7 further blobs crash the parser outright.** A crash is not a timeout, so the
+  exclusion list never sees it, and the file is written as a zero-byte tokenization
+  that no counter records. So even with 53 exclusions the project would publish with
+  seven production files silently contributing nothing.
+
+The project is excluded rather than published with gaps it cannot report. The corpus
+is therefore **186 published of 187 in scope**, and the row stays in the manifest with
+its reason so the sampling record remains complete.
+
+**The same crash mechanism reaches published data.** In
+`sumatrapdfreader__sumatrapdf`, which **is** published, all seven of its zero-byte
+tokenizations are parser crashes — including one on a 1,263-byte file, so it is not a
+size limit. A corpus-wide count of affected files is **not yet established**; it is
+being measured, and this entry will carry the number when it is. Until then, treat a
+file present in a repository but absent from the dataset as possibly a parser crash
+rather than evidence that the file held no tokens.
+
+* **Detect**: a path that exists at HEAD, matches the file mask, and has no row in
+  the Parquet.
+* **Work around**: none from the data. The file's tokens do not exist in the dataset.
+
+---
+
 **On every `.rs` row, four columns are wrong.** The Rust tokenizer separates a
 token's position from its type with a **tab**, while the srcML path used for every
 other language uses a **pipe**, which is what the downstream parser splits on. The
