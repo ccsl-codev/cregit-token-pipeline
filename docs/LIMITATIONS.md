@@ -44,12 +44,14 @@ rather than evidence that the file held no tokens.
 
 ---
 
-**On every `.rs` row, four columns are wrong.** The Rust tokenizer separates a
-token's position from its type with a **tab**, while the srcML path used for every
-other language uses a **pipe**, which is what the downstream parser splits on. The
-whole `line:col<TAB>type` string therefore lands in `token_type` and every later
-field shifts. Consequences, measured on `intel__tsffs` (201,030 rows, 145,125 of
-them `.rs`):
+**On every `.rs` row, four columns are wrong.** Two faults in the Rust tokenizer
+combine. First, it separates a token's position from its type with a **tab**, while
+`generate_dataset.py:243` splits on a **pipe**. Second, it discarded the
+`--position` flag and then emitted the position prefix anyway, so it prefixed every
+line even though the pipeline never asks for positions. The whole
+`line:col<TAB>type` string therefore lands in `token_type` and every later field
+shifts. Consequences, measured on `intel__tsffs` (201,030 rows, 145,125 of them
+`.rs`):
 
 | | `.rs` rows | other rows |
 | --- | ---: | ---: |
@@ -69,6 +71,14 @@ not Rust.
   `line:col` and `split_part(token_type, chr(9), 2)` the real token type; skip the
   `-:-` end-of-unit marker. **`token_value` is correct.** `source_text` is not
   recoverable from the Parquet.
+* **A repair in place cannot match a re-run.** `token_type`, `source_line` and
+  `source_col` are backfillable by the rule above, and `is_structural` follows from
+  the repaired `token_type`. Two things are not. `source_text` desynchronizes from
+  the first row onward, because the tokenizer misread `begin_unit` as an ordinary
+  token and consumed source past it. And a correct tokenization emits **one more row
+  per `.rs` file** — the trailing end-of-unit marker, which every C file already
+  had. So the published rows are not row-aligned with a correct run, and only a
+  re-run of the Rust-bearing projects produces a comparable file.
 * Anyone grouping on `token_type` or filtering on `is_structural` without this
   gets silently wrong answers for all of Rust.
 
