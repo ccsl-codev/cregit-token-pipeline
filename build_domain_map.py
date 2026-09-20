@@ -123,6 +123,15 @@ PARENTHETICAL = re.compile(r"\s*\([^)]*\)\s*$")
 DOMAIN_SHAPED = re.compile(r"[a-z0-9.-]+\.[a-z]{2,}")
 DOMAIN_NAME_TAG = "-self-reference"
 
+# The address list on a gitdm person line. Documented as comma-separated, but 7
+# lines in the 10 cached files separate two addresses with a SPACE instead, e.g.
+#   gnm444: ngonapa!cisco.com gnm444!users.noreply.github.com
+# Splitting on the comma alone then yields one "address" holding both, and its
+# domain becomes the literal string `cisco.com gnm444!users.noreply.github.com`.
+# Whitespace is never valid inside an address, so accepting it as a separator
+# loses nothing and recovers the second address.
+ADDR_SEP = re.compile(r"[,\s]+")
+
 
 def self_reference(domain: str, company: str) -> bool:
     """True when the company value only repeats its own domain, naming no firm.
@@ -199,6 +208,13 @@ def parse_source() -> dict[str, Counter]:
     affiliation lines, each optionally '... until DATE' / '... from DATE'.
     Only the domain and the company survive; the handle and address do not.
 
+    The address list is hand-maintained and two malformations occur in it: a
+    SPACE where the comma belongs, and a second `!` inside an address. Reading
+    either one literally produced a map key that is not a domain — `cisco.com
+    gnm444!users.noreply.github.com`, `sheldrake!isovalent.com`. See ADDR_SEP
+    and the rsplit below. Eight such keys existed; none could ever match a
+    person_domain, so they were dead rows carrying a firm attribution.
+
     Attribution rule (this is the load-bearing choice). A naive pass credits
     every employer a person ever had to every domain they ever used, and 54% of
     people here have more than one employer — that dilution made 5,426 of 10,118
@@ -222,10 +238,15 @@ def parse_source() -> dict[str, Counter]:
                 if domains:
                     people.append((domains, companies))
                 domains, companies = set(), []
-                for e in line.split(":", 1)[1].split(",") if ":" in line else []:
-                    e = e.strip()
+                addrs = ADDR_SEP.split(line.split(":", 1)[1]) if ":" in line else []
+                for e in addrs:
                     if "!" in e:
-                        d = e.split("!", 1)[1].strip().lower().rstrip(".")
+                        # rsplit, not split: gitdm writes `!` for `@`, and one
+                        # address carries a second one in its local part
+                        # (`kevin!sheldrake!isovalent.com`). The domain is what
+                        # follows the LAST `!`; taking the first gave the domain
+                        # `sheldrake!isovalent.com`.
+                        d = e.rsplit("!", 1)[1].strip().lower().rstrip(".")
                         if d and "." in d:
                             domains.add(d)
             elif domains:

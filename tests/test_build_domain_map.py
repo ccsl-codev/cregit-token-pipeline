@@ -336,6 +336,56 @@ def test_a_person_line_yielding_no_domain_is_dropped(env, line):
     assert dict(bdm.parse_source()) == {"igalia.com": Counter({"Igalia": 1})}
 
 
+def test_two_addresses_separated_by_a_space_are_two_addresses(env):
+    """THE malformed-domain regression, first half. Seven person lines in the ten
+    cached files separate two addresses with a space rather than a comma:
+
+        gnm444: ngonapa!cisco.com gnm444!users.noreply.github.com
+
+    Splitting on the comma alone made that one address whose 'domain' was the
+    literal `cisco.com gnm444!users.noreply.github.com`, which became a map key.
+    Read correctly the person has one work domain and one free provider, so they
+    attribute cisco.com — and the map gains no key that is not a domain."""
+    env.gitdm("gnm444: ngonapa!cisco.com gnm444!users.noreply.github.com\n"
+              "\tCisco Systems\n")
+    assert dict(bdm.parse_source()) == {"cisco.com": Counter({"Cisco Systems": 1})}
+
+
+def test_two_work_domains_separated_by_a_space_still_contribute_nothing(env):
+    """The recovered address is a real address, so it counts toward ambiguity
+    too. Fixing the split must not become a way to attribute a domain that a
+    correct reading would refuse."""
+    env.gitdm("nn: a!redhat.com b!suse.com\n\tRed Hat\n")
+    assert dict(bdm.parse_source()) == {}
+
+
+def test_a_second_bang_inside_an_address_leaves_the_domain_intact(env):
+    """THE malformed-domain regression, second half. gitdm writes `!` for `@`,
+    and one address carries a stray second one:
+
+        kevsecurity: kevin!sheldrake!isovalent.com, kevsecurity!users.noreply.github.com
+
+    Taking the text after the FIRST `!` gave the key `sheldrake!isovalent.com`.
+    The domain is what follows the LAST one."""
+    env.gitdm("kevsecurity: kevin!sheldrake!isovalent.com, "
+              "kevsecurity!users.noreply.github.com\n\tIsovalent\n")
+    assert dict(bdm.parse_source()) == {"isovalent.com": Counter({"Isovalent": 1})}
+
+
+def test_a_key_that_is_not_a_domain_can_never_be_emitted(env):
+    """The invariant behind both halves. A `person_domain` comes from an e-mail
+    address, so it holds neither a space nor a `!`; a map key that holds either
+    is a dead row that still carries a firm attribution, which is the worst kind
+    of map row — unreachable, and wrong if it were ever reached."""
+    env.gitdm("a: x!cisco.com y!users.noreply.github.com\n\tCisco Systems\n"
+              "b: kevin!sheldrake!isovalent.com\n\tIsovalent\n")
+    keys = set(bdm.parse_source())
+    assert keys == {"cisco.com", "isovalent.com"}
+    for key in keys:
+        assert " " not in key, key
+        assert "!" not in key, key
+
+
 def test_a_non_firm_affiliation_line_is_discarded_not_counted(env):
     """Research correctness: '(Independent)' next to a real employer must be
     dropped, not counted as a second company. Counting it would make every
