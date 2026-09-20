@@ -15,9 +15,10 @@ The mask used to be per-language, from GitHub's primary-language field:
     Java  \\.java$
     Rust  \\.rs$
 
-Measured over 188 bare clones, that selected 7,042.6 MB in 545,547 files where a
-universal mask selects 7,333.4 MB in 569,963 — 68 projects gain files and 120
-gain nothing. The dataset is a tokenized set of projects, not a set of language
+Measured over 188 bare clones, that selected 545,957 files where a universal mask
+selects 570,201 — 63 projects gain files, 125 gain nothing, and none lose a file.
+`data/mask-impact.csv` is the authority on this split; it carries one row per
+project, so the counts above are derived from it rather than maintained by hand. The dataset is a tokenized set of projects, not a set of language
 exemplars, so a polyglot project's C++ must not be dropped because GitHub calls
 it a Java project. A union mask selects nothing a project does not have, so there
 is nothing left for a per-project mask to do.
