@@ -60,6 +60,8 @@ REAL_RUNNER_USAGE = """\
 #   --duckdb-threads N     forward the DuckDB sorting thread count to step 10
 #   --project-meta PATH    forward the provenance sidecar to step 10
 #   --project-key NAME     which key of the sidecar this project is
+#   --firm-map PATH        forward the domain->firm CSV to step 10
+#   --firm-canonical PATH  forward the canonical firm-name table to step 10
 #   --mask-widened    resume across a mask change, reusing blob_map
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
