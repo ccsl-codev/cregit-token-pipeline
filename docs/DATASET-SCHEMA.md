@@ -2,7 +2,8 @@
 
 Reference for the published artefact. Four questions, in order: what the dataset
 is (§1), how to regenerate it (§2), what every column means (§3), and what is
-known to be wrong with it (§5).
+known to be wrong with it — [`LIMITATIONS.md`](LIMITATIONS.md), which you should
+read before analysing the data.
 
 **`validate_schema.py` is the authority on the schema, not this document.**
 `EXPECTED_COLUMNS` there is the contract that every file is gated against; §3.2
@@ -56,6 +57,17 @@ L-class working directory measured 435 GB). Run them from
 How a project gets its `stratum` is `docs/CODEBOOK.md`. It is a claim about who
 *controls* a project and never about who contributes to it.
 
+**Every project is tokenized with the same mask**, so `file_mask` (column 30) does
+not distinguish projects — it distinguishes *runs*, which is what it exists for.
+All 186 Parquets that conform to the contract today carry one `file_mask` value.
+The mask used to be chosen from GitHub's primary-language field, which dropped a
+polyglot project's other languages; `data/mask-impact.csv` is the record of what
+that cost, re-derivable with `./mask_impact.py`, and the widening is provably a
+superset — no project loses a file. Note that `./ctp.py run --mask REGEX`
+overrides the manifest for a run without updating `project_meta.json`, so a run
+using it publishes a `file_mask` that does not describe what happened. The runner
+warns; nothing enforces it.
+
 ### 1.2 Selecting the corpus out of the output directory
 
 The output directory also holds development fixtures. One predicate separates
@@ -82,6 +94,14 @@ than a silent blank row.
 `./ctp.py db` builds the same view (plus a `projects` tracking table and a
 `phase_metrics` table) into `ctp.duckdb`, over the run set rather than over the
 glob. It is a derived index; the files are the authority.
+
+Filtering on `provenance_status` is necessary but not sufficient, because
+`read_parquet` over a list binds **one** schema for the whole list: the 10 fixtures
+in the output directory are at older 23- and 38-column schemas and will abort the
+view outright. `consolidate.py` handles this by including only files whose schema
+matches `validate_schema.EXPECTED_COLUMNS`, and by **naming and counting every
+file it leaves out** — a silent exclusion would be worse, because the row count
+would still look plausible.
 
 ---
 
@@ -268,27 +288,39 @@ silently blank 29 columns.
 ### 3.4 Firm attribution: always read `firm_source`
 
 `firm_raw`/`firm`/`firm_source` resolve `person_domain` through
-`data/affiliation.merged.csv` (4,049 domains, 2,996 distinct company strings),
-canonicalizing the name through the reviewed `data/firm_canonical.csv`. All three
-are `''` when the domain is not in the map, so **an empty `firm_source` means "no
-attribution"** and is the column to filter on.
+`data/affiliation.merged.csv` (**4,041 domains, 2,995 distinct company strings**),
+canonicalizing the name through the reviewed `data/firm_canonical.csv`. The join is
+an **exact match on the domain string** — no subdomain fallback, no normalization.
+All three columns are `''` when the domain is not in the map, so **an empty
+`firm_source` means "no attribution"** and is the column to filter on.
 
 The map is built from person-grain public affiliation data projected onto
 domains, which is lossy: a contributor's employer gets attached to their personal
 domain. Single-person attestations are kept deliberately — dropping them costs
 most of the yield — and tagged so a consumer can restrict to the corroborated
-tier. Counted from `data/affiliation.merged.csv`:
+tier. Counted from `data/affiliation.merged.csv` at this revision:
 
-| `source` | rows | Confidence |
+| `source` | domains | Confidence |
 | --- | ---: | --- |
-| `cncf-gitdm-single` (+ `-self-reference`) | 2,770 + 28 = **2,798 of 4,049 (69%)** | **one person only** |
+| `cncf-gitdm-single` (+ `-self-reference`) | 2,761 + 28 = **2,789 of 4,041 (69%)** | **one person only** |
 | `gitdm` | 768 | curated, hand-checked |
 | `cncf-gitdm` (+ `-self-reference`) | 204 + 5 = 209 | several people agree |
 | `spinellis-sec` (+ `-self-reference`) | 111 + 2 = 113 | published source |
 | `patch` | 72 | curated |
 | `rich` | 55 | curated |
 | `builtin` | 33 | definitional |
-| `correction` | 1 | reviewed overlay, `data/affiliation.corrections.csv` |
+| `correction` | 2 | reviewed overlay, `data/affiliation.corrections.csv` |
+
+`firm` is **not always a firm.** 58 domains carry the label `(Independent)` and 15
+more carry `Independent` — the same category under two spellings, so any
+`GROUP BY firm` that does not fold them invents a category. `(Independent)` is
+what the free-provider rule emits, and it covers `gmail.com`,
+`users.noreply.github.com` and the rest: a contributor using a forge no-reply
+address, a contributor using consumer webmail, and a bot are all labelled
+`(Independent)`, which conflates *unknowable* affiliation with *absent*
+affiliation. Counting `firm <> ''` therefore over-counts real firm attribution.
+Use `kind` from the map (`free_provider`, 52 domains) to separate them, and treat
+`(Independent)` as missing data rather than as a firm.
 
 ```sql
 -- Restrict to the corroborated tier.
@@ -380,143 +412,18 @@ therefore not available in the published data.
 
 ## 5. Known limitations
 
-Ordered by how likely it is to change a result.
+They are their own document: **[`LIMITATIONS.md`](LIMITATIONS.md)**. Read it before
+analysing the data. The ones most likely to change a result:
 
-**Publishing the Parquet as it stands publishes contributors' e-mail addresses.**
-`person_email` (column 50) is a real address. `anonymize_parquet.py` is the
-release path: it rewrites the e-mail local part to `author_NNNN` and names to
-`Author N`, running every identity string — including each element of the 15
-trailer arrays — through one registry, so a person carries one pseudonym
-everywhere. It classifies **every** input column into pass-through, transform or
-drop and raises on a column it does not recognise, so a schema change stops it
-loudly instead of silently shrinking the release. It also checks its own output:
-row count, `firm`/`repo_name` group counts and every `person_domain` must be
-unchanged, and `count(distinct person_email)` and `count(distinct person_name)`
-must not drop — two real people collapsing onto one pseudonym would lower a
-distinct-contributor count for free.
-
-Two properties to plan a release around. There is **no salt and no key**: ids are
-assigned by sorting the distinct lowercased values, so two runs over the same
-inputs are byte-identical and two releases diff cleanly, but the only thing
-protecting the mapping is not publishing the registry. And the registry spans
-**one invocation**, so pseudonyms are not stable across runs with different input
-sets — pass every file that will be published together in a single command.
-
-Run `verify_anon.py` over the output directory as an independent check: it tests
-the published files alone for any e-mail local part that is not a pseudonym, needs
-no secrets, and so can be run by a reviewer or a depositor. It is a necessary,
-not a sufficient, condition. Two residual risks survive
-anonymization by design and must be disclosed by any analysis: the e-mail
-**domain is preserved on purpose** (it is the firm signal), so a sole contributor
-at a rare or vanity domain is re-identifiable; and `owner`/`repo_name`/
-`clone_url` carry the GitHub namespace, which for a personal repository is a
-person's handle. `source_text` and `token_value` are source code and are not
-scrubbed, so copyright headers and `@author` tags pass through.
-
-**63 of the 188 run projects were tokenized with a narrower mask than the one now
-recorded.** The mask used to be chosen from GitHub's primary-language field,
-which dropped a polyglot project's other languages. `data/mask-impact.csv`
-(188 rows, re-derivable with `./mask_impact.py`) measures the change: 545,957 →
-570,201 files and 7,043.0 → 7,329.7 MiB selected. 63 projects are `gainer` — the
-universal mask selects files at HEAD that their recorded mask did not, so their
-tokenized repository is incomplete and they must be re-tokenized from step 2. The
-other 125 select the same HEAD paths and need only a step-10 regeneration. 17 of
-those 125 gain files only in history, on paths deleted or renamed before HEAD;
-those rows never reach the Parquet, so they are not a Parquet defect. The mask
-never narrows: `delta_files < 0` occurs for no project. Filter on `file_mask`
-(column 30) to tell which rows came from which mask.
-
-`./ctp.py run --mask REGEX` overrides the manifest for a whole run but does
-**not** update `project_meta.json`, so the published `file_mask` will not describe
-what actually ran. The runner warns; nothing enforces it.
-
-**The firm columns are empty for most of the corpus, and an empty value is
-ambiguous.** A project only carries firm attribution if it was generated with
-`--firm-map`; otherwise all three columns are empty strings, which is also what
-"this domain is not in the map" looks like. From columns 52–54 alone a consumer
-**cannot distinguish** "no attribution for this domain" from "this project was
-never regenerated with the map". Cross-check against the project rather than the
-row.
-
-**Some tokenizable source is deliberately excluded, and nothing in the output
-says so.** `.ixx`, `.inl`, `.cppm`, `.cxxm` and `.ipp` are left out of the mask
-because srcML 1.1.0 does not recognise them, ignores `-l C++`, and then writes an
-**empty token file and exits 0** — a silent success. Autotools input (`.am`,
-`.ac`, 1.4 MB across 22 projects) is left out because the m4 tokenizer's lexer
-uses a backtick as its closing quote, so an apostrophe swallows text to the next
-backtick. C++ module and inline-implementation files and autotools source are
-therefore absent from the dataset with nothing in a Parquet to indicate the
-absence. `tests/test_mask_drift.py` holds the extension list to the tokenizer's
-own language table, so adding an extension without probing it is caught.
-
-**Runs are not pinned to a commit.** The manifest carries exactly five fields and
-three parsers plus four tests assert their positions, so the planned
-`pinned_commit` sixth field does not exist. A re-run analyzes whatever HEAD is at
-clone time, so the dataset is reproducible in method but not byte-for-byte, and a
-published Parquet cannot cite the revision it was built from.
-
-**`data/affiliation.merged.csv` is a build artefact and currently predates one of
-its corrections.** `data/affiliation.corrections.csv` holds two reviewed rows but
-only one is present in the merged map: `collibra.com` still resolves to
-`Medidata` rather than `Collibra`. Rerun `./build_domain_map.py build` to apply
-the overlay — it is applied last, so a rebuild keeps it and a hand edit of the
-merged file would be lost. Two further single-person inferences are wrong on
-their face and are **not** corrected: `central-intelligence.agency`→`Microsoft`
-and `intellisys.info`→`Takeaway.com`. A row-by-row audit of 2,770 single-person
-inferences has not been done.
-
-**`community` is a residual stratum, and `contested` is empty for every row.**
-Three of the five control facts in `docs/CODEBOOK.md` are not implemented, so a
-project that no namespace fact reaches stays `community` by default.
-`contested` (column 7) is non-empty in **0 of 24,405** candidate rows, so the
-contested-case protocol in `docs/CODEBOOK.md` §6 has not flagged anything and the
-column cannot currently be used to find disputed labels. `docs/CODEBOOK.md` §9 is
-the full gap list with a worked example per gap;
-`docs/SPINELLIS-VALIDATION.md` §4 names seven eligible rows that an independent
-published registry attests to a company and that this pipeline nonetheless labels
-`community`.
-
-**GitHub's `fork` flag finds nothing.** Among eligible rows `fork = True` counts
-zero, because a tree pushed as an independent repository is not marked. Projects
-that carry another project's history are therefore **kept and flagged**, not
-excluded: filter on `history_cluster` for one project per history, and read
-`history_first` for origin — `history_relation` is about inclusion, and the same
-topology occurs with the origin on either side.
-
-**A stratum is a label at a date.** Namespaces get donated, so two rows for one
-repository can disagree: of the 196 duplicate `clone_url` groups in
-`candidates.csv`, **28 disagree on `stratum`** — **5** of them within the 106
-groups that fall inside the eligible frame. `label_date` (column 8) records when
-the label was assigned, and there is no relicensing time-boxing anywhere in the
-pipeline (`docs/CODEBOOK.md` §7), so a project that changed licence or owner
-mid-history carries one label for all of it.
-
-**`manifest_category` (column 29) has a fourth value outside the stratum
-vocabulary.** The four legacy pilot projects in `manifest.tsv` carry
-`enterprise`, which is not one of `community`/`company-owned`/`foundation`. Those
-four are also still at an older 23-column schema, so `consolidate.py`'s schema
-gate excludes them from the `tokens` view and names them in its summary. Group on
-`stratum` (column 5), not on `manifest_category`.
-
-**A `.validated` stamp does not certify the schema.** `validate.py` is the only
-gate the run invokes, and it checks size and row count only (§2.1). Run
-`validate_schema.py` yourself over the output. Likewise `state = 'DONE'` in
-`ctp.duckdb` means the pipeline finished, not that the data is present: such a
-project is flagged `parquet_missing` and stays out of the `tokens` view, so
-`select name from projects where parquet_missing` finds it.
-
-**Dates are strings.** `author_date` and `committer_date` (43, 46) are raw git
-strings, so a consumer must cast before any temporal query.
-
-**Corpus-level firm and org rollups do not exist.** The firm columns are per
-token; there is no aggregated firm table, no package step and no dataset card
-generator. `docs/DESIGN.md` §7 is the intended shape of those.
-
-**Reproducibility depends on an unpinned sibling checkout.** The per-project
-pipeline, the tokenizer and their flag names live in the cregit checkout that
-`pipeline.cfg` names, at whatever revision it happens to be. A flag rename there
-has already broken a run mid-corpus. Record that checkout's revision alongside
-any published Parquet.
+| Limitation | Affects |
+| --- | --- |
+| the Rust tokenizer shifts four columns | every `.rs` row |
+| `person_email` is a real address until `anonymize_parquet.py` runs | any release |
+| `(Independent)` is a category, not a firm | any `GROUP BY firm` |
+| token count is not a measure of human contribution | any ranking by row count |
+| every `.h` file was parsed with the C grammar | every header |
+| runs are not pinned to a commit | byte-for-byte reproduction |
+| 2 of the 188 run-set projects have no Parquet | corpus totals |
 
 ---
 
