@@ -145,6 +145,13 @@ protecting the mapping is not publishing the registry. And the registry spans
 **one invocation**, so pseudonyms are not stable across runs with different input
 sets — pass every file that will be published together in a single command.
 
+Measured, so nobody has to guess how large that effect is: adding a single file to
+the invocation renumbered **150 of the 153** addresses that appeared in both runs,
+which is **98.0%**. Determinism and stability are not the same property here. The
+output is deterministic for a fixed input set, and it is not stable when that set
+changes. A release that adds one project therefore renumbers almost every
+pseudonym, and a reader cannot track one contributor across two such releases.
+
 Run `verify_anon.py` over the output directory as an independent check: it tests
 the published files alone for any e-mail local part that is not a pseudonym, needs
 no secrets, and so can be run by a reviewer or a depositor. It is a necessary,

@@ -180,8 +180,13 @@ Built:
    attribution resolves from the domain, so replacing it would collapse every
    firm to unknown and destroy the analysis the dataset exists to support. Column
    handling is fail-closed. There is no salt and no key — ids come from sorting
-   the distinct values, so output is reproducible and two releases diff cleanly,
-   and the protection is simply not publishing the registry. `verify_anon.py`
+   the distinct values, so output is reproducible, and the protection is simply
+   not publishing the registry. Two releases diff cleanly **only if the set of
+   input files is identical**, because the ids are positions in a sorted list of
+   whatever that invocation saw. Adding one file to the invocation renumbered
+   **150 of the 153** addresses present in both runs — **98.0%**. So pass every
+   file that will be published together in one command. See
+   `LIMITATIONS.md` and `ANON-OPEN-QUESTIONS.md:55`. `verify_anon.py`
    checks the published files alone, needs no secrets, and is therefore the check
    worth putting in a release script.
 
