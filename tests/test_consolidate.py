@@ -131,6 +131,10 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(consolidate, "CORPUS", tmp_path)
     monkeypatch.setattr(consolidate, "OUT", out)
     monkeypatch.setattr(consolidate, "DB", tmp_path / "ctp.duckdb")
+    # STATE is derived from CORPUS at import, so patching CORPUS alone leaves it
+    # pointing at the real repo's state/ directory. A test that probes or creates
+    # a lock there would touch a live run's bookkeeping.
+    monkeypatch.setattr(consolidate, "STATE", tmp_path / "state")
     return SimpleNamespace(root=tmp_path, out=out)
 
 
@@ -196,13 +200,36 @@ def test_project_rows_classifies_all_four_states(sandbox):
         "queued\thttps://q.git\tcommunity\t\\.[ch]$\tS")
     make_project(sandbox.out, "done", stamp="rows=7\nbytes=8\n", parquet=True)
     make_project(sandbox.out, "failed")
-    lockfile = make_project(sandbox.out, "running") / ".lock"
+    make_project(sandbox.out, "running")
+    # The lock lives in ctp.py's state directory, NOT in the work directory.
+    # This test used to create it inside the workdir, which made it agree with
+    # the bug it was supposed to catch: consolidate.py probed the same wrong
+    # path, so RUNNING never fired against a real run.
+    lockdir = consolidate.STATE / "running"
+    lockdir.mkdir(parents=True, exist_ok=True)
 
-    with held_lock(lockfile):
+    with held_lock(lockdir / ".lock"):
         states = {r[0]: r[4] for r in consolidate.project_rows()}
 
     assert states == dict(done="DONE", running="RUNNING",
                           failed="FAILED", queued="QUEUED")
+
+
+def test_project_rows_ignores_a_stale_lock_left_in_the_work_directory(sandbox):
+    """A lock inside the workdir must not be believed.
+
+    run_pipeline_process.sh deletes the work directory at FROM_STEP=1 and again
+    from its EXIT trap, so a lock kept there is unreliable by construction. ctp.py
+    therefore locks state/<name>/.lock. A workdir lock is either a leftover or a
+    different tool's file, and reading it as RUNNING hides a FAILED project.
+    """
+    write_manifest(sandbox.root, "proj\thttps://p.git\tcommunity\t\\.[ch]$\tS")
+    workdir = make_project(sandbox.out, "proj")
+
+    with held_lock(workdir / ".lock"):
+        states = {r[0]: r[4] for r in consolidate.project_rows()}
+
+    assert states == {"proj": "FAILED"}
 
 
 def test_project_rows_skips_comments_and_blank_lines(sandbox):

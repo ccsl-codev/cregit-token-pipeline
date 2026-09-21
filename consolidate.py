@@ -87,6 +87,11 @@ _cfg.read(CORPUS / "pipeline.cfg")
 OUT = (CORPUS / Path(_cfg.get("paths", "output_dir",
        fallback="../cregit-workspace/corpus-files")).expanduser()).resolve()
 DB = CORPUS / "ctp.duckdb"
+# ctp.py's own directory per project, holding the lock and the logs. It is
+# deliberately NOT inside the work directory, because run_pipeline_process.sh
+# deletes the work directory at FROM_STEP=1 and again from its EXIT trap, which
+# would take the lock with it. This must stay in step with ctp.py's state_dir().
+STATE = CORPUS / "state"
 
 # The run set: what was actually run, so what the index can describe.
 CORPUS_MANIFESTS = ("manifest.phase1-sm.tsv", "manifest.linux.tsv")
@@ -201,7 +206,7 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list:
             validated = stamp.exists()
             if validated:
                 state = "DONE"
-            elif lock_held(workdir / ".lock"):
+            elif lock_held(STATE / name / ".lock"):
                 state = "RUNNING"
             elif workdir.exists():
                 state = "FAILED"
