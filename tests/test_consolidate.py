@@ -215,6 +215,35 @@ def test_project_rows_classifies_all_four_states(sandbox):
                           failed="FAILED", queued="QUEUED")
 
 
+def test_the_liveness_probe_never_writes_to_the_lock_file(sandbox):
+    """A probe must not modify what it observes.
+
+    `lock_held` used to open the lock "w", which truncates. Rebuilding the index
+    therefore truncated the lock file of a RUNNING job. It was harmless only
+    because nothing writes content to that file — a latent bug, not a safe design.
+    """
+    lockdir = consolidate.STATE / "proj"
+    lockdir.mkdir(parents=True, exist_ok=True)
+    lockfile = lockdir / ".lock"
+    lockfile.write_text("sentinel content\n")
+
+    assert consolidate.lock_held(lockfile) is False, "nobody holds it"
+    assert lockfile.read_text() == "sentinel content\n", "the probe truncated it"
+
+
+def test_an_unreadable_lock_file_counts_as_held(sandbox):
+    """Refusing to guess is the safe answer to 'is a run in flight'."""
+    lockdir = consolidate.STATE / "proj"
+    lockdir.mkdir(parents=True, exist_ok=True)
+    lockfile = lockdir / ".lock"
+    lockfile.write_text("")
+    lockfile.chmod(0o000)
+    try:
+        assert consolidate.lock_held(lockfile) is True
+    finally:
+        lockfile.chmod(0o600)
+
+
 def test_project_rows_ignores_a_stale_lock_left_in_the_work_directory(sandbox):
     """A lock inside the workdir must not be believed.
 

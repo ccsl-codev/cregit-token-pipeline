@@ -120,9 +120,27 @@ PUBLICATION_EXCLUSIONS = {
 
 
 def lock_held(lockfile: Path) -> bool:
+    """True when another process holds this project's flock.
+
+    Opened "r", not "w". A probe must not write to the thing it observes, and
+    "w" truncates on open — so this function used to truncate the lock file of a
+    RUNNING job every time the index was rebuilt. Harmless in practice only
+    because ctp.py also opens the lock "w" and never writes a byte to it, so
+    there was nothing to lose. flock works on a read-only descriptor.
+
+    `retain.py` carries the same predicate with the same "r" fix; `ctp.py`'s
+    `_lock_held` still opens "w". Keep the three in step.
+
+    An unreadable lock file returns True: refusing to guess is the safe answer
+    when the question is "is a run in flight".
+    """
     if not lockfile.exists():
         return False
-    with lockfile.open("w") as f:
+    try:
+        f = lockfile.open("r")
+    except OSError:
+        return True
+    with f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return False
