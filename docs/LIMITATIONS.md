@@ -127,8 +127,8 @@ reading, rather than un-shifting a field.
 
 **Publishing the Parquet as it stands publishes contributors' e-mail addresses.**
 `person_email` (column 50) is a real address. `anonymize_parquet.py` is the
-release path: it rewrites the e-mail local part to `author_NNNN` and names to
-`Author N`, running every identity string — including each element of the 15
+release path: it rewrites the e-mail local part to `author_<token>` and names to
+`Author <token>`, running every identity string — including each element of the 15
 trailer arrays — through one registry, so a person carries one pseudonym
 everywhere. It classifies **every** input column into pass-through, transform or
 drop and raises on a column it does not recognise, so a schema change stops it
@@ -138,30 +138,90 @@ unchanged, and `count(distinct person_email)` and `count(distinct person_name)`
 must not drop — two real people collapsing onto one pseudonym would lower a
 distinct-contributor count for free.
 
-Two properties to plan a release around. There is **no salt and no key**: ids are
-assigned by sorting the distinct lowercased values, so two runs over the same
-inputs are byte-identical and two releases diff cleanly, but the only thing
-protecting the mapping is not publishing the registry. And the registry spans
-**one invocation**, so pseudonyms are not stable across runs with different input
-sets — pass every file that will be published together in a single command.
+**A pseudonym is a salted keyed hash, and the salt is a secret you now have to
+keep.** The token is `blake2b(space || NUL || lowercased value, key = salt)` taken
+to 14 lowercase hex characters. Four consequences to plan a release around:
 
-Measured, so nobody has to guess how large that effect is: adding a single file to
-the invocation renumbered **150 of the 153** addresses that appeared in both runs,
-which is **98.0%**. Determinism and stability are not the same property here. The
-output is deterministic for a fixed input set, and it is not stable when that set
-changes. A release that adds one project therefore renumbers almost every
-pseudonym, and a reader cannot track one contributor across two such releases.
+* **Pseudonyms are stable across releases.** The token is a function of the value
+  and the salt, not of the set of files in the invocation, so a release that adds
+  or drops a project renumbers nobody and two releases diff cleanly. A reader can
+  follow one contributor from one release to the next. It remains true that
+  passing every file that will be published together in one command is the right
+  habit — but now only because it lets the leak scan cross-check them, not
+  because the pseudonyms depend on it.
+* **The salt must exist, must be kept, and must never be committed.** It is read
+  from `--salt-file`, `$CTP_ANON_SALT_FILE`, `$CTP_ANON_SALT` or
+  `~/.config/cregit-token-pipeline/anon-salt`, in that order. A missing salt, or
+  one under 32 bytes, exits **2** and prints the remedy; nothing ever generates
+  one, because a salt generated per run would renumber everybody on every run and
+  nothing in the output would say so. `.gitignore` carries salt patterns as a
+  second line of defence. **Losing the salt is unrecoverable**: no future release
+  can be linked to a published one. Back it up wherever the release is backed up.
+* **Rotating the salt renumbers everybody.** That is the cost and it is the whole
+  cost. Rotate only on a suspected leak or a pseudonym collision, and expect the
+  next release to be unlinkable to every release before it.
+* **A collision fails the run.** 14 hex characters is 56 bits. At 28,339 distinct
+  addresses that is n(n−1)/2 = 401,535,291 pairs over 2^56, a probability of
+  about **5.6 × 10⁻⁹**. If it ever happens the run raises `CollisionError` and
+  stops, rather than merging two contributors and silently lowering the
+  distinct-person count.
+
+**The reverse mapping is never published.** Real value → pseudonym exists in
+memory for the length of one run and is written nowhere; the `--report` JSON
+carries counts and shapes only. So the release is **not** reversible from public
+inputs. That is a change of kind, not of degree: under the superseded sequential
+scheme the mapping was a pure function of the input values, and the inputs derive
+from *public* GitHub repositories, so anyone who could rebuild the same file set
+could rebuild the whole mapping with no salt, no key and no leaked file. The
+honest reading of the salted scheme is narrower than "anonymous": an adversary who
+obtains the salt can still rebuild the mapping by hashing candidate addresses, and
+that leak would be silent. The salt, not the hash, is the protection.
+
+**Why this replaced sequential ids, and what the 98.0% figure now means.** Until
+this change an id was the ordinal position of a value in the sorted distinct set
+of one invocation. Determinism and stability are not the same property, and that
+scheme had only the first: output was deterministic for a fixed input set and was
+not stable when the set changed. Measured over six corpus Parquets, dropping one
+file from the invocation renumbered **150 of the 153** addresses that appeared in
+both runs — **98.0%**. A release that added one project renumbered almost every
+pseudonym, and a reader could not track one contributor across two such releases.
+That is the measured reason the salted hash was adopted. **It describes the
+superseded design, not the shipped one**: the same experiment now renumbers
+**0 of 153 — 0.0%**, and the five shared output Parquets come out byte-identical
+between a five-file and a six-file release.
 
 Run `verify_anon.py` over the output directory as an independent check: it tests
-the published files alone for any e-mail local part that is not a pseudonym, needs
-no secrets, and so can be run by a reviewer or a depositor. It is a necessary,
-not a sufficient, condition. Two residual risks survive
+the published files alone for any e-mail local part that is not a pseudonym,
+**needs no salt and no secret**, and so can be run by a reviewer or a depositor.
+Moving to a hash cost it one widening, `author_\d+` to `author_[0-9a-f]+`; a
+release made under either scheme still passes it. It is a necessary, not a
+sufficient, condition. Two residual risks survive
 anonymization by design and must be disclosed by any analysis: the e-mail
 **domain is preserved on purpose** (it is the firm signal), so a sole contributor
-at a rare or vanity domain is re-identifiable; and `owner`/`repo_name`/
-`clone_url` carry the GitHub namespace, which for a personal repository is a
+at a rare or vanity domain is re-identifiable — see the next paragraph for how
+large that tail is; and `owner`/`repo_name`/`clone_url` carry the GitHub
+namespace, which for a personal repository is a
 person's handle. `source_text` and `token_value` are source code and are not
 scrubbed, so copyright headers and `@author` tags pass through.
+
+**84.7% of published domains have exactly one contributor, and this release ships
+anyway.** Measured over all 186 conforming corpus files and 28,339 distinct
+addresses: **5,276 of 6,228** `person_domain` groups hold exactly one distinct
+address. An earlier three-file sample gave 33 of 38 and hedged that the ratio was
+"inflated by the small sample". It was not — the ratio did not fall with scale.
+The project's position, stated plainly so a reader is not left to infer it: the
+corpus is mostly **small samples**, and a small sample is itself composed of
+single-contributor projects, so a large single-contributor tail is what this
+corpus is, not an artefact to be corrected. The domain is published because firm
+attribution resolves from it and because a domain is not personal data; the
+pseudonym protects the local part and nothing protects the pairing of a rare
+domain with a repository. **No k-anonymity work is being done**, now or planned:
+suppressing or generalising domains below a threshold would remove exactly the
+long tail of small firms the corporate-truck-factor question is about. This is
+therefore a **disclosed limitation, not a mitigation**. Any paper using this
+output must carry the 84.7% figure and say that a sole contributor at a rare or
+vanity domain (`gutwin.org`, `guerra.sh`, `haamer.ee`, `lukapeschke.com`,
+`push-f.com`) is re-identifiable from the published file alone.
 
 **Every `.h` file in the corpus was parsed with the C grammar.** The tokenizer's
 language table maps `h` to `C`, so C++ declared in a `.h` header — extremely
@@ -262,12 +322,57 @@ split otherwise-identical values in a `GROUP BY`.
 says so.** `.ixx`, `.inl`, `.cppm`, `.cxxm` and `.ipp` are left out of the mask
 because srcML 1.1.0 does not recognise them, ignores `-l C++`, and then writes an
 **empty token file and exits 0** — a silent success. Autotools input (`.am`,
-`.ac`, 1.4 MB across 22 projects) is left out because the m4 tokenizer's lexer
-uses a backtick as its closing quote, so an apostrophe swallows text to the next
-backtick. C++ module and inline-implementation files and autotools source are
-therefore absent from the dataset with nothing in a Parquet to indicate the
-absence. `tests/test_mask_drift.py` holds the extension list to the tokenizer's
-own language table, so adding an extension without probing it is caught.
+`.ac`, `.m4`) is left out for the measured reasons in the next paragraph. C++
+module and inline-implementation files and autotools source are therefore absent
+from the dataset with nothing in a Parquet to indicate the absence.
+`tests/test_mask_drift.py` holds the extension list to the tokenizer's own
+language table, so adding an extension without probing it is caught.
+
+**M4 / autotools input stays out of the mask. Ratified, with the measurement.**
+The decision was taken against numbers, not against a preference, and the numbers
+are these. Driving `generate_dataset.py`'s own `SourceReader` and
+`classify_and_skip` over the m4 token streams of all 525 routed m4 files in the
+corpus, **98,265 of 279,031 tokens — 35.2% — reconstruct the wrong source text**,
+against **0 of 10 for the srcML C baseline**. `source_line` and `source_col` are
+wrong from the first bad token to the end of the file. Root cause, one line:
+`m4Tokenizer/m4.py:192-194` strips the quote delimiters out of every `string`
+token value where the srcML path keeps them, so the consumer consumes two
+characters too few per string token and never re-aligns. This is the **same
+corruption class as the shipped Rust defect**, arriving through a different door.
+
+**State this plainly so the verdict is not mistaken for a framing failure: the
+framing test PASSED.** Under the real pipeline flags the m4 route is pipe-framed
+and agrees with the srcML path; the tab-framed branch in `m4.py:311` is dead, and
+`--position` is not even a valid option there. The exclusion rests on the 35.2%
+desynchronization, which is a stronger and different measurement.
+
+Three further faults found by the same sweep, and one blocker:
+
+* `m4.py:105-106` sets the closing quote to a backtick, so a backtick opens a
+  string that runs to the next backtick anywhere in the file. 749 multi-line
+  records in 6 files across 5 projects are rejected outright by the consumer's
+  regex. Setting it to an apostrophe is not the fix — shell backticks in
+  `Makefile.am` then never close.
+* `m4.py:183` has a bare `next()` inside a generator, which raises
+  `RuntimeError: generator raised StopIteration` on an unterminated string at
+  EOF. **2 of 525 files die outright** (`erikd__libsndfile`,
+  `java-native-access__jna`), taking their projects down at step 2.
+* `.m4` has **no dispatch route in the mask at all** — it is absent from
+  `%EXT_LANG`, and `tokenizeByBlobId/tokenBySha.pl:96-98` dies with
+  `unknown file extension` on the first `.m4` blob. Widening the mask to
+  `\.m4$` without also adding `'m4' => 'M4'` would kill every affected project.
+  This matters because `.m4` is the *largest* body of m4 in the corpus: 514 files
+  and 4.38 MB, against 525 files and 1.64 MB for the routable `.ac`/`.am`.
+
+One correction to the figure this document previously carried: the routable
+autotools population is **1.64 MB across 525 files in 25 projects**, not 1.4 MB
+across 22. The 22 is the `.ac`-only project count. Including `.m4` as well would
+make it 1,039 files and 6.02 MB, and would cost 38,017 historical blobs of
+re-tokenization, because a mask change invalidates the recorded mask string and
+restarts each project rather than resuming it.
+
+Full evidence, including the per-project breakdown and every reproduction script:
+`/local/home/ellianco/tmp/m4-probe/m4-decision.md`.
 
 **Runs are not pinned to a commit.** The manifest carries exactly five fields and
 three parsers plus four tests assert their positions, so the planned

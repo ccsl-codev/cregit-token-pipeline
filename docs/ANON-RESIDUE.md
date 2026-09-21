@@ -140,7 +140,9 @@ values containing `@`, and all 7 are the scrubbed `author@domain` form that
 `anon_summary` writes; none is a real address.
 
 **2. A name-shaped string in a footer: 0.** All 47,001 footer text elements match
-`Author NNNN <author_NNNN@realdomain>`.
+`Author <token> <author_<token>@realdomain>`. The measurement predates the salted
+hash, when the token was a zero-padded sequence number; the shape is unchanged and
+the count was re-confirmed after the change.
 
 **3. A name-shaped string in `commit_summary`: 1.** See below. It is a false
 positive, and it currently fails the release.
@@ -197,6 +199,18 @@ devenv shell -- bash -c 'cd <this repo> &&
   python verify_anon.py OUTDIR'
 ```
 
+`anonymize_parquet.py` now needs the private salt and exits 2 without one; see
+`docs/DESIGN.md` §7 item 6. `verify_anon.py` still needs no secret.
+
 Measured results of those two commands over the six files above: the anonymizer
 exits 1 with the single `commit_summary` residue named; `verify_anon.py` exits 0
 over 158,145 distinct strings with 0 failures and 20 content-column notes.
+
+Re-measured after the salted hash, with `--null-commit-summary` so the one known
+`commit_summary` false positive does not mask the comparison: identical row
+counts, identical column counts, identical `firm` / `person_domain` / `repo_name`
+group counts and no invariance drift on all six files, 350,823 rows in and out;
+`verify_anon.py` exits 0 over **156,977** distinct strings with 0 failures and 20
+content-column notes, against the same 156,977 / 0 / 20 for the pre-change output
+of the identical invocation. The distinct-string count differs from the 158,145
+above only because `--null-commit-summary` removes 1,168 subject lines.

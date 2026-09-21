@@ -1,7 +1,27 @@
 # Anonymization: open decisions for the partner
 
-Three questions the release needs answered. None is decided here. Each carries a
-measured consequence rather than an opinion.
+Three questions the release needs answered. Each carries a measured consequence
+rather than an opinion.
+
+> **Status.** Questions 1 and 3 have since been ANSWERED and the answers are
+> implemented; the text below is preserved as the record of the choice, so the
+> measurements that drove it are not lost. Question 2 is still open.
+>
+> * **Question 1 — answered: Option B, the salted stable hash.** Implemented in
+>   `anonymize_parquet.py`. The salt is held privately outside the repository and
+>   the reverse map is never published. The 98.0% renumbering below is now the
+>   measured behaviour of the **superseded** design; re-run after the change, the
+>   same experiment renumbers **0 of 153 — 0.0%**. The "correction to the brief"
+>   section and the greps in it describe the state of the checkout *before* that
+>   change: `docs/DESIGN.md` and `docs/LIMITATIONS.md` no longer say "no salt and
+>   no key", and they now describe the hash, the private salt and the unpublished
+>   reverse map. See `docs/DESIGN.md` §7 item 6.
+> * **Question 3 — answered: publish with disclosure.** The 84.7% single-address
+>   domain tail is stated in `docs/LIMITATIONS.md` with the project's reasoning,
+>   and no k-anonymity work is planned. The docstring hedge has been corrected.
+> * **Question 2 — still open.** `commit_summary` still fails the release on the
+>   single `github` false positive, and `--null-commit-summary` is still the only
+>   remedy the tool offers.
 
 ## First, a correction to the brief
 
