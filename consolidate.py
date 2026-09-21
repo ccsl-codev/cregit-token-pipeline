@@ -48,6 +48,17 @@ but leaves the index disagreeing with itself. Such a project is therefore
 flagged parquet_missing = true, counted, and named in the printed summary, so
 `select name from projects where parquet_missing` finds it.
 
+PUBLICATION EXCLUSIONS. A project can be validly drawn, run, and validated, and
+still not belong in the published dataset. The near-duplicate fork pair is the
+case that forced this: two Tencent repos share 505,056 of their ~507,000 source
+blobs and 134,715 commits, so publishing both counts the same authorship twice.
+Deleting the manifest row would hide the decision and break the sampling record,
+so the row stays and the project is named in PUBLICATION_EXCLUSIONS with its
+reason. The effect is the schema gate's: the parquet is left out of the tokens
+view, the project keeps its row in `projects`, and the reason is recorded in
+`excluded_because` and printed. `select name, excluded_because from projects
+where excluded_because is not null` is the audit query.
+
 One unusable stamp never aborts the rebuild. A stamp whose rows= value is not
 an integer leaves token_rows null, is flagged rows_unreadable = true, is
 reported by name and by value, and makes the exit status non-zero once every
@@ -86,8 +97,21 @@ FALLBACK_MANIFEST = "manifest.tsv"
 PROJECTS_DDL = (
     "create or replace table projects (name text primary key, url text, "
     "category text, size_class text, state text, token_rows bigint, "
-    "parquet_path text, rows_unreadable boolean, parquet_missing boolean)")
-PROJECTS_INSERT = "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "parquet_path text, rows_unreadable boolean, parquet_missing boolean, "
+    "excluded_because text)")
+PROJECTS_INSERT = "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+# Projects run and validated, but deliberately not published. Name -> reason.
+# See PUBLICATION EXCLUSIONS in the module docstring, and docs/LIMITATIONS.md
+# for the measurements behind each entry.
+PUBLICATION_EXCLUSIONS = {
+    "tencent__tendbcluster-tendb":
+        "near-duplicate of tencent__tendbcluster-tdbctl: 505,056 shared source "
+        "blobs (99.66% of its own) and 134,715 shared commits (99.91%). tdbctl "
+        "is kept because it holds 4.9x more first-party authorship once "
+        "vendored directories are excluded (202,331 vs 41,571 tokens) and has "
+        "30 unique first-party files at HEAD against 0 for tendb.",
+}
 
 
 def lock_held(lockfile: Path) -> bool:
@@ -143,7 +167,7 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list:
     """One tuple per manifest row, shaped like the projects table:
 
     (name, url, category, size_class, state, token_rows, parquet_path,
-     rows_unreadable, parquet_missing)
+     rows_unreadable, parquet_missing, excluded_because)
 
     `manifests` is the list to index, so a caller — main(), or a test — decides
     which manifests are ground truth instead of this function deciding for it.
@@ -200,7 +224,8 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list:
             has_parquet = parquet.exists()
             rows.append((name, url, category, size_class, state, n_rows,
                          str(parquet) if has_parquet else None,
-                         rows_unreadable, validated and not has_parquet))
+                         rows_unreadable, validated and not has_parquet,
+                         PUBLICATION_EXCLUSIONS.get(name)))
     return rows
 
 
@@ -262,7 +287,10 @@ def main(argv: Sequence[str] = ()) -> None:
     con.execute(f"""create or replace table phase_metrics as
         select * from read_csv('{CORPUS / 'metrics.tsv'}', delim='\t', header=true)""")
 
-    validated = [p[6] for p in projects if p[4] == "DONE" and p[6]]
+    # p[9] is excluded_because: a deliberate publication exclusion keeps its
+    # projects row but contributes no tokens.
+    validated = [p[6] for p in projects
+                 if p[4] == "DONE" and p[6] and not p[9]]
     usable, drifted, unread = schema_split(validated)
     if usable:
         files = ", ".join(sql_literal(f) for f in usable)
@@ -293,6 +321,13 @@ def main(argv: Sequence[str] = ()) -> None:
         print(f"  ! schema not read for {len(unread)} of {len(validated)} "
               f"parquet(s) ({named}): left in the tokens view, "
               "run validate_schema.py on them", file=sys.stderr)
+
+    excluded = [(p[0], p[9]) for p in projects if p[9]]
+    if excluded:
+        print(f"  publication exclusions: {len(excluded)} "
+              "(row kept in projects, left out of the tokens view)")
+        for name, why in excluded:
+            print(f"    - {name}: {why}")
 
     no_parquet = [p[0] for p in projects if p[8]]
     if no_parquet:

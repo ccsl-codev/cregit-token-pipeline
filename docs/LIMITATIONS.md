@@ -26,13 +26,55 @@ both measured:
   that no counter records. So even with 53 exclusions the project would publish with
   seven production files silently contributing nothing.
 
-The project is excluded rather than published with gaps it cannot report. The corpus
-is therefore **186 published of 187 in scope**, and the row stays in the manifest with
-its reason so the sampling record remains complete.
+The project is excluded rather than published with gaps it cannot report. The row stays
+in the manifest with its reason so the sampling record remains complete.
+
+**A second project is excluded as a near-duplicate: `tencent__tendbcluster-tendb`.**
+The sampling frame drew both halves of one fork pair. The two repos share **505,056
+source blobs** — 99.66% of tendb's own and 99.54% of tdbctl's — and **134,715 commits**,
+99.91% of tendb's. Publishing both would count the same authorship twice.
+
+`tencent__tendbcluster-tdbctl` is kept, and the file count argues the other way. tendb
+has 31,139 files at HEAD against tdbctl's 7,212, but **every one of its 24,611 unique
+paths is third-party code**: 11,321 files of Oracle's `mysql-test/suite`, 8,326 of
+Oracle's `storage/ndb`, 1,616 of Facebook's RocksDB. Exclude the vendored directories
+and the test suite, and tendb has **zero** unique first-party files while tdbctl has
+**30** — the `sql/tc_*.cc` cluster-routing, DDL, monitoring and XA-repair sources its
+README advertises. On tokens, with vendored directories excluded, tdbctl carries
+**202,331** Tencent-authored tokens (2.20%) against tendb's **41,571** (0.43%): 4.9x
+more first-party authorship in a tree 40% smaller. tdbctl also still receives commits
+(HEAD 2026-05) and already contains 134,715 of tendb's 134,827 commits.
+
+The exclusion is declared in `consolidate.py`'s `PUBLICATION_EXCLUSIONS`, so the row
+stays in `projects` with its reason in `excluded_because` and only the tokens are
+withheld. Audit it with
+`select name, excluded_because from projects where excluded_because is not null`.
+
+With both exclusions the corpus is **185 published of 186 in scope**. The one further
+gap is `torvalds__linux`, which has no Parquet yet.
+
+**A vendored dependency attributes its whole library to the engineer who imported
+it.** cregit credits the commit that introduced a line, so a wholesale vendor drop
+credits the importing author with every token of third-party code. This is a
+property of token-level blame, not a pipeline defect, and it is large enough to
+invert a reading of the data. Measured on the fork pair above: **98.3%** of
+`tendb`'s 2,446,834 Tencent-attributed tokens sit in `storage/rocksdb/`, which is
+95.33% Tencent-attributed, and its single largest file is
+`third-party/gtest-1.7.0/fused-src/gtest/gtest.h` at **148,729 tokens** — Google's
+code. The published `tdbctl` carries the same artifact on a smaller scale:
+**336,501** of its 574,465 Tencent tokens are the `extra/ncurses-5.7/` drop, which
+is 100% Tencent-attributed. `storage/ndb`, 4.22 M tokens, is 0.00% Tencent.
+
+Any per-organisation or per-author aggregate over a project that vendors its
+dependencies is therefore an upper bound, not a measurement. Restrict such
+aggregates to non-vendored paths. No column in the dataset marks a path as
+vendored, so the consumer must supply that list.
 
 **The same crash mechanism reaches published data, and the corpus-wide count is
 36 files in 19 of the 186 published projects.** Measured 2026-09-20 over every
-published Parquet: **446,060** mask-selected regular files exist at HEAD and
+published Parquet, so the denominator is the 186 Parquets that existed then and
+predates the near-duplicate exclusion. Re-run it after the next consolidate to
+restate it over 185: **446,060** mask-selected regular files exist at HEAD and
 **36** of them have no row, which is **0.008%**. Every one of the 36 is a parser
 crash. No other cause contributes a single file, so the residual is zero. The
 largest single project loss is `sumatrapdfreader__sumatrapdf` with 7, including
@@ -187,9 +229,12 @@ never tokenized. There are **354** of them at HEAD, **331** in `powerdns__pdns`
 alone. Any completeness check must read the git mode, not the file name.
 
 **Two of the 188 run-set projects have no Parquet:** `tencent__tencentkona-21`
-and `torvalds__linux`. 186 do, all conforming to the 70-column contract. Verify
-with `validate_schema.py` over the output directory rather than assuming a
-project is present.
+and `torvalds__linux`. 186 Parquets exist, all conforming to the 70-column
+contract, and **185 of them are published** — `tencent__tendbcluster-tendb` has a
+conforming Parquet that is withheld as a near-duplicate (§ above). Verify with
+`validate_schema.py` over the output directory rather than assuming a project is
+present, and read published membership from `projects.excluded_because` rather
+than from the presence of a file.
 
 **`firm` is empty on rows with no attribution and ambiguous on the rest.** A
 project only carries firm attribution if it was generated with `--firm-map`;

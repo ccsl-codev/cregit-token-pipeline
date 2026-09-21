@@ -54,6 +54,14 @@ of the 200. The other 12 L-class projects are held back on disk grounds (one
 L-class working directory measured 435 GB). Run them from
 `manifest.sample.tsv` once retention has a Parquet-only level.
 
+**The published set is smaller than the run set: 185 of the 188.** Two projects are
+excluded on purpose and one is still running. `tencent__tencentkona-21` cannot be
+parsed completely and `tencent__tendbcluster-tendb` is a near-duplicate of
+`tencent__tendbcluster-tdbctl`; both keep their manifest row and their `projects`
+row, and `consolidate.py` records the reason in `excluded_because`. Read published
+membership from that column, never from the presence of a Parquet file.
+`docs/LIMITATIONS.md` holds the measurements.
+
 How a project gets its `stratum` is `docs/CODEBOOK.md`. It is a claim about who
 *controls* a project and never about who contributes to it.
 
@@ -424,6 +432,8 @@ analysing the data. The ones most likely to change a result:
 | every `.h` file was parsed with the C grammar | every header |
 | runs are not pinned to a commit | byte-for-byte reproduction |
 | 2 of the 188 run-set projects have no Parquet | corpus totals |
+| 185 of the 188 are published; read `excluded_because`, not file presence | corpus totals, per-org aggregates |
+| a vendored dependency credits its whole library to the importing author | any per-org or per-author aggregate |
 
 ---
 
