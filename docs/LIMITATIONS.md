@@ -198,6 +198,17 @@ at a rare or vanity domain is re-identifiable; and `owner`/`repo_name`/
 person's handle. `source_text` and `token_value` are source code and are not
 scrubbed, so copyright headers and `@author` tags pass through.
 
+**84.7% of the corpus's `person_domain` values carry exactly one contributor, and
+the project publishes anyway.** Combined with the preserved domain above, a
+single-contributor domain narrows a pseudonym to one identifiable person whenever
+the domain is rare or personal. This is stated as the project's position, not as a
+mitigation: the corpus is drawn largely from small projects, and small projects are
+by their nature composed of single-contributor domains, so a threshold that
+suppressed them would remove the population the dataset exists to describe. The
+share is therefore disclosed rather than reduced. Any analysis that reports per-domain
+results must treat a single-contributor domain as identifying, and any re-publication
+that cannot accept that should aggregate domains before release.
+
 **Every `.h` file in the corpus was parsed with the C grammar.** The tokenizer's
 language table maps `h` to `C`, so C++ declared in a `.h` header — extremely
 common — is tokenized as C. The table also has only lowercase keys and both gates
