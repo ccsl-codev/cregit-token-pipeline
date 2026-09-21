@@ -12,12 +12,19 @@ this tool loudly, which is the property the whole module exists to provide.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import anonymize_parquet as A
 import validate_schema
 
 CONTRACT = [c for c, _ in validate_schema.EXPECTED_COLUMNS]
+
+# A salt for the tests only. 40 bytes, over the 32-byte floor. It is a literal
+# here on purpose: every test that produces a pseudonym has to say which key made
+# it, or the test is not reproducible.
+TEST_SALT = b"test-salt-not-the-release-salt-0123456789"
 
 
 # --------------------------------------------------------------------------
@@ -206,9 +213,11 @@ def test_trailing_carriage_return_still_parses():
 # The registry
 # --------------------------------------------------------------------------
 
-def build(emails=(), names=(), footers=(), derived=None, domains=()):
+def build(emails=(), names=(), footers=(), derived=None, domains=(),
+          salt=TEST_SALT):
     return A.build_registry(set(emails), set(names), set(footers),
-                            derived or {}, extra_domains=set(domains))
+                            derived or {}, extra_domains=set(domains),
+                            salt=salt)
 
 
 def test_one_person_gets_one_pseudonym_in_footer_and_in_person_name():
@@ -265,10 +274,269 @@ def test_registry_is_deterministic():
     assert a.names == b.names
 
 
-def test_pseudonym_formats_are_zero_padded_and_distinct_per_space():
-    assert A.pseudo_email_local(42) == "author_0042"
-    assert A.pseudo_name(42) == "Author 0042"
-    assert A.pseudo_personid(42) == "author 0042"
+def test_pseudonym_formats_are_distinct_per_space():
+    tok = "0123456789abcd"
+    assert A.pseudo_email_local(tok) == "author_0123456789abcd"
+    assert A.pseudo_name(tok) == "Author 0123456789abcd"
+    assert A.pseudo_personid(tok) == "author 0123456789abcd"
+
+
+# --------------------------------------------------------------------------
+# The salted stable hash. THE headline property: a pseudonym depends on the
+# value and the salt, and on nothing else -- not on what else was in the run.
+# --------------------------------------------------------------------------
+
+def test_adding_values_to_the_set_renumbers_nobody():
+    """The 98.0% renumbering of the superseded sequential scheme, gone.
+
+    Measured on six corpus Parquets before this change: dropping one file from a
+    six-file invocation moved 150 of the 153 addresses present in both runs --
+    98.0%. The cause was that ids came from the ordinal position of a value in
+    the sorted distinct set, so inserting one value shifted everything after it.
+    Here the rate must be exactly zero, for any addition.
+    """
+    small_e = [f"m{i:03d}@mcorp.example" for i in range(40)]
+    small_n = [f"M{i:03d} Person" for i in range(40)]
+    # The worst case for the sequential scheme: every added value sorts BEFORE
+    # every existing one, so every existing ordinal moves.
+    added_e = [f"a{i:03d}@acorp.example" for i in range(40)]
+    added_n = [f"A{i:03d} Person" for i in range(40)]
+
+    small = build(emails=small_e, names=small_n)
+    large = build(emails=small_e + added_e, names=small_n + added_n)
+
+    for what, a, b in (("addresses", small.emails, large.emails),
+                       ("names", small.names, large.names)):
+        both = sorted(set(a) & set(b))
+        assert len(both) == 40, what
+        moved = [v for v in both if a[v] != b[v]]
+        rate = 100.0 * len(moved) / len(both)
+        assert moved == [], (
+            f"{what}: {len(moved)} of {len(both)} renumbered ({rate:.1f}%)")
+
+
+def test_dropping_values_from_the_set_renumbers_nobody():
+    """The other direction: a release that drops a project, not adds one."""
+    keep = [f"k{i:03d}@keep.example" for i in range(20)]
+    goes = [f"a{i:03d}@gone.example" for i in range(20)]
+    with_all = build(emails=keep + goes)
+    without = build(emails=keep)
+    assert [with_all.emails[v] for v in keep] == [without.emails[v] for v in keep]
+
+
+def test_a_pseudonym_is_a_function_of_the_value_and_the_salt_only():
+    one = build(emails=["alice@intel.com"])
+    two = build(emails=["alice@intel.com", "bob@intel.com", "zoe@intel.com"])
+    assert one.emails["alice@intel.com"] == two.emails["alice@intel.com"]
+
+
+def test_a_different_salt_gives_a_different_pseudonym():
+    """Otherwise the salt would be decoration and the map would be public."""
+    a = build(emails=["alice@intel.com"], salt=TEST_SALT)
+    b = build(emails=["alice@intel.com"], salt=b"a" * 32)
+    assert a.emails["alice@intel.com"] != b.emails["alice@intel.com"]
+
+
+def test_the_token_is_a_fixed_width_lowercase_hex_string():
+    reg = build(emails=["alice@intel.com"], names=["Alice Smith"])
+    for tok in list(reg.emails.values()) + list(reg.names.values()):
+        assert re.fullmatch(r"[0-9a-f]{%d}" % A.PSEUDO_HEX_LEN, tok), tok
+
+
+def test_the_two_id_spaces_are_domain_separated():
+    """The same string in the name space and the e-mail space must not collide.
+
+    They are separate id spaces by design (see Registry.__doc__), so the hash
+    input carries the space name. Without that, a personid that happens to equal
+    an address would render the same token in both, which silently links them.
+    """
+    key = A.derive_key(TEST_SALT)
+    same = "alice@intel.com"
+    assert A.pseudo_token(key, "email", same) != A.pseudo_token(key, "name", same)
+
+
+def test_a_token_collision_fails_the_run(monkeypatch):
+    """Truncation can in principle map two people to one pseudonym.
+
+    Two distinct addresses sharing a pseudonym would merge two people, drop the
+    distinct-person count and corrupt the headline metric. It must stop the run,
+    not be papered over, so this forces the collision.
+    """
+    monkeypatch.setattr(A, "pseudo_token",
+                        lambda key, space, value: "f" * A.PSEUDO_HEX_LEN)
+    with pytest.raises(A.CollisionError) as e:
+        build(emails=["alice@intel.com", "bob@intel.com"])
+    assert "alice@intel.com" in str(e.value) or "bob@intel.com" in str(e.value)
+
+
+def test_a_collision_inside_one_space_only_is_still_fatal(monkeypatch):
+    """A name/e-mail pair sharing a token is fine; two names sharing one is not."""
+    monkeypatch.setattr(
+        A, "pseudo_token",
+        lambda key, space, value: ("a" if space == "email" else "b")
+        * A.PSEUDO_HEX_LEN)
+    build(emails=["alice@intel.com"], names=["Alice Smith"])      # no collision
+    with pytest.raises(A.CollisionError):
+        build(names=["Alice Smith", "Bob Jones"])
+
+
+# --------------------------------------------------------------------------
+# Salt custody. The tool must fail loudly rather than invent a salt: a fresh
+# salt per run is the worst possible outcome -- it renumbers EVERY pseudonym on
+# EVERY run, silently.
+# --------------------------------------------------------------------------
+
+def test_a_missing_salt_fails_loudly(tmp_path, monkeypatch):
+    monkeypatch.delenv(A.SALT_ENV, raising=False)
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(tmp_path / "absent"))
+    with pytest.raises(A.SaltError) as e:
+        A.load_salt()
+    assert "absent" in str(e.value)
+
+
+def test_a_named_but_missing_salt_file_does_not_fall_back(tmp_path, monkeypatch):
+    """An explicitly named source that is absent must NOT reach the next one.
+
+    Falling through would hash with a key the operator did not ask for. Every
+    pseudonym in the release would change and the run would still exit 0 -- the
+    silent instability this whole scheme exists to remove. The default location
+    exists on a developer's machine, so the fall-through would be the normal case,
+    not an edge one.
+    """
+    default = tmp_path / "default-salt"
+    default.write_bytes(b"d" * 40)
+    default.chmod(0o600)
+    monkeypatch.setattr(A, "DEFAULT_SALT_FILE", str(default))
+    monkeypatch.setenv(A.SALT_ENV, "e" * 40)
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(tmp_path / "absent"))
+    with pytest.raises(A.SaltError) as e:
+        A.load_salt()
+    assert "does not exist" in str(e.value)
+    # And the same for --salt-file, which outranks everything.
+    with pytest.raises(A.SaltError):
+        A.load_salt(str(tmp_path / "also-absent"))
+
+
+def test_a_missing_salt_creates_nothing(tmp_path, monkeypatch):
+    """Never generate. A generated salt is instability with no warning."""
+    monkeypatch.delenv(A.SALT_ENV, raising=False)
+    monkeypatch.delenv(A.SALT_FILE_ENV, raising=False)
+    monkeypatch.setattr(A, "DEFAULT_SALT_FILE", str(tmp_path / "nope"))
+    target = tmp_path / "absent"
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(target))
+    with pytest.raises(A.SaltError):
+        A.load_salt()
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_no_salt_source_at_all_fails_and_names_the_remedy(tmp_path, monkeypatch):
+    monkeypatch.delenv(A.SALT_ENV, raising=False)
+    monkeypatch.delenv(A.SALT_FILE_ENV, raising=False)
+    monkeypatch.setattr(A, "DEFAULT_SALT_FILE", str(tmp_path / "nope"))
+    with pytest.raises(A.SaltError) as e:
+        A.load_salt()
+    msg = str(e.value)
+    assert A.SALT_ENV in msg and A.SALT_FILE_ENV in msg
+    assert "urandom" in msg                      # how to make one, spelled out
+
+
+def test_a_short_salt_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv(A.SALT_ENV, "too-short")
+    monkeypatch.delenv(A.SALT_FILE_ENV, raising=False)
+    with pytest.raises(A.SaltError) as e:
+        A.load_salt()
+    assert str(A.MIN_SALT_BYTES) in str(e.value)
+
+
+def test_an_empty_salt_file_is_refused(tmp_path, monkeypatch):
+    p = tmp_path / "salt"
+    p.write_text("")
+    p.chmod(0o600)
+    monkeypatch.delenv(A.SALT_ENV, raising=False)
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(p))
+    with pytest.raises(A.SaltError):
+        A.load_salt()
+
+
+def test_a_salt_file_readable_by_others_is_refused(tmp_path, monkeypatch):
+    p = tmp_path / "salt"
+    p.write_bytes(b"x" * 40)
+    p.chmod(0o644)
+    monkeypatch.delenv(A.SALT_ENV, raising=False)
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(p))
+    with pytest.raises(A.SaltError) as e:
+        A.load_salt()
+    assert "600" in str(e.value)
+
+
+def test_a_salt_file_is_read_and_its_trailing_newline_ignored(tmp_path,
+                                                              monkeypatch):
+    """`printf ... > salt` and `echo ... > salt` must give the same key."""
+    bare, nl = tmp_path / "a", tmp_path / "b"
+    bare.write_bytes(b"x" * 40)
+    nl.write_bytes(b"x" * 40 + b"\n")
+    for p in (bare, nl):
+        p.chmod(0o600)
+    monkeypatch.delenv(A.SALT_ENV, raising=False)
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(bare))
+    first = A.load_salt()
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(nl))
+    assert A.load_salt() == first == b"x" * 40
+
+
+def test_an_explicit_path_beats_the_environment(tmp_path, monkeypatch):
+    chosen, ignored = tmp_path / "chosen", tmp_path / "ignored"
+    chosen.write_bytes(b"c" * 40)
+    ignored.write_bytes(b"i" * 40)
+    for p in (chosen, ignored):
+        p.chmod(0o600)
+    monkeypatch.setenv(A.SALT_ENV, "e" * 40)
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(ignored))
+    assert A.load_salt(str(chosen)) == b"c" * 40
+
+
+def test_the_salt_file_beats_the_inline_environment_variable(tmp_path,
+                                                             monkeypatch):
+    p = tmp_path / "salt"
+    p.write_bytes(b"f" * 40)
+    p.chmod(0o600)
+    monkeypatch.setenv(A.SALT_ENV, "e" * 40)
+    monkeypatch.setenv(A.SALT_FILE_ENV, str(p))
+    assert A.load_salt() == b"f" * 40
+
+
+def test_the_inline_environment_variable_works(monkeypatch):
+    monkeypatch.setenv(A.SALT_ENV, "e" * 40)
+    monkeypatch.delenv(A.SALT_FILE_ENV, raising=False)
+    assert A.load_salt() == b"e" * 40
+
+
+def test_the_cli_exits_two_and_writes_nothing_when_the_salt_is_absent(
+        tmp_path, monkeypatch, capsys):
+    """Exit 2 is "misuse", distinct from the 1 that means "found residue".
+
+    A release script has to be able to tell a missing secret from a dirty
+    dataset, and it must not see a traceback where it expected a status.
+    """
+    monkeypatch.delenv(A.SALT_ENV, raising=False)
+    monkeypatch.delenv(A.SALT_FILE_ENV, raising=False)
+    monkeypatch.setattr(A, "DEFAULT_SALT_FILE", str(tmp_path / "nope"))
+    outdir = tmp_path / "out"
+    rc = A.main([str(outdir), str(tmp_path / "in.parquet")])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "no anonymization salt" in err
+    assert "urandom" in err                      # the remedy, in the error
+    assert not outdir.exists()                   # nothing created, nothing read
+
+
+def test_a_long_salt_is_folded_rather_than_refused():
+    """blake2b keys stop at 64 bytes; a 100-byte salt must still work."""
+    long_salt = bytes(range(100)) * 2
+    assert len(A.derive_key(long_salt)) == 64
+    reg = build(emails=["alice@intel.com"], salt=long_salt)
+    assert len(reg.emails["alice@intel.com"]) == A.PSEUDO_HEX_LEN
 
 
 def test_preserved_domains_include_person_domain_values():

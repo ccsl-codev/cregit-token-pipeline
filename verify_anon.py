@@ -10,7 +10,8 @@ cbsoft-vem2026-corporate-truck-factor at commit 3d722c6. Three changes:
   * shape-based, not allowlist-based. The original asked "is this address at a
     known mailing-list domain, and if not is it anon.invalid". Here every domain
     is published on purpose, so the domain says nothing. What is checked instead
-    is that every LOCAL PART is a pseudonym: author_NNNN and nothing else.
+    is that every LOCAL PART is a pseudonym: author_<hex token> and nothing
+    else.
   * no secrets required. anonymize_parquet.py's own leak scan needs the registry
     of real names to search for, so only whoever ran it can repeat it. This
     checks the published files alone, which means a reviewer, a co-author or a
@@ -18,8 +19,13 @@ cbsoft-vem2026-corporate-truck-factor at commit 3d722c6. Three changes:
     release script, because it cannot be passed by forgetting to anonymize.
 
 It is a necessary, not a sufficient, condition: a real name that happens to look
-like 'Author 0042' would pass. Run it together with anonymize_parquet.py, whose
-report covers the other direction.
+like 'Author 3f9c1a7b2e5d40' would pass. Run it together with
+anonymize_parquet.py, whose report covers the other direction.
+
+This check needs NO salt, which is the point of it. anonymize_parquet.py holds a
+private salt and the reverse mapping; this script holds neither and still gates
+the release, so a co-author or a Zenodo depositor can run it. Moving to a salted
+hash did not weaken that.
 
 Usage:
   verify_anon.py DIR [DIR ...]          # exit 0 clean, 1 residue, 2 misuse
@@ -33,13 +39,18 @@ import os
 import re
 import sys
 
-# The pseudonym shapes. Any run of digits, not the four anonymize_parquet.py
-# zero-pads to: the padding is cosmetic and a check that rejected 'Author 10'
-# would report a formatting preference as though it were a leaked name, which is
-# the one thing this script must not do.
-PSEUDO_LOCAL = r"author_\d+"
-PSEUDO_NAME = r"Author \d+"
-PSEUDO_ID = r"author \d+"
+# The pseudonym shapes. Any run of lowercase hex, not exactly the
+# PSEUDO_HEX_LEN characters anonymize_parquet.py emits: the width is a tuning
+# constant there, and a check that rejected a 12- or 16-character token -- or the
+# zero-padded 'Author 0042' of a release made before the salted hash -- would
+# report a formatting preference as though it were a leaked name, which is the
+# one thing this script must not do. Decimal digits are a subset of lowercase
+# hex, so every pseudonym this repository has ever emitted is still accepted.
+#
+# Widening \d+ to [0-9a-f]+ is the whole cost the salted hash imposed here.
+PSEUDO_LOCAL = r"author_[0-9a-f]+"
+PSEUDO_NAME = r"Author [0-9a-f]+"
+PSEUDO_ID = r"author [0-9a-f]+"
 
 # Any address, anywhere, whose local part is NOT a pseudonym. This is the whole
 # check: one regex over every string in the release.
@@ -55,9 +66,9 @@ MISSING_MARKER = "(ANON-MISSING)"
 # author field is not required to hold an address: measured over the 196 corpus
 # parquets, 36 of them carry a bare user name in author_email / committer_email /
 # person_email -- 'robertmartin', 'deanwampler', 'nashjain' -- for 1,332,252 rows
-# in total. anonymize_parquet.py maps such a value whole to 'author_NNNN' with no
-# domain to re-attach, which is correct: the entire string was the local part and
-# the whole of it is replaced.
+# in total. anonymize_parquet.py maps such a value whole to 'author_<hex>' with
+# no domain to re-attach, which is correct: the entire string was the local part
+# and the whole of it is replaced.
 #
 # Requiring a domain here made this script contradict the tool it verifies. It
 # reported 'not a pseudonym' for 'author_0109' -- a correctly pseudonymized

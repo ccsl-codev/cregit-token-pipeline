@@ -16,6 +16,8 @@ This file states each claim as a test over a written and re-read Parquet:
   5. two runs produce byte-identical Parquet files
   6. failure is closed: an unknown column, a too-narrow input and identity text
      in commit_summary each stop the run instead of publishing
+  7. pseudonyms are STABLE across releases whose file sets differ: a release that
+     adds a project renumbers nobody, and the shared file comes out byte-identical
 
 These write and read actual Parquet, so they need the real duckdb from
 `devenv shell` and skip without it.
@@ -162,10 +164,17 @@ def corpus(tmp_path: Path) -> tuple[Path, list[str]]:
     return tmp_path, [str(a), str(b)]
 
 
+# A salt for the tests only, never the release salt. Passed explicitly so that
+# no test depends on a developer's ~/.config, and so that the pseudonyms below
+# are reproducible from this file alone.
+TEST_SALT = b"e2e-salt-not-the-release-salt-0123456789"
+
+
 def anonymize(tmp_path: Path, paths: list[str], outname: str = "out",
               **kw) -> tuple[dict, Path]:
     """Run the release path, returning (report, outdir)."""
     outdir = tmp_path / outname
+    kw.setdefault("salt", TEST_SALT)
     report = A.run(str(outdir), paths, out=io.StringIO(), **kw)
     return report, outdir
 
@@ -247,7 +256,7 @@ def test_one_person_one_pseudonym_through_all_three_routes(corpus):
     pseudo = alice.pop()
     assert pseudo in via_person
     assert via_footer == pseudo
-    assert re.fullmatch(r"author_\d+@redhat\.com", pseudo)
+    assert re.fullmatch(r"author_[0-9a-f]+@redhat\.com", pseudo)
     # ... and the real local part is gone from all three.
     assert "alice" not in " ".join(via_author | via_person | {via_footer})
 
@@ -340,7 +349,8 @@ def test_no_footer_element_is_lost(corpus):
 # Requirement 4 -- footer text keeps its structure
 # --------------------------------------------------------------------------
 
-TRAILER = re.compile(r"^Author \d+ <author_\d+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}>$")
+TRAILER = re.compile(
+    r"^Author [0-9a-f]+ <author_[0-9a-f]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}>$")
 
 
 @requires_duckdb
@@ -399,7 +409,8 @@ def test_an_unparseable_footer_shape_is_counted_and_replaced(corpus):
     report, outdir = anonymize(tmp, paths)
     assert report["registry"]["footer_shapes"].get(A.SHAPE_OTHER) == 1
     got = elements(outdir / "acme__widget-dataset.parquet", "footer_thanks_to")
-    assert got == [A.pseudo_name(int(re.search(r"\d+", got[0]).group(0)))]
+    assert got == [A.pseudo_name(re.fullmatch(r"Author ([0-9a-f]+)",
+                                              got[0]).group(1))]
     assert "Cryptic" not in got[0]
 
 
@@ -447,7 +458,7 @@ def test_an_unknown_column_stops_the_run_and_writes_nothing(corpus):
                          columns=CONTRACT + (("review_url", "VARCHAR"),))
     outdir = tmp / "outwide"
     with pytest.raises(A.UnknownColumnError) as e:
-        A.run(str(outdir), [str(wide)], out=io.StringIO())
+        A.run(str(outdir), [str(wide)], out=io.StringIO(), salt=TEST_SALT)
     assert "review_url" in str(e.value)
     assert not list(outdir.glob("*.parquet"))
 
@@ -468,7 +479,7 @@ def test_a_too_narrow_input_is_refused(corpus):
                            columns=narrow_cols)
     outdir = tmp / "outnarrow"
     with pytest.raises(A.MissingColumnError) as e:
-        A.run(str(outdir), [str(narrow)], out=io.StringIO())
+        A.run(str(outdir), [str(narrow)], out=io.StringIO(), salt=TEST_SALT)
     assert "firm" in str(e.value)
     assert not list(outdir.glob("*.parquet"))
 
@@ -489,7 +500,8 @@ def test_identity_text_in_commit_summary_fails_the_run(corpus):
     row = dict(ROW_ALICE, commit_summary="thanks to Carol Danvers for the fix",
                footer_reviewed_by=[f"Carol Danvers <{CAROL_MAIL}>"])
     leaky = write_dataset(src / "acme__widget-dataset.parquet", [row])
-    report = A.run(str(tmp / "outleak"), [str(leaky)], out=io.StringIO())
+    report = A.run(str(tmp / "outleak"), [str(leaky)], out=io.StringIO(),
+                   salt=TEST_SALT)
     assert report["failures"], "a real name in commit_summary must be reported"
     assert any("commit_summary" in f for f in report["failures"])
     entry = report["files"][str(leaky)]
@@ -546,7 +558,7 @@ def test_no_real_address_survives_anywhere_in_the_release(corpus):
     """
     tmp, paths = corpus
     _, outdir = anonymize(tmp, paths)
-    real = re.compile(r"(?<![A-Za-z0-9._%+\-])(?!author_\d+@)"
+    real = re.compile(r"(?<![A-Za-z0-9._%+\-])(?!author_[0-9a-f]+@)"
                       r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
     for p in paths:
         path = outdir / Path(p).name
@@ -557,3 +569,165 @@ def test_no_real_address_survives_anywhere_in_the_release(corpus):
                     else scalars(path, col) if typ == "VARCHAR" else [])
             for v in vals:
                 assert not real.search(v), (col, v)
+
+
+# --------------------------------------------------------------------------
+# Requirement 7 -- stability across releases with different file sets
+#
+# This is the regression test for the measured defect that motivated the salted
+# hash. Under the superseded sequential registry an id was the ordinal position
+# of a value in the sorted distinct set of ONE invocation, so adding a project
+# renumbered everybody sorting after the new values. Measured over six corpus
+# Parquets: dropping one file moved 150 of the 153 addresses present in both
+# runs -- 98.0%. Here the rate must be exactly 0.0%.
+#
+# The fixture reproduces the worst case on purpose: release two adds 30 people
+# whose locals and names all sort BEFORE every person in release one, so under
+# the old scheme every single id in the shared file moved.
+# --------------------------------------------------------------------------
+
+N_STABILITY_PEOPLE = 30
+
+
+def _people(prefix: str, n: int, repo: str) -> list[dict]:
+    """n rows of n distinct people in one project, deliberately free of footers.
+
+    Names carry the prefix so the two cohorts sort apart, and no name appears in
+    any pass-through column -- a name in one of those fails the run by design.
+    """
+    rows = []
+    for i in range(n):
+        mail = f"{prefix}{i:03d}@{prefix}corp.example"
+        name = f"{prefix.upper()}{i:03d} Person"
+        rows.append(dict(BASE, **{
+            "repo_name": f"acme__{repo}", "repo": repo,
+            "clone_url": f"https://example.test/acme/{repo}",
+            "token_index": i + 1,
+            "author_name": name, "author_email": mail,
+            "committer_name": name, "committer_email": mail,
+            "commit_summary": f"change {i}", "personid": name.lower(),
+            "person_name": name, "person_email": mail,
+            "person_domain": f"{prefix}corp.example",
+            "firm_raw": "", "firm": "", "firm_source": "",
+        }))
+    return rows
+
+
+@pytest.fixture
+def two_releases(tmp_path: Path) -> tuple[Path, list[str], list[str]]:
+    """(tmp, release one's files, release two's files).
+
+    Release two is release one PLUS one more project, which is exactly the shape
+    of a second dataset release that adds a project.
+    """
+    src = tmp_path / "in"
+    src.mkdir()
+    shared = write_dataset(src / "acme__widget-dataset.parquet",
+                           _people("m", N_STABILITY_PEOPLE, "widget"))
+    added = write_dataset(src / "acme__gadget-dataset.parquet",
+                          _people("a", N_STABILITY_PEOPLE, "gadget"))
+    return tmp_path, [str(shared)], [str(shared), str(added)]
+
+
+def pseudonym_map(paths: list[str]) -> tuple[dict, dict]:
+    """{real address -> pseudonym}, {real name -> pseudonym} for one invocation."""
+    con = A.connect()
+    plans = {p: A.classify(A.read_columns(con, p)) for p in paths}
+    emails, names, ftext, fderived, domains = A.collect_values(con, paths, plans)
+    reg = A.build_registry(emails, names, ftext, fderived,
+                           extra_domains=domains, salt=TEST_SALT)
+    con.close()
+    return ({v: A.pseudo_email_local(t) for v, t in reg.emails.items()},
+            {v: A.pseudo_name(t) for v, t in reg.names.items()})
+
+
+@requires_duckdb
+def test_a_release_that_adds_a_project_renumbers_nobody(two_releases):
+    """THE acceptance test. 98.0% renumbered before, 0.0% after."""
+    _, one, two = two_releases
+    e1, n1 = pseudonym_map(one)
+    e2, n2 = pseudonym_map(two)
+
+    for what, a, b in (("addresses", e1, e2), ("names", n1, n2)):
+        both = sorted(set(a) & set(b))
+        assert len(both) >= N_STABILITY_PEOPLE, what
+        moved = [v for v in both if a[v] != b[v]]
+        rate = 100.0 * len(moved) / len(both)
+        assert moved == [], (
+            f"{what}: {len(moved)} of {len(both)} renumbered ({rate:.1f}%), "
+            f"e.g. {moved[0]}: {a[moved[0]]} -> {b[moved[0]]}")
+
+
+@requires_duckdb
+def test_the_shared_file_is_byte_identical_in_both_releases(two_releases):
+    """The strongest form: a reader can diff the two releases' shared project.
+
+    Byte equality and not merely value equality, because a release is archived
+    and checksummed. Note that the registry genuinely differs between the two
+    runs -- release two's holds 60 people, release one's 30 -- so this passes
+    only because no published value depends on the set.
+    """
+    tmp, one, two = two_releases
+    _, out1 = anonymize(tmp, one, outname="rel1")
+    _, out2 = anonymize(tmp, two, outname="rel2")
+    name = Path(one[0]).name
+    assert (out1 / name).read_bytes() == (out2 / name).read_bytes()
+
+
+@requires_duckdb
+def test_the_added_project_does_not_reuse_a_pseudonym(two_releases):
+    """Stability must not come at the price of collapsing two people into one."""
+    tmp, one, two = two_releases
+    _, out2 = anonymize(tmp, two, outname="rel2b")
+    seen: dict[str, str] = {}
+    for p in two:
+        path = out2 / Path(p).name
+        for v in scalars(path, "person_email"):
+            seen.setdefault(v, str(path))
+    assert len(seen) == 2 * N_STABILITY_PEOPLE
+
+
+@requires_duckdb
+def test_a_different_salt_changes_every_pseudonym(two_releases):
+    """Proof the salt is load-bearing, not decoration."""
+    tmp, one, _ = two_releases
+    _, a = anonymize(tmp, one, outname="salt_a", salt=TEST_SALT)
+    _, b = anonymize(tmp, one, outname="salt_b", salt=b"z" * 40)
+    name = Path(one[0]).name
+    left = set(scalars(a / name, "person_email"))
+    right = set(scalars(b / name, "person_email"))
+    assert len(left) == len(right) == N_STABILITY_PEOPLE
+    assert left & right == set()
+
+
+@requires_duckdb
+def test_a_run_with_no_salt_available_fails_instead_of_inventing_one(
+        two_releases, monkeypatch):
+    """A generated salt would renumber everyone on every run, silently."""
+    tmp, one, _ = two_releases
+    monkeypatch.delenv(A.SALT_ENV, raising=False)
+    monkeypatch.delenv(A.SALT_FILE_ENV, raising=False)
+    monkeypatch.setattr(A, "DEFAULT_SALT_FILE", str(tmp / "no-such-salt"))
+    outdir = tmp / "outnosalt"
+    with pytest.raises(A.SaltError):
+        A.run(str(outdir), one, out=io.StringIO())
+    assert not outdir.exists() or not list(outdir.glob("*.parquet"))
+
+
+@requires_duckdb
+def test_the_report_carries_no_real_identity_string(two_releases):
+    """The reverse map is never published, so it must not leak via --report.
+
+    The report is written next to the release and is the one other artifact the
+    tool emits. It may carry counts; it may not carry the mapping.
+    """
+    import json
+    tmp, _, two = two_releases
+    report_path = tmp / "report.json"
+    anonymize(tmp, two, outname="outrep", report_path=str(report_path))
+    text = report_path.read_text()
+    blob = json.loads(text)
+    assert blob["registry"]["emails"] == 2 * N_STABILITY_PEOPLE
+    for i in range(N_STABILITY_PEOPLE):
+        assert f"m{i:03d}@mcorp.example" not in text
+        assert f"M{i:03d} Person" not in text

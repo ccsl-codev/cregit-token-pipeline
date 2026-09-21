@@ -9,15 +9,15 @@ original, what is fixed, and what is new:
 KEPT -- the two decisions that make the firm analysis survive anonymization.
 
   1. The e-mail LOCAL PART is pseudonymized and the DOMAIN is preserved:
-     alice@intel.com -> author_0042@intel.com. The firm attribution is resolved
-     from the domain (person_domain -> data/affiliation.merged.csv -> firm), so
-     replacing the domain with anon.invalid would collapse every firm to
-     '(Unknown)' and the corporate-truck-factor analysis would die.
+     alice@intel.com -> author_3f9c1a7b2e5d40@intel.com. The firm attribution is
+     resolved from the domain (person_domain -> data/affiliation.merged.csv ->
+     firm), so replacing the domain with anon.invalid would collapse every firm
+     to '(Unknown)' and the corporate-truck-factor analysis would die.
   2. person_domain passes through untouched: company signal, not a personal
      identifier. firm_raw / firm / firm_source likewise.
-  Names become 'Author <N>' through a registry keyed on the lowercased string,
-  so every occurrence of one person maps to one pseudonym and group-by joins
-  still work.
+  Names become 'Author <token>' through a registry keyed on the lowercased
+  string, so every occurrence of one person maps to one pseudonym and group-by
+  joins still work.
 
 FIXED -- the original's COPY (SELECT ...) enumerated columns by hand and ended
 at `person_domain, repo_tag`. Run on this 70-column schema it emits 26 columns
@@ -45,6 +45,54 @@ mapped whole through the name registry, and counted and sampled in the report.
   had no mapping. Element-level mapping of the derived columns is therefore not
   cosmetic; without it the footers leak.
 
+NEW -- pseudonyms come from a SALTED KEYED HASH, not from a sequence number.
+
+  The original, and this tool up to the commit that added this paragraph, handed
+  out ids by sorting the distinct lowercased values of one invocation and
+  counting from 1. That is deterministic but NOT stable: an id is an ordinal
+  position, so inserting one value shifts every value after it. Measured over six
+  corpus Parquets, dropping one file from the invocation renumbered 150 of the
+  153 addresses present in both runs -- 98.0%. A second release that adds one
+  project therefore renumbers almost every pseudonym and cannot be diffed against
+  the first, and a reader cannot follow one contributor across two releases.
+
+  A pseudonym is now `blake2b(space || NUL || lowercased value, key=salt)` taken
+  to PSEUDO_HEX_LEN hex characters, so it depends on the value and the salt and
+  on nothing else. Adding or dropping a project renumbers nobody, which is
+  pinned by tests/test_anonymize_parquet_e2e.py requirement 7.
+
+  * blake2b with a key is a FAST keyed hash, chosen deliberately. A slow
+    password KDF (bcrypt, scrypt, argon2, PBKDF2 with a high iteration count)
+    exists to burn wall-clock time; that is the opposite of what is wanted for
+    28,339 distinct values inside a release step. The argument for a slow KDF is
+    that it raises the cost of a brute-force guess of the *inputs* by an
+    adversary who has ALREADY obtained the salt. That threat is addressed here by
+    keeping the salt out of the release and out of the repository, not by making
+    the hash slow. See docs/DESIGN.md row 8 if that trade is ever revisited.
+  * PSEUDO_HEX_LEN = 14 hex characters = 56 bits. Collision arithmetic at the
+    measured population of 28,339 distinct addresses over 186 conforming files:
+    n(n-1)/2 = 401,535,291 pairs, over 2^56 = 72,057,594,037,927,936, so the
+    probability that ANY two addresses share a pseudonym is about 5.6e-9 -- one
+    release in 180 million. At ten times the corpus it is still 5.6e-7. 48 bits
+    would give 1.4e-6, or one release in 700,000, which is too coarse for
+    something that hard-fails a release; 64 bits costs two more characters per id
+    and buys nothing usable. The name space is independent and smaller (25,386
+    distinct names, 4.5e-9).
+  * A collision is NOT tolerated. Two people sharing a pseudonym would merge two
+    contributors, drop the distinct-person count and corrupt the dataset's
+    headline metric, so build_registry raises CollisionError and the release
+    stops. The remedy is to rotate the salt, which renumbers everyone -- see
+    docs/DESIGN.md.
+  * The salt lives OUTSIDE this repository and is never committed; see load_salt
+    for where it is read from. A missing or short salt is a hard error. Nothing
+    here ever generates one: a freshly generated salt per run would renumber
+    every pseudonym on every run, which is the 98.0% defect made continuous and
+    silent.
+  * The real -> pseudonym map is held in memory for the length of one run and is
+    never written anywhere. It is NOT published, and neither is the salt, so the
+    release is not reversible from public inputs -- which the sequential scheme
+    was, since its inputs derive from public GitHub repositories.
+
 commit_summary: PRESERVED with an e-mail scrub, reversing the original's
 unconditional NULL. The original's reason was that commit_summary carries
 footer-style 'Name <email>' identity text. In this schema the trailers are 15
@@ -59,19 +107,21 @@ RESIDUAL RISK, to be disclosed in any paper using this output:
 
   * Preserving the e-mail domain leaves a sole contributor at a rare domain
     identifiable. Anyone who knows that exactly one person ever committed from
-    smallfirm.example can re-identify author_0042@smallfirm.example without
-    breaking anything. Measured over the three development files: 33 of the 38
-    person_domain groups have exactly ONE distinct contributor. The ratio is
-    inflated by the small sample -- shared corporate domains gain people as the
-    corpus grows -- but vanity domains (gutwin.org, guerra.sh, haamer.ee,
-    lukapeschke.com, push-f.com) stay single-person however large it gets, and
-    the domain plus the repository together name the person.
+    smallfirm.example can re-identify author_3f9c1a7b2e5d40@smallfirm.example
+    without breaking anything, and no salt helps: the domain is in the clear.
+    Measured over all 186 conforming corpus files and 28,339 distinct addresses:
+    5,276 of 6,228 person_domain groups have exactly ONE distinct address --
+    84.7%. An earlier three-file sample gave 33 of 38 and hedged that the ratio
+    was "inflated by the small sample". It was not. The ratio did not fall with
+    scale, because the corpus is mostly small samples and a small sample is
+    itself composed of single-contributor projects.
     This is a deliberate trade of privacy for the firm signal the dataset exists
     to carry, not a defect, and it cannot be fixed while the domain is published.
     k-anonymity over the domain is the mitigation if a release needs one; it is
-    not applied here because it would drop exactly the long tail of small firms
-    that the truck-factor question is about. A paper using this output must
-    disclose it.
+    NOT applied here, and no k-anonymity work is planned, because it would drop
+    exactly the long tail of small firms that the truck-factor question is about.
+    This is a DISCLOSED LIMITATION, not a mitigated one. Any paper using this
+    output must disclose it; see docs/LIMITATIONS.md.
   * repo_name, clone_url, owner, repo and roster_name carry the GitHub
     namespace, which for a personal repository IS a person's handle
     (owner_type = 'User'). These are not pseudonymized: the repository
@@ -85,9 +135,22 @@ RESIDUAL RISK, to be disclosed in any paper using this output:
 Usage:
   anonymize_parquet.py OUTDIR IN.parquet [IN.parquet ...]
       [--drop-footers] [--null-commit-summary] [--report FILE.json]
+      [--salt-file PATH]
 
   The registry spans every input file of one invocation, so pseudonyms are
   consistent across files. Pass the files that will be published together.
+  Since the salted hash made pseudonyms stable, the grouping no longer affects
+  the pseudonyms -- it affects only which files the leak scan can cross-check.
+
+  A salt is REQUIRED. Create one once, outside the repository:
+
+      mkdir -p ~/.config/cregit-token-pipeline
+      head -c 32 /dev/urandom | base64 > ~/.config/cregit-token-pipeline/anon-salt
+      chmod 600 ~/.config/cregit-token-pipeline/anon-salt
+
+  Back it up somewhere you would trust with the release itself. Losing it means
+  no future release can ever be linked to a published one; leaking it makes every
+  pseudonym reversible by dictionary attack over public GitHub addresses.
 
 Needs duckdb, which comes from `devenv shell` (entered from cregit-issue61) and
 is absent from .venv. duckdb is imported inside the functions that need it so
@@ -96,9 +159,11 @@ the classification, parsing and rendering logic can be unit-tested without it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from dataclasses import dataclass, field
 
@@ -134,10 +199,11 @@ OTHER_PASSTHROUGH_COLUMNS: tuple[str, ...] = (
 PASSTHROUGH_COLUMNS: frozenset[str] = frozenset(
     PROVENANCE_COLUMNS + FIRM_COLUMNS + OTHER_PASSTHROUGH_COLUMNS)
 
-# Scalar identity columns -> how to rewrite them.
-#   name      'Author 0042'
-#   email     'author_0042@' + original domain
-#   personid  'author 0042'   (cregit's lowercased id style)
+# Scalar identity columns -> how to rewrite them. <t> is the 14-hex-character
+# salted token from pseudo_token().
+#   name      'Author <t>'
+#   email     'author_<t>@' + original domain
+#   personid  'author <t>'    (cregit's lowercased id style)
 #   summary   e-mail local parts scrubbed, or NULL under --null-commit-summary
 SCALAR_TRANSFORMS: dict[str, str] = {
     "author_name": "name",
@@ -337,24 +403,173 @@ def parse_footer_element(value: str) -> tuple[str, str | None, str | None]:
 
 
 # --------------------------------------------------------------------------
+# The salt. Held privately, outside this repository, and never published.
+# --------------------------------------------------------------------------
+
+# Read in this order, first hit wins: --salt-file, $CTP_ANON_SALT_FILE,
+# $CTP_ANON_SALT (the salt inline, for CI), DEFAULT_SALT_FILE.
+SALT_ENV = "CTP_ANON_SALT"
+SALT_FILE_ENV = "CTP_ANON_SALT_FILE"
+DEFAULT_SALT_FILE = "~/.config/cregit-token-pipeline/anon-salt"
+
+# 32 bytes = 256 bits. Enough that guessing the salt is not the cheap attack, and
+# the same floor as the `head -c 32 /dev/urandom` the docs tell you to run. A
+# shorter one is refused rather than accepted with a warning: a warning in a
+# release script is read once and then never again.
+MIN_SALT_BYTES = 32
+
+# 14 lowercase hex characters = 56 bits. See the module docstring for the
+# collision arithmetic at 28,339 distinct addresses (p ~= 5.6e-9).
+PSEUDO_HEX_LEN = 14
+
+
+class SaltError(Exception):
+    """No usable salt. Never recovered from by inventing one."""
+
+
+class CollisionError(Exception):
+    """Two distinct values hashed to one pseudonym. Stops the release."""
+
+
+def load_salt(path: str | None = None, env=None) -> bytes:
+    """The private salt, or SaltError. Never generates, never defaults.
+
+    A generated salt would be the 98.0% renumbering defect made continuous and
+    silent: every run would produce a fresh mapping, and nothing in the output
+    would say so. So the only outcomes here are "the operator's salt" and "stop".
+    """
+    env = os.environ if env is None else env
+
+    # Strict precedence, most explicit first. Inline is deliberately below the
+    # two file sources: a developer who exports $CTP_ANON_SALT for one experiment
+    # must not silently override the salt a release script passed by path.
+    #
+    # An EXPLICITLY named source that is absent is a hard error, never a
+    # fall-through to the next candidate. Falling through would quietly hash with
+    # a different key than the operator asked for, which renumbers the whole
+    # release and looks like a success -- the same class of silent instability
+    # this scheme exists to remove. Only the default location may be absent,
+    # because there is nothing after it.
+    if path:
+        return _require_salt_file(path, "--salt-file")
+    if env.get(SALT_FILE_ENV):
+        return _require_salt_file(env[SALT_FILE_ENV], f"${SALT_FILE_ENV}")
+    if env.get(SALT_ENV):
+        salt = env[SALT_ENV].strip().encode()
+        _check_salt_length(salt, f"${SALT_ENV}")
+        return salt
+
+    default = os.path.expanduser(DEFAULT_SALT_FILE)
+    if os.path.isfile(default):
+        return _read_salt_file(default, "the default location")
+
+    raise SaltError(
+        f"no anonymization salt. --salt-file and ${SALT_FILE_ENV} and "
+        f"${SALT_ENV} are all unset, and the default {default} does not "
+        f"exist.\n"
+        f"Set ${SALT_FILE_ENV} to a salt file, or ${SALT_ENV} to the salt "
+        f"itself, or create the default:\n"
+        f"    mkdir -p {os.path.dirname(DEFAULT_SALT_FILE)}\n"
+        f"    head -c {MIN_SALT_BYTES} /dev/urandom | base64 > "
+        f"{DEFAULT_SALT_FILE}\n"
+        f"    chmod 600 {DEFAULT_SALT_FILE}\n"
+        "The salt must live outside this repository, must never be committed, "
+        "and must be backed up: losing it makes a future release unlinkable to "
+        "a published one.")
+
+
+def _require_salt_file(raw: str, label: str) -> bytes:
+    p = os.path.expanduser(raw)
+    if not os.path.isfile(p):
+        raise SaltError(
+            f"salt file {p} (from {label}) does not exist. It is not silently "
+            f"replaced by another salt: hashing with a different key would "
+            f"renumber every pseudonym in the release and still exit 0. Create "
+            f"it with `head -c {MIN_SALT_BYTES} /dev/urandom | base64 > {p}` "
+            f"and `chmod 600 {p}`, or point {label} somewhere that exists.")
+    return _read_salt_file(p, label)
+
+
+def _read_salt_file(p: str, label: str) -> bytes:
+    """Bytes of a salt file, with the two mistakes that silently weaken it."""
+    mode = os.stat(p).st_mode
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise SaltError(
+            f"salt file {p} (from {label}) is readable by group or others "
+            f"(mode {stat.filemode(mode)}). A leaked salt makes every pseudonym "
+            f"reversible and the leak is silent. Fix it with:\n"
+            f"    chmod 600 {p}")
+    with open(p, "rb") as fh:
+        # Trailing whitespace only: `echo x > salt` and `printf x > salt` must
+        # give the same key, or a release changes when someone re-creates the
+        # file with a different shell builtin.
+        salt = fh.read().strip()
+    _check_salt_length(salt, f"{p} (from {label})")
+    return salt
+
+
+def _check_salt_length(salt: bytes, where: str) -> None:
+    if len(salt) < MIN_SALT_BYTES:
+        raise SaltError(
+            f"salt from {where} is {len(salt)} byte(s); at least "
+            f"{MIN_SALT_BYTES} are required. Make one with "
+            f"`head -c {MIN_SALT_BYTES} /dev/urandom | base64`.")
+
+
+def derive_key(salt: bytes) -> bytes:
+    """A 64-byte blake2b key from a salt of any length.
+
+    blake2b refuses a key longer than 64 bytes, and a salt file is whatever the
+    operator made -- a 100-byte base64 line is entirely reasonable. Folding once
+    per run costs nothing and means no legitimate salt is ever refused for being
+    too long, which would be a confusing failure right next to "too short".
+    """
+    return hashlib.blake2b(salt, digest_size=64).digest()
+
+
+def pseudo_token(key: bytes, space: str, value: str) -> str:
+    """The pseudonym id for one value: keyed, fast, and set-independent.
+
+    blake2b with a key is a FAST keyed hash (roughly memcpy speed on this data);
+    the release step runs it once per distinct value, 28,339 times for the
+    corpus, so it does not show up in wall-clock time at all. A slow password KDF
+    would, on purpose, and that is not the threat being defended -- see the module
+    docstring.
+
+    `space` is mixed in so that the name id space and the e-mail id space are
+    domain-separated: the same string appearing as a name and as an address must
+    not produce the same token, or the two spaces would be silently linked. NUL
+    separates it from the value so that no (space, value) pair can be confused
+    with another.
+
+    digest_size is the truncation. BLAKE2 encodes the output length in its
+    parameter block, so a 7-byte digest is a hash in its own right rather than a
+    prefix of a longer one -- the correct way to shorten BLAKE2.
+    """
+    h = hashlib.blake2b(f"{space}\0{value}".encode(), key=key,
+                        digest_size=PSEUDO_HEX_LEN // 2)
+    return h.hexdigest()
+
+
+# --------------------------------------------------------------------------
 # The pseudonym registry
 # --------------------------------------------------------------------------
 
-def pseudo_email_local(n: int) -> str:
-    return f"author_{n:04d}"
+def pseudo_email_local(token: str) -> str:
+    return f"author_{token}"
 
 
-def pseudo_name(n: int) -> str:
-    return f"Author {n:04d}"
+def pseudo_name(token: str) -> str:
+    return f"Author {token}"
 
 
-def pseudo_personid(n: int) -> str:
-    return f"author {n:04d}"
+def pseudo_personid(token: str) -> str:
+    return f"author {token}"
 
 
 @dataclass
 class Registry:
-    """Lowercased real string -> stable integer, for names and for e-mails.
+    """Lowercased real string -> pseudonym token, for names and for e-mails.
 
     Two separate id spaces, names and e-mails, exactly as the original. They are
     deliberately NOT unified into one person id. Unifying would need name-e-mail
@@ -362,17 +577,23 @@ class Registry:
     merge two humans into one component -- at which point two distinct
     addresses at one domain render to the same output string, distinct-person
     counts drop, and analysis invariance is gone. Injective maps cost a reader
-    the ability to say 'Author 0042 is author_0042@...' and buy exact
-    group-by preservation. That is the right trade for a dataset whose headline
-    metric is a count of distinct people.
+    the ability to say 'Author <t> is author_<t>@...' and buy exact group-by
+    preservation. That is the right trade for a dataset whose headline metric is
+    a count of distinct people. The two spaces are kept apart by hashing the
+    space name alongside the value; see pseudo_token.
 
     Consistency, which is what claim 5 actually needs, holds within each space:
     one input string always renders to one output string, in every column of
-    every file of one invocation.
+    every file -- and, since the token is a keyed hash of the value rather than
+    its ordinal position in a sorted set, in every FUTURE release made with the
+    same salt.
+
+    This map is the reverse mapping. It exists only for the length of one run,
+    is never serialized, and is never published.
     """
 
-    emails: dict[str, int] = field(default_factory=dict)
-    names: dict[str, int] = field(default_factory=dict)
+    emails: dict[str, str] = field(default_factory=dict)
+    names: dict[str, str] = field(default_factory=dict)
     # Exact raw footer element -> rendered replacement.
     footer_elements: dict[str, str] = field(default_factory=dict)
     shape_counts: dict[str, int] = field(default_factory=dict)
@@ -414,14 +635,22 @@ def domain_masker(domains: set[str]):
 def build_registry(email_values: set[str], name_values: set[str],
                    footer_text_values: set[str],
                    footer_derived_values: dict[str, set[str]],
-                   extra_domains: set[str] | None = None) -> Registry:
-    """Assign pseudonyms, deterministically.
+                   extra_domains: set[str] | None = None,
+                   *, salt: bytes) -> Registry:
+    """Assign pseudonyms: deterministic, and stable across input sets.
 
-    Ids come from sorting the lowercased distinct values, so two runs over the
-    same inputs produce byte-identical output and a diff of two releases is
-    readable.
+    A token is a keyed hash of the lowercased value (pseudo_token), so two runs
+    over the same inputs produce byte-identical output AND a value carries the
+    same pseudonym in a later release that adds or drops projects. The previous
+    scheme numbered the sorted distinct values from 1, which gave the first
+    property and not the second: measured, adding one file renumbered 98.0% of
+    the addresses present in both runs.
+
+    `salt` is required and has no default. A default would be a published salt,
+    and a generated one would renumber everybody on every run.
     """
     reg = Registry()
+    key = derive_key(salt)
 
     emails = {v.lower() for v in email_values if v}
     names = {v.lower() for v in name_values if v}
@@ -445,10 +674,8 @@ def build_registry(email_values: set[str], name_values: set[str],
             if raw:
                 names.add(raw.lower())
 
-    for i, v in enumerate(sorted(emails), start=1):
-        reg.emails[v] = i
-    for i, v in enumerate(sorted(names), start=1):
-        reg.names[v] = i
+    reg.emails = _assign(key, "email", emails)
+    reg.names = _assign(key, "name", names)
 
     # Render each footer text element once, keyed on the exact raw string, so
     # the SQL side is a plain dictionary lookup with no parsing.
@@ -459,6 +686,39 @@ def build_registry(email_values: set[str], name_values: set[str],
     reg.domains |= {d.lower() for d in (extra_domains or set()) if d}
     reg.domains.discard("")
     return reg
+
+
+def _assign(key: bytes, space: str, values: set[str]) -> dict[str, str]:
+    """{value -> token} for one id space, refusing to publish a collision.
+
+    Truncating a digest can in principle map two values to one token. That would
+    merge two contributors into one pseudonym: two distinct addresses at one
+    domain would render identically, count(distinct person_email) would drop, and
+    the dataset's headline metric -- a count of distinct people -- would be wrong
+    in a way no downstream reader could detect. At 56 bits over 28,339 addresses
+    the chance is about 5.6e-9, so this is a guard against the improbable rather
+    than the expected, and the right response is to stop the release, not to
+    disambiguate behind the reader's back.
+
+    The remedy for a real collision is a new salt, which renumbers every
+    pseudonym in the release. Values are walked in sorted order so that the same
+    collision is reported the same way twice; the order has no effect on any
+    token.
+    """
+    out: dict[str, str] = {}
+    owner: dict[str, str] = {}
+    for v in sorted(values):
+        token = pseudo_token(key, space, v)
+        if token in owner:
+            raise CollisionError(
+                f"{space} pseudonym collision: {v!r} and {owner[token]!r} both "
+                f"hash to {token!r}. Two people would share one pseudonym and "
+                f"the distinct-person count would drop, so this release is "
+                f"refused. Rotate the salt (which renumbers every pseudonym), "
+                f"or widen PSEUDO_HEX_LEN.")
+        owner[token] = v
+        out[v] = token
+    return out
 
 
 def render_footer_element(reg: Registry, name: str | None,
@@ -902,7 +1162,11 @@ def summary_residue(con, path: str, reg: Registry) -> dict:
 
 def run(outdir: str, paths: list[str], drop_footers: bool = False,
         null_commit_summary: bool = False, report_path: str | None = None,
-        out=sys.stdout) -> dict:
+        out=sys.stdout, salt: bytes | None = None,
+        salt_file: str | None = None) -> dict:
+    # Before anything is read or any directory is created: no salt, no release.
+    if salt is None:
+        salt = load_salt(salt_file)
     con = connect()
     os.makedirs(outdir, exist_ok=True)
 
@@ -916,11 +1180,14 @@ def run(outdir: str, paths: list[str], drop_footers: bool = False,
 
     emails, names, ftext, fderived, domains = collect_values(con, paths, plans)
     reg = build_registry(emails, names, ftext, fderived,
-                         extra_domains=domains)
+                         extra_domains=domains, salt=salt)
     print(f"registry: {len(reg.emails)} e-mails, {len(reg.names)} names, "
           f"{len(reg.footer_elements)} footer elements, "
           f"{len(reg.domains)} preserved domains "
           f"(shared across {len(paths)} file(s))", file=out)
+    print(f"pseudonyms: {PSEUDO_HEX_LEN}-hex-character salted blake2b tokens, "
+          f"stable across releases made with the same salt. No collision "
+          f"(0 of {len(reg.emails) + len(reg.names)} tokens shared).", file=out)
     if reg.shape_counts:
         print("footer element shapes: "
               + ", ".join(f"{k}={v}" for k, v in sorted(reg.shape_counts.items())),
@@ -943,12 +1210,17 @@ def run(outdir: str, paths: list[str], drop_footers: bool = False,
     for stmt in registry_macros(reg):
         con.execute(stmt)
 
+    # Counts and shapes only. The reverse map is NOT in here, and neither is the
+    # salt: the report sits next to the release and is easy to hand over.
     report = {"files": {}, "registry": {"emails": len(reg.emails),
                                         "names": len(reg.names),
                                         "footer_elements": len(reg.footer_elements),
                                         "footer_shapes": reg.shape_counts,
                                         "preserved_domains": len(reg.domains),
                                         "footer_text_collapses": collapses},
+              "pseudonym_scheme": {"hash": "blake2b keyed, salted",
+                                   "hex_length": PSEUDO_HEX_LEN,
+                                   "stable_across_input_sets": True},
               "drop_footers": drop_footers,
               "null_commit_summary": null_commit_summary}
     failures: list[str] = []
@@ -1200,11 +1472,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--null-commit-summary", action="store_true",
                     help="NULL commit_summary, as the original tool did")
     ap.add_argument("--report", help="write the full JSON report here")
+    ap.add_argument("--salt-file",
+                    help=f"file holding the private pseudonymization salt. "
+                         f"Default: ${SALT_FILE_ENV}, else ${SALT_ENV} inline, "
+                         f"else {DEFAULT_SALT_FILE}. Required; never generated.")
     args = ap.parse_args(argv)
 
-    report = run(args.outdir, args.inputs, drop_footers=args.drop_footers,
-                 null_commit_summary=args.null_commit_summary,
-                 report_path=args.report)
+    try:
+        report = run(args.outdir, args.inputs, drop_footers=args.drop_footers,
+                     null_commit_summary=args.null_commit_summary,
+                     report_path=args.report, salt_file=args.salt_file)
+    except SaltError as e:
+        # Exit 2 is "misuse", matching verify_anon.py, and distinct from the 1
+        # that means "ran and found residue". A release script can tell the
+        # difference between a missing secret and a dirty dataset.
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    except CollisionError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
     return 1 if report["failures"] else 0
 
 
