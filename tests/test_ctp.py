@@ -63,6 +63,7 @@ REAL_RUNNER_USAGE = """\
 #   --firm-map PATH        forward the domain->firm CSV to step 10
 #   --firm-canonical PATH  forward the canonical firm-name table to step 10
 #   --mask-widened    resume across a mask change, reusing blob_map
+#   --retokenize EXTS re-tokenize only these extensions after a tokenizer fix
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
 #   --jobs N      concurrent blame/HTML processes
@@ -1050,7 +1051,7 @@ def run_args(**over):
                 shards=0, shard_classes="L",
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
-                mask="", mask_widened=False)
+                mask="", mask_widened=False, retokenize="")
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -2306,3 +2307,114 @@ def test_an_override_warns_that_the_recorded_mask_will_not_match(sandbox, monkey
     assert r"--mask overrides the manifest" in out
     assert r"\.rs$" in out
     assert "will not match" in out
+
+
+# ---------------------------------------------------------------------------
+# --retokenize: discard ONE extension's cached tokenizations after the
+# tokenizer that produced them was corrected.
+#
+# This is not --mask-widened's problem and must not be confused with it. The
+# mask decides WHICH files are tokenized; this decides HOW. The blob map keys
+# reuse on the command string and the mask, and rebuilding a tokenizer binary
+# changes neither — which is exactly how a 16-day-stale rust_tokenizer shipped
+# shifted token columns and the run exited 0.
+# ---------------------------------------------------------------------------
+
+def test_retokenize_is_forwarded_to_the_runner(runner, jq):
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
+                     mask_widened=False, retokenize="rs")
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert "--retokenize" in argv
+    assert argv[argv.index("--retokenize") + 1] == "rs"
+    # Still before the positional FROM_STEP, which the runner reads from the tail.
+    assert argv[-1] == "2"
+
+
+def test_no_retokenize_sends_no_flag_so_nothing_is_discarded_by_accident(runner, jq):
+    """The default must never delete cached work. This flag is opt-in only."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
+                     mask_widened=False, retokenize="")
+    ctp.run_project(jq)
+    assert "--retokenize" not in runner.argv("pipeline")
+
+
+def test_a_missing_retokenize_option_sends_no_flag(runner, jq):
+    """run_project reads _OPTS directly, so a caller that never set the key gets
+    the safe behaviour rather than a crash."""
+    ctp._OPTS.clear()
+    ctp._OPTS.update(skip_html=False, drop_memo=False)
+    ctp.run_project(jq)
+    assert "--retokenize" not in runner.argv("pipeline")
+
+
+def test_retokenize_needs_step_two_exactly_not_two_or_more(sandbox, monkeypatch):
+    """Step 1 deletes the blob map this flag edits. Step 3 and later SKIP step 2,
+    so the tokens would never be remade and the rest of the pipeline would run over
+    the stale ones and exit 0 — the worst outcome, because it looks like success."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    for bad in (1, 3, 7):
+        with pytest.raises(SystemExit) as exc:
+            ctp.cmd_run(run_args(retokenize="rs", from_step=bad))
+        assert "--from-step 2 exactly" in str(exc.value)
+
+
+def test_retokenize_is_refused_on_a_runner_that_cannot_forward_it(
+        sandbox, monkeypatch, runner_script):
+    """Dropped silently, step 2 reuses the very tokenizations the operator asked to
+    discard and the run exits 0. Nothing in the output would say the corrected
+    tokenizer never ran."""
+    runner_script(REAL_RUNNER_USAGE.replace("--retokenize EXTS", "--nope EXTS"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(retokenize="rs", from_step=2))
+    assert "--retokenize is not implemented" in str(exc.value)
+
+
+def test_retokenize_and_mask_widened_are_refused_together(sandbox, monkeypatch):
+    """Each verifies a different invariant of the blob map. Together neither check
+    means anything: one reuses rows across a mask change, the other deletes rows a
+    tokenizer change invalidated."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(retokenize="rs", mask_widened=True, from_step=2))
+    assert "cannot be used in the same run" in str(exc.value)
+
+
+def test_retokenize_is_refused_together_with_sharding(sandbox, monkeypatch):
+    """Each shard builds a fresh blob map, so there are no cached tokenizations to
+    invalidate."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(retokenize="rs", from_step=2, shards=4))
+    assert "no cached tokenizations to invalidate" in str(exc.value)
+
+
+def test_retokenize_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
+    """This flag DELETES cached work. A reader of the log must see which extensions
+    lost their tokenizations without inferring it from the absence of a refusal."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(retokenize="rs", from_step=2)) == 0
+    out = capsys.readouterr().out
+    assert "DISCARD" in out
+    assert "rs" in out
+
+
+def test_a_blank_retokenize_is_treated_as_absent(sandbox, monkeypatch):
+    """Whitespace from a shell variable that expanded to nothing must not count as
+    a request, and must not trip the step-2 refusal on an ordinary run."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    assert ctp.cmd_run(run_args(retokenize="   ", from_step=1)) == 0

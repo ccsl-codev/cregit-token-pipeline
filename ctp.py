@@ -501,6 +501,15 @@ def run_project(project: dict) -> str:
         # --from-step is 2 or more; blobExec does the per-project verification.
         if _OPTS.get("mask_widened"):
             pipeline_args.append("--mask-widened")
+        # Invalidate the tokenizations of ONE extension set, because the tokenizer
+        # that produced them was corrected. This is not --mask-widened's problem:
+        # the mask decides WHICH files are tokenized, this decides HOW, and the
+        # blob map keys reuse on the command string and the mask, neither of which
+        # a rebuilt binary changes. The runner supplies --memo-dir alongside it,
+        # because a dropped blob_map row whose memo entry survives is served the
+        # stale tokens straight back.
+        if _OPTS.get("retokenize"):
+            pipeline_args += ["--retokenize", _OPTS["retokenize"]]
         # Put the memo outside the work directory, which a FROM_STEP=1 run
         # deletes. It matters now because the mask changed corpus-wide and
         # blobExec refuses to resume against a different one (Mapping.open), so
@@ -753,12 +762,41 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.shards > 1:
             sys.exit("--mask-widened cannot be combined with sharding: each shard builds a fresh\n"
                      "blob map, so there is no recorded mask to widen.")
+    # --retokenize, under the same rule, and with stakes of its own. An unimplemented
+    # flag would be DROPPED and step 2 would then reuse the very tokenizations the
+    # operator asked to discard, and exit 0. That reads as a successful re-run rather
+    # than as a missing feature, which is the worst of the two failures: nothing in
+    # the output says the corrected tokenizer never ran.
+    retokenize = (getattr(args, "retokenize", "") or "").strip()
+    if retokenize:
+        if not script_supports("--retokenize"):
+            sys.exit(f"--retokenize is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                     "That checkout would drop the flag, step 2 would reuse the cached\n"
+                     "tokenizations you asked to discard, and the run would exit 0 having\n"
+                     "changed nothing. Check pipeline.cfg points at a checkout that has it.")
+        # The runner requires EXACTLY 2, not 2-or-more. Step 1 deletes the blob map
+        # this flag edits; step 3 and later skip step 2 altogether, so the run would
+        # rebuild blame, HTML and the dataset over tokens nobody re-made.
+        if args.from_step != 2:
+            sys.exit(f"--retokenize needs --from-step 2 exactly (got {args.from_step}).\n"
+                     "Step 1 deletes the blob map this flag edits. Step 3 and later skip step 2,\n"
+                     "so the tokens would never be remade and the rest of the pipeline would run\n"
+                     "over the stale ones and exit 0.")
+        if mask_widened:
+            sys.exit("--mask-widened and --retokenize cannot be used in the same run. Each one\n"
+                     "verifies a different invariant of the blob map, and together neither check\n"
+                     "means anything: one reuses rows across a mask change, the other deletes rows\n"
+                     "a tokenizer change invalidated.")
+        if args.shards > 1:
+            sys.exit("--retokenize cannot be combined with sharding: each shard builds a fresh\n"
+                     "blob map, so there are no cached tokenizations to invalidate.")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
     _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
                  memo_dir=args.memo_dir,
                  shards=args.shards, shard_classes=shard_classes,
                  from_step=args.from_step, gc=args.gc,
                  mask_widened=mask_widened,
+                 retokenize=retokenize,
                  blame_jobs=args.blame_jobs,
                  memory_limit=args.memory_limit,
                  duckdb_threads=args.duckdb_threads,
@@ -785,6 +823,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             say(f"WARNING: {warning}")
     if args.from_step > 1:
         say(f"resuming at step {args.from_step}: the runner keeps the existing workdir")
+    if retokenize:
+        # Loud, because this flag DELETES cached work. A reader of the log must be
+        # able to see which extensions lost their tokenizations without inferring it
+        # from the absence of a refusal.
+        say(f"--retokenize {retokenize}: step 2 will DISCARD the cached tokenizations "
+            f"for these extensions and redo them.")
+        say("         Every other extension's cached work is kept. blobExec drops the "
+            "blob_map rows and the memo entries together, and refuses the run (exit 7) "
+            "if the request would have invalidated nothing — so a typo cannot pass as "
+            "a successful re-run.")
     if mask_widened:
         # Loud, because this is the one flag that lets a blob map recorded under one
         # mask be reused under another, and the reader of a log should not have to
@@ -1043,6 +1091,20 @@ def main() -> int:
                             "lost its repack at the end of step 2 with 15.2 h of "
                             "tokenizing already on disk, and --from-step 3 skips "
                             "the clone, the tokenize and the repack")
+    run_p.add_argument("--retokenize", metavar="EXTS", default="",
+                       help="re-tokenize only these extensions, because the tokenizer "
+                            "that produced their cached tokens was corrected. Comma "
+                            "separated, without dots: --retokenize rs. Needs "
+                            "--from-step 2 exactly, and cannot be combined with "
+                            "--mask-widened or sharding. This is NOT a mask change: "
+                            "the mask decides WHICH files are tokenized, this decides "
+                            "HOW. It exists because the blob map keys reuse on the "
+                            "command string and the mask, and rebuilding a tokenizer "
+                            "binary changes neither, so a plain resume would serve the "
+                            "poisoned tokens back and exit 0. blobExec drops the "
+                            "matching blob_map rows and the memo entries together, in "
+                            "one transaction with the tree, commit and ref maps, and "
+                            "refuses the run rather than invalidating nothing.")
     run_p.add_argument("--mask-widened", action="store_true",
                        help="reuse each project's existing tokenizations across a "
                             "MASK CHANGE instead of rebuilding from cold. Needs "
