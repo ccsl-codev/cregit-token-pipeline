@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import configparser
 import contextlib
+import fcntl
 import importlib.util
 import os
 import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -28,6 +31,7 @@ import pytest
 import retain
 
 REAL_OUT = retain.OUT
+REAL_STATE = retain.STATE
 
 
 @pytest.fixture(autouse=True)
@@ -38,13 +42,26 @@ def no_sleep(monkeypatch):
 
 @pytest.fixture
 def out(tmp_path, monkeypatch):
-    """The output directory every test operates in. Never the real one."""
+    """The output directory every test operates in. Never the real one.
+
+    STATE is patched here too, not only OUT. retain.STATE is derived from CORPUS
+    at import time and holds the liveness locks, so a test that creates a lock
+    with STATE unpatched would write into the REAL state/ directory of a possibly
+    running corpus — the same trap that was hit in consolidate.py, where the
+    fixture patched CORPUS but not a constant derived from it. Both are asserted
+    below to be inside tmp_path.
+    """
     d = (tmp_path / "corpus-files").resolve()
     d.mkdir()
     monkeypatch.setattr(retain, "OUT", d)
+    state = (tmp_path / "state").resolve()
+    state.mkdir()
+    monkeypatch.setattr(retain, "STATE", state)
     # Data safety: if this ever equals the live corpus, --apply tests delete it.
     assert retain.OUT != REAL_OUT
     assert retain.OUT.is_relative_to(tmp_path.resolve())
+    assert retain.STATE != REAL_STATE
+    assert retain.STATE.is_relative_to(tmp_path.resolve())
     return d
 
 
@@ -1164,3 +1181,276 @@ def test_remove_tree_reports_no_errors_when_the_tree_goes(out):
     workdir = make_project(out, "jq")
     assert retain.remove_tree(workdir / "memo") == []
     assert not (workdir / "memo").exists()
+
+
+# --------------------------------------------------------------------------
+# Liveness: a validated project can still be in use
+# --------------------------------------------------------------------------
+# The .validated stamp says "this project finished once", not "nothing is using
+# it now". A `--from-step 2` re-run of an already-validated project keeps the
+# stamp for the whole re-run while blobExec reads and writes memo/ as its
+# blob-to-token cache, and the planned re-run wave does exactly that to 63
+# validated projects. Pruning one of those mid-run destroys hours of tokenizing.
+
+
+@contextlib.contextmanager
+def foreign_lock(lockfile: Path):
+    """A REAL second process holding an flock on lockfile.
+
+    It has to be another process. flock locks belong to an open file description,
+    so a handle opened here would be refused like a foreign one -- but retain
+    excepts the CALLER's own lock on purpose, because ctp.py prunes from inside a
+    live run while holding it. A same-process handle would therefore not exercise
+    the guard at all. The child acks on stdout before the test proceeds, so
+    nothing here depends on a sleep, and it exits when its stdin closes.
+    """
+    lockfile.parent.mkdir(parents=True, exist_ok=True)
+    lockfile.touch()
+    code = ("import fcntl, sys\n"
+            "f = open(sys.argv[1], 'r')\n"
+            "fcntl.flock(f, fcntl.LOCK_EX)\n"
+            "sys.stdout.write('locked\\n'); sys.stdout.flush()\n"
+            "sys.stdin.read()\n")
+    proc = subprocess.Popen([sys.executable, "-c", code, str(lockfile)],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            text=True)
+    try:
+        assert proc.stdout.readline() == "locked\n", "the lock holder never started"
+        yield proc
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=60)
+        proc.stdout.close()
+
+
+def test_a_validated_but_live_project_is_not_touched(out, capsys):
+    """The defect this guard fixes. Stamp present, parquet present, so every
+    older gate passes -- and a run owns the workdir. --apply must delete
+    nothing."""
+    workdir = make_project(out, "jq")
+    before = snapshot(workdir)
+    with foreign_lock(retain.lock_path("jq")):
+        assert retain.prune("jq", apply=True) == (0, False)
+    assert snapshot(workdir) == before
+    log = capsys.readouterr().out
+    assert "jq — SKIP: LIVE" in log
+
+
+def test_a_live_project_is_not_even_measured_in_a_dry_run(out, capsys):
+    """A dry run reports the reason and no size. Measuring means stat()ing every
+    blob in memo/, which is I/O taken from the run that owns it."""
+    make_project(out, "jq")
+    with foreign_lock(retain.lock_path("jq")):
+        assert retain.prune("jq") == (0, False)
+    log = capsys.readouterr().out
+    assert "SKIP: LIVE" in log
+    assert "would delete" not in log
+    assert "reclaimable" not in log
+
+
+def test_a_validated_and_idle_project_is_still_pruned(out):
+    """The guard must not be a blanket refusal. A lock file left behind by a run
+    that has finished is not a live run: state/<name>/ outlives the run, so an
+    existence test would have frozen retention for every project ever run."""
+    workdir = make_project(out, "jq")
+    retain.lock_path("jq").parent.mkdir(parents=True)
+    retain.lock_path("jq").touch()
+
+    assert retain.live("jq") is False
+    reclaimed, ok = retain.prune("jq", apply=True)
+
+    assert ok and reclaimed > 0
+    assert not (workdir / "memo").exists()
+    assert not (workdir / "html").exists()
+    assert (workdir / "jq-dataset.parquet").exists()
+
+
+def test_a_project_with_no_state_directory_at_all_is_pruned(out):
+    """The common case: nothing under state/ for this project."""
+    workdir = make_project(out, "jq")
+    assert not retain.lock_path("jq").exists()
+    assert retain.live("jq") is False
+    assert retain.prune("jq", apply=True)[1] is True
+    assert not (workdir / "memo").exists()
+
+
+def test_the_guard_fires_on_the_ctp_prune_path_not_only_via_main(out, capsys):
+    """prune() is also `ctp.py run --drop-memo`'s entry point -- the call that
+    runs 1,423 times. This is that exact call signature, with no main()
+    anywhere: ctp.py:595 prune(name, ("memo",), apply=True)."""
+    workdir = make_project(out, "jq")
+    before = snapshot(workdir)
+    with foreign_lock(retain.lock_path("jq")):
+        assert retain.prune("jq", ("memo",), apply=True) == (0, False)
+    assert snapshot(workdir) == before
+    assert "SKIP: LIVE" in capsys.readouterr().out
+
+
+def test_the_callers_own_lock_does_not_block_its_own_prune(out):
+    """ctp.py reaches prune() from --drop-memo while STILL holding that
+    project's lock: the call sits inside the try whose finally closes the
+    lockfile. flock conflicts between two handles on the same file even within
+    one process, so a guard that did not except the caller's own lock would
+    refuse every --drop-memo prune, keep memo/ for all 1,423 projects and fill
+    the disk. Exactly what ctp.py does, in-process."""
+    workdir = make_project(out, "jq")
+    lockfile = retain.lock_path("jq")
+    lockfile.parent.mkdir(parents=True)
+    with lockfile.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Held, to anyone else.
+        assert retain.lock_held(lockfile) is True
+        # But not to the holder, so its own cleanup goes through.
+        assert retain.live("jq") is False
+        reclaimed, ok = retain.prune("jq", ("memo",), apply=True)
+
+    assert ok and reclaimed > 0
+    assert not (workdir / "memo").exists()
+    assert (workdir / "html" / "index.html").exists()
+
+
+def test_a_lock_in_the_work_directory_is_not_mistaken_for_the_real_lock(out):
+    """The real lock lives in state/, never in the workdir -- the runner deletes
+    the workdir at FROM_STEP=1 and from its EXIT trap, which would take a lock
+    kept inside it, so every run would look idle. A held .lock in the workdir is
+    therefore not evidence of a run, and it must not be read as any."""
+    workdir = make_project(out, "jq")
+    decoy = workdir / ".lock"
+    with foreign_lock(decoy):
+        assert retain.live("jq") is False
+        reclaimed, ok = retain.prune("jq", apply=True)
+
+    assert ok and reclaimed > 0
+    assert not (workdir / "memo").exists()
+    assert decoy.exists(), "the decoy was in the workdir root, not a subtree"
+
+
+def test_the_liveness_probe_never_writes_to_the_lock_file(out):
+    """The two older copies of this predicate (ctp.py, consolidate.py) open the
+    lock file "w", which truncates the file they are inspecting. retain.py must
+    not write anything under state/, so it opens "r"."""
+    make_project(out, "jq")
+    lockfile = retain.lock_path("jq")
+    lockfile.parent.mkdir(parents=True)
+    lockfile.write_bytes(b"pid=4242\n")
+
+    assert retain.live("jq") is False
+    retain.prune("jq", apply=True)
+
+    assert lockfile.read_bytes() == b"pid=4242\n"
+
+
+def test_an_unreadable_lock_file_counts_as_live(out):
+    """"I cannot tell" must not resolve to "delete it"."""
+    workdir = make_project(out, "jq")
+    lockfile = retain.lock_path("jq")
+    lockfile.parent.mkdir(parents=True)
+    lockfile.touch()
+    lockfile.chmod(0o000)
+    if os.access(lockfile, os.R_OK):  # pragma: no cover - root ignores the mode
+        pytest.skip("running as root: an unreadable file is still readable")
+    try:
+        assert retain.live("jq") is True
+        assert retain.prune("jq", apply=True) == (0, False)
+        assert (workdir / "memo" / "blob0001").exists()
+    finally:
+        lockfile.chmod(0o600)
+
+
+def test_the_live_skip_is_reported_and_counted(out, monkeypatch, capsys):
+    """A live project must be named, counted on its own line, and must not stop
+    the sweep: one live project cannot hold up retention for the rest."""
+    live_wd = make_project(out, "linux")
+    idle_wd = make_project(out, "jq")
+    with foreign_lock(retain.lock_path("linux")):
+        assert run_main(monkeypatch, "linux", "jq", "--apply") == 1
+
+    log = capsys.readouterr().out
+    assert "LIVE 1 project(s), a running pipeline holds the lock, " \
+           "left untouched: linux" in log
+    assert (live_wd / "memo" / "blob0001").exists()
+    assert not (idle_wd / "memo").exists()
+    assert "TOTAL reclaimed" in log
+    assert "over 1 project(s)" in log
+
+
+def test_a_live_skip_is_distinguishable_from_an_unvalidated_skip(out, monkeypatch,
+                                                                capsys):
+    """Different causes, different remedies: a live project needs only a later
+    sweep, an unvalidated one needs looking at. Neither line may absorb the
+    other."""
+    make_project(out, "linux")
+    make_project(out, "half", parquet=None)
+    make_project(out, "jq")
+    with foreign_lock(retain.lock_path("linux")):
+        assert run_main(monkeypatch, "linux", "half", "jq", "--apply") == 1
+
+    log = capsys.readouterr().out
+    assert "linux — SKIP: LIVE" in log
+    assert "half — SKIP: not finished (missing keeper" in log
+    assert "LIVE 1 project(s)" in log and "left untouched: linux" in log
+    assert "SKIPPED 1 project(s), not pruned: half" in log
+    live_line = next(l for l in log.splitlines() if "LIVE 1 project(s)" in l)
+    skip_line = next(l for l in log.splitlines() if "SKIPPED 1 project(s)" in l)
+    assert "half" not in live_line and "linux" not in skip_line
+
+
+def test_a_whole_corpus_sweep_skips_the_live_project_and_prunes_the_rest(
+        out, monkeypatch, capsys):
+    """No project names on the command line: the lister still offers a live
+    project, because it is validated, and the guard in prune() is what stops
+    it."""
+    live_wd = make_project(out, "linux")
+    idle_wd = make_project(out, "zstd")
+    with foreign_lock(retain.lock_path("linux")):
+        assert "linux" in retain.finished_projects()
+        assert run_main(monkeypatch, "--apply") == 1
+
+    assert (live_wd / "memo" / "deep" / "blob0002").exists()
+    assert not (idle_wd / "memo").exists()
+    assert "left untouched: linux" in capsys.readouterr().out
+
+
+def test_lock_path_agrees_with_ctp(out):
+    """One spelling of the lock, in two files. retain.py cannot import ctp.py --
+    ctp.py imports retain -- so the path is duplicated, and a silent drift would
+    make retain look for locks where there are none and call every project idle.
+    Imported here, where a cycle does not matter, to pin the two together."""
+    import ctp  # noqa: PLC0415 - deliberately local, see the docstring
+
+    assert REAL_STATE == ctp.STATE
+    # retain.STATE is patched to tmp_path by the fixture; compare the shapes.
+    assert (retain.lock_path("jq").relative_to(retain.STATE)
+            == ctp.lock_path("jq").relative_to(ctp.STATE))
+    assert retain.lock_path("jq").relative_to(retain.STATE) == Path("jq/.lock")
+
+
+def test_live_is_not_fooled_by_a_lock_for_another_project(out):
+    """The lock is per project. linux running says nothing about jq."""
+    workdir = make_project(out, "jq")
+    with foreign_lock(retain.lock_path("linux")):
+        assert retain.live("linux") is True
+        assert retain.live("jq") is False
+        assert retain.prune("jq", apply=True)[1] is True
+    assert not (workdir / "memo").exists()
+
+
+def test_without_procfs_even_the_callers_own_lock_reads_as_live(out, monkeypatch,
+                                                               capsys):
+    """The self-ownership test reads /proc/self/fd, so it is Linux-only. Where
+    that is unavailable the guard must fail towards NOT deleting: a --drop-memo
+    prune is then declined and memo/ merely survives, which costs disk instead of
+    work."""
+    workdir = make_project(out, "jq")
+    lockfile = retain.lock_path("jq")
+    lockfile.parent.mkdir(parents=True)
+    monkeypatch.setattr(retain.os, "listdir",
+                        lambda p: (_ for _ in ()).throw(OSError("no procfs")))
+
+    with lockfile.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert retain.live("jq") is True
+        assert retain.prune("jq", ("memo",), apply=True) == (0, False)
+
+    assert (workdir / "memo" / "blob0001").exists()
+    assert "SKIP: LIVE" in capsys.readouterr().out
