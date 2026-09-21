@@ -170,11 +170,12 @@ def test_lock_held_is_true_while_another_process_holds_it(sandbox):
 # project_rows
 # --------------------------------------------------------------------------- #
 
-def test_project_rows_builds_one_nine_column_tuple_per_project(sandbox):
+def test_project_rows_builds_one_ten_column_tuple_per_project(sandbox):
     """The tuple shape must match the projects table, or executemany fails.
 
-    The shape grew from seven columns to nine: rows_unreadable and
-    parquet_missing now travel with every project, false for a healthy one.
+    The shape grew from seven columns to ten: rows_unreadable,
+    parquet_missing and excluded_because now travel with every project. The
+    first two are false for a healthy project, the third is None.
     """
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=1234\nbytes=5678\n", parquet=True)
@@ -182,7 +183,7 @@ def test_project_rows_builds_one_nine_column_tuple_per_project(sandbox):
     rows = consolidate.project_rows()
     assert rows == [("jq", "https://github.com/jqlang/jq.git", "community", "S",
                      "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"),
-                     False, False)]
+                     False, False, None)]
 
 
 def test_project_rows_classifies_all_four_states(sandbox):
@@ -238,9 +239,9 @@ def test_project_rows_reports_no_parquet_path_when_the_file_is_absent(sandbox):
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=9\nbytes=9\n", parquet=False)
     (name, _url, _cat, _cls, state, n_rows, parquet,
-     rows_unreadable, parquet_missing) = consolidate.project_rows()[0]
+     rows_unreadable, parquet_missing, excluded) = consolidate.project_rows()[0]
     assert (name, state, n_rows, parquet) == ("jq", "DONE", 9, None)
-    assert (rows_unreadable, parquet_missing) == (False, True)
+    assert (rows_unreadable, parquet_missing, excluded) == (False, True, None)
 
 
 def test_project_rows_does_not_flag_a_queued_project_as_missing_data(sandbox):
@@ -318,11 +319,12 @@ def test_main_replaces_the_projects_table_and_inserts_every_row(sandbox, con, ca
     assert "token_rows bigint" in ddl
     assert "rows_unreadable boolean" in ddl
     assert "parquet_missing boolean" in ddl
+    assert "excluded_because text" in ddl
     sql, rows = con.batches[0]
-    assert sql == "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    assert sql == "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     assert rows == [("jq", "https://github.com/jqlang/jq.git", "community", "S",
                      "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"),
-                     False, False)]
+                     False, False, None)]
 
 
 def test_main_loads_the_metrics_ledger_as_a_tsv_with_a_header(sandbox, con):
@@ -456,6 +458,81 @@ def test_main_counts_and_names_a_done_project_whose_parquet_is_gone(
     assert "here-dataset.parquet" in view
 
 
+# --------------------------------------------------------------------------- #
+# publication exclusions
+# --------------------------------------------------------------------------- #
+
+def test_project_rows_carries_the_reason_for_an_excluded_project(
+        sandbox, monkeypatch):
+    """The reason must reach the projects table. A bare boolean would record
+    that a project was dropped without recording why, which is the thing the
+    sampling record exists to prevent."""
+    monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
+                        {"twin": "near-duplicate of other"})
+    write_manifest(sandbox.root,
+                   "twin\thttps://t.git\tcompany-owned\t\\.[ch]$\tM",
+                   "other\thttps://o.git\tcompany-owned\t\\.[ch]$\tM")
+    make_project(sandbox.out, "twin", stamp="rows=5\nbytes=6\n", parquet=True)
+    make_project(sandbox.out, "other", stamp="rows=7\nbytes=8\n", parquet=True)
+
+    reasons = {r[0]: r[9] for r in consolidate.project_rows()}
+    assert reasons == {"twin": "near-duplicate of other", "other": None}
+
+
+def test_main_keeps_an_excluded_project_in_projects_but_out_of_the_tokens_view(
+        sandbox, con, monkeypatch, capsys):
+    """This is the whole point of the mechanism. Deleting the manifest row would
+    drop the project from the sampling record; publishing it would count the
+    same authorship twice. The row stays, the tokens do not."""
+    monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
+                        {"twin": "near-duplicate of other"})
+    write_manifest(sandbox.root,
+                   "twin\thttps://t.git\tcompany-owned\t\\.[ch]$\tM",
+                   "other\thttps://o.git\tcompany-owned\t\\.[ch]$\tM")
+    make_project(sandbox.out, "twin", stamp="rows=5\nbytes=6\n", parquet=True)
+    make_project(sandbox.out, "other", stamp="rows=7\nbytes=8\n", parquet=True)
+
+    consolidate.main()
+
+    _sql, rows = con.batches[0]
+    assert {r[0] for r in rows} == {"twin", "other"}, "the row must survive"
+    assert {r[0]: r[4] for r in rows} == {"twin": "DONE", "other": "DONE"}
+    view = con.find("create or replace view tokens")
+    assert "twin-dataset.parquet" not in view
+    assert "other-dataset.parquet" in view
+
+
+def test_main_names_and_counts_a_publication_exclusion(
+        sandbox, con, monkeypatch, capsys):
+    """A silent exclusion is worse than the crash it replaces, so the summary
+    prints the name and the reason."""
+    monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
+                        {"twin": "near-duplicate of other"})
+    write_manifest(sandbox.root,
+                   "twin\thttps://t.git\tcompany-owned\t\\.[ch]$\tM",
+                   "other\thttps://o.git\tcompany-owned\t\\.[ch]$\tM")
+    make_project(sandbox.out, "twin", stamp="rows=5\nbytes=6\n", parquet=True)
+    make_project(sandbox.out, "other", stamp="rows=7\nbytes=8\n", parquet=True)
+
+    consolidate.main()
+
+    out = capsys.readouterr().out
+    assert "publication exclusions: 1" in out
+    assert "- twin: near-duplicate of other" in out
+    assert "tokens view: 1,234,567 rows across 1 projects" in out
+
+
+def test_the_shipped_exclusion_list_drops_tendb_and_keeps_tdbctl(sandbox):
+    """The fork pair decision, pinned. tendb has 4.3x the files but every extra
+    path is upstream Oracle, Facebook or Percona code; tdbctl holds 4.9x more
+    first-party authorship. Swapping these two silently would publish the wrong
+    half of a near-duplicate pair."""
+    assert "tencent__tendbcluster-tendb" in consolidate.PUBLICATION_EXCLUSIONS
+    assert "tencent__tendbcluster-tdbctl" not in consolidate.PUBLICATION_EXCLUSIONS
+    why = consolidate.PUBLICATION_EXCLUSIONS["tencent__tendbcluster-tendb"]
+    assert "tencent__tendbcluster-tdbctl" in why, "the reason must name the twin"
+
+
 def test_main_says_nothing_about_flags_when_every_project_is_healthy(
         sandbox, con, capsys):
     """The summary must stay quiet on a clean corpus, or the operator learns to
@@ -468,6 +545,7 @@ def test_main_says_nothing_about_flags_when_every_project_is_healthy(
     out = capsys.readouterr().out
     assert "parquet missing" not in out
     assert "unreadable" not in out
+    assert "publication exclusions" not in out
 
 
 def test_main_doubles_a_quote_in_a_project_path_in_the_tokens_view(sandbox, con):
