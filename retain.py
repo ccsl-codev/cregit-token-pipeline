@@ -21,8 +21,12 @@ project's metrics.tsv row. docs/DESIGN.md section 6 already classes memo/ and
 html/ as disposable; this script is that policy, executable.
 
 Cost of dropping memo/: blobExec loses its blob-to-token cache, so a later
-incremental re-run of that project re-tokenizes from scratch. Accepted — the
-parquet is the product and a validated project is never re-run.
+incremental re-run of that project re-tokenizes from scratch. Accepted for a
+FINISHED project, because the parquet is the product. Not accepted while a run
+is in progress: there memo/ is a live cache, not a leftover, and the liveness
+guard below is what keeps this script off it. A validated project IS re-run —
+`--from-step 2` re-runs keep the stamp from the earlier run — so the stamp alone
+never means "idle".
 
 Safety. Dry run is the default; --apply is required before anything is removed.
 Every guard lives in prune(), because prune() is where the deletes happen and
@@ -35,17 +39,45 @@ both entry points reach it:
     non-empty, and ctp.py's <name>.validated stamp must be present and
     non-empty. finished() is the only definition of finished, and
     finished_projects() uses it too
+  * the project must be IDLE: no pipeline run other than the caller may hold
+    ctp.py's per-project lock, state/<name>/.lock. live() is that test
   * only <output_dir>/<project>/{memo,html} is ever removed, checked against
     the resolved path
   * the walk refuses a subtree that holds a protected name or that it cannot
     read, and skips one that is not a directory
 
-A refusal and a skip both make the exit status non-zero, but they differ in
-blast radius. A refusal means the walk did not understand this project, so under
---apply nothing at all is deleted for it. A skip means only that this one
-subtree is not a directory to remove, which says nothing about its siblings, so
-the others are still pruned. The output directory comes from pipeline.cfg, read
-the same way ctp.py reads it.
+Finished is NOT idle, and conflating them is how this script would destroy a
+running job. The <name>.validated stamp means "this project finished
+successfully at some point in the past". It does not mean "nothing is using this
+workdir now", and the two come apart on every `--from-step 2` re-run of an
+already-validated project: the stamp is present for the whole re-run while
+blobExec reads and writes memo/ as its blob-to-token cache. Deleting it there is
+silent destruction of hours of work, not a reclaim. Hence live(), keyed on the
+lock the orchestrator actually holds rather than on any file in the workdir —
+run_pipeline_process.sh deletes the workdir at FROM_STEP=1 and again from its
+EXIT trap, so a lock kept inside the workdir would go with it.
+
+A live project is SKIPPED, one project at a time; --apply does not refuse the
+whole sweep because some other project is live. Reasons, in order: the corpus
+run is long and parallel, so during a multi-day build some project is nearly
+always live, and an any-live refusal would make retention impossible exactly
+when disk pressure is highest — ctp.py defers projects below its 150 GB floor,
+so "cannot prune because a run is live" plus "cannot run because disk is low" is
+a deadlock; the blast radius is per project, since workdirs do not share state
+and the guard is keyed on that project's own lock; and ctp.py's
+`run --drop-memo` prunes from inside a live run by design, so an any-live
+refusal would contradict the one caller that prunes during a run. Against that:
+an abort is louder and would also spare the live run this script's stat() I/O.
+That is a scheduling cost, not a data-safety one — run the sweep under nice and
+ionice — and the LIVE line in the summary is the loud signal.
+
+A refusal, a skip and a live project all make the exit status non-zero, but they
+differ in blast radius. A refusal means the walk did not understand this project,
+so under --apply nothing at all is deleted for it. A live project is not touched
+or even measured, and its siblings are still pruned. A skip means only that this
+one subtree is not a directory to remove, which says nothing about its siblings,
+so the others are still pruned. The output directory comes from pipeline.cfg,
+read the same way ctp.py reads it.
 
 Dry run and --apply differ on purpose. A dry run measures every subtree even
 after a refusal, so the reclaimable total is complete and a capacity plan built
@@ -63,6 +95,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import fcntl
 import os
 import shutil
 import sys
@@ -82,6 +115,19 @@ def _cfg_path(key: str, default: str) -> Path:
 
 
 OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
+
+# ctp.py's state directory, mirrored here. ctp.py defines STATE = CORPUS /
+# "state" and the per-project lock as state_dir(name) / ".lock"; both scripts
+# compute CORPUS as Path(__file__).resolve().parent from this same directory, so
+# the two agree. Spelled out rather than imported: ctp.py already imports retain,
+# and importing it back would be a cycle that drags the whole orchestrator in to
+# read one constant.
+#
+# Not configurable, because ctp.py does not make it configurable. If STATE ever
+# moves into pipeline.cfg, it must move in both files at once — a stale copy here
+# would silently look for locks where there are none and report every project
+# idle, which is the failure this guard exists to prevent.
+STATE = CORPUS / "state"
 
 # The only subtrees this script may remove, relative to a project workdir.
 DISPOSABLE = ("memo", "html")
@@ -204,6 +250,111 @@ def check_name(name: str) -> None:
         raise ValueError(f"{name!r} is not one plain project name")
 
 
+def lock_path(name: str) -> Path:
+    """ctp.py's single-instance lock for one project.
+
+    Spelled exactly as ctp.py spells it — state_dir(name) / ".lock", where
+    state_dir is STATE / name. Deliberately outside the workdir: the runner
+    deletes the workdir at FROM_STEP=1 and again from its EXIT trap, so a lock
+    kept inside it would vanish with it and every run would look idle.
+
+    Call this only with a name check_name() has passed. STATE / "../x" escapes
+    STATE exactly the way OUT / "../x" escapes OUT, and a lookup outside STATE
+    would answer the wrong question.
+    """
+    return STATE / name / ".lock"
+
+
+def _held_by_this_process(lockfile: Path) -> bool:
+    """True when THIS process already has lockfile open.
+
+    flock locks belong to an open file description, not to a process: a second fd
+    on a file this process has already locked is refused exactly as another
+    process's would be (verified, not assumed). That matters because ctp.py
+    reaches prune() from `run --drop-memo` while still holding the project's own
+    lock — the call sits inside the try whose finally closes the lockfile. A
+    liveness guard that did not except the caller's own lock would therefore
+    refuse every single --drop-memo prune, memo/ would survive for all 1,423
+    projects, and the disk-frugal corpus run would fill the disk instead. The
+    guard has to distinguish "another run owns this workdir" from "the run asking
+    owns it", and this is that distinction.
+
+    Reads /proc/self/fd, so it is Linux-only. Without procfs it says False, which
+    makes the caller's own lock look foreign: the prune is then skipped rather
+    than performed, which is the safe way to be wrong.
+    """
+    try:
+        want = lockfile.stat()
+    except OSError:
+        return False
+    try:
+        fds = os.listdir("/proc/self/fd")
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            got = os.stat(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue  # closed under us, or the directory handle itself
+        if (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
+            return True
+    return False
+
+
+def lock_held(lockfile: Path) -> bool:
+    """True when an flock on lockfile cannot be taken, i.e. someone holds it.
+
+    This is the third copy of this predicate in the repo: ctp.py's _lock_held and
+    consolidate.py's lock_held are the other two. Duplicated deliberately.
+    consolidate.py imports duckdb at module scope and duckdb comes from the devenv
+    shell, not from .venv, so `import consolidate` would make retain.py
+    unimportable outside devenv — and retain.py is stdlib-only on purpose, because
+    it is what `ctp.py run --drop-memo` calls on every project. Eight lines of
+    stdlib are the cheaper of the two dependencies. Keep the three in step.
+
+    Two deliberate differences from those two copies:
+
+      * opened "r", not "w". flock ignores the open mode on Linux, while "w"
+        truncates the very file it is inspecting; this script never writes
+        anything under state/.
+      * a lock file that exists but cannot be opened counts as HELD. The question
+        being asked is "is it safe to delete this", and the safe answer to "I
+        cannot tell" is no.
+
+    The probe takes the lock for the microseconds before it releases it, so a run
+    starting in that window sees BlockingIOError and defers the project — one
+    deferred project, no data lost. Both other copies have the same window.
+    """
+    if not lockfile.exists():
+        return False
+    try:
+        with lockfile.open("r") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(f, fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return True
+
+
+def live(name: str) -> bool:
+    """True when a pipeline run other than this caller is working on name.
+
+    This is the "nothing is using it" test, and the <name>.validated stamp is not.
+    The stamp says the project finished once; a `--from-step 2` re-run of a
+    validated project carries that stamp through the whole re-run while blobExec
+    uses memo/ as its live blob-to-token cache. Deleting memo/ there does not
+    reclaim a leftover, it destroys a cache mid-run and the run re-tokenizes from
+    scratch.
+    """
+    lockfile = lock_path(name)
+    if _held_by_this_process(lockfile):
+        return False
+    return lock_held(lockfile)
+
+
 def finished(name: str) -> tuple[bool, str]:
     """A project is finished when ctp.py stamped it AND the parquet is real."""
     workdir = OUT / name
@@ -298,6 +449,18 @@ def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
         check_name(name)
     except ValueError as exc:
         say(f"SKIP: {exc}")
+        return 0, False
+
+    # Before finished(), and before any stat of the workdir. A live project is
+    # skipped whatever its stamp says, so the reason reported is the one that
+    # matters and the live run is not asked for I/O it did not want. The guard is
+    # here, not in main(), because ctp.py calls prune() directly: a check in
+    # main() alone would leave the --drop-memo path — the one that runs 1,423
+    # times — unguarded, which is exactly the mistake output_dir_refusal() was
+    # moved down here to fix.
+    if live(name):
+        say(f"{name} — SKIP: LIVE, another run holds {lock_path(name)}. memo/ is "
+            f"blobExec's cache while it runs, so nothing was measured or deleted")
         return 0, False
 
     ok, why = finished(name)
@@ -406,25 +569,41 @@ def main() -> int:
 
     total = 0
     skipped: list[str] = []
+    running: list[str] = []
     for name in names:
         got, ok = prune(name, apply=args.apply)
         total += got
         if not ok:
-            skipped.append(name)
+            # Two disjoint lists, because the causes and the remedies differ: a
+            # live project needs nothing but a later re-run, while an unvalidated
+            # or refused one needs looking at. The predicate is prune()'s own
+            # live(), called again only to label the summary — prune() remains the
+            # single guard. If the run ends in between, the project lands under
+            # SKIPPED instead, which is still true: it was not pruned.
+            (running if live(name) else skipped).append(name)
 
     verb = "reclaimed" if args.apply else "reclaimable"
-    say(f"TOTAL {verb} {human(total)} over {len(names) - len(skipped)} project(s)")
+    say(f"TOTAL {verb} {human(total)} over "
+        f"{len(names) - len(skipped) - len(running)} project(s)")
     if args.apply:
         free_after = shutil.disk_usage(OUT).free
         say(f"disk free {human(free_before)} -> {human(free_after)}")
     else:
         say("nothing was deleted — re-run with --apply to reclaim it")
+    if running:
+        # Named separately from SKIPPED on purpose. This is not a fault and needs
+        # no investigation: a pipeline run owns these workdirs, and the remedy is
+        # to sweep again once it finishes. Still non-zero, because the sweep did
+        # not do all the work it was asked to do.
+        say(f"LIVE {len(running)} project(s), a running pipeline holds the lock, "
+            f"left untouched: {' '.join(running)}")
     if skipped:
         # "not pruned", not "not finished": a project is also skipped when a
         # subtree is refused or a delete fails, and the summary must not claim
         # those projects were unfinished. In a dry run the TOTAL above still
         # counts the subtrees of these projects that passed.
         say(f"SKIPPED {len(skipped)} project(s), not pruned: {' '.join(skipped)}")
+    if skipped or running:
         return 1
     return 0
 
