@@ -162,10 +162,50 @@ file, so no per-project estimate is safe. `torvalds__linux` has 64,508 files and
 certainly contains files of this class. Expect the wave's finish time to be decided by
 a handful of generated files, not by the project count.
 
-**Open question, not yet decided.** Whether to cap `-C100` per file — a timeout that
-falls back to plain blame, or a denylist of generated paths. A cap would trade a small
-attribution error on a few generated files for a predictable run time. Nothing
-implements this today.
+### Decided: no per-file cap. `-C100` applies to every file
+
+**124 files of 200,000 tokens or more remain to blame, 79,543,338 tokens in 15 projects.**
+Measured over the 115 projects the wave had not yet reached. They are generated data —
+register headers, bitmap-font arrays, Unicode and collation tables, TPC-DS constants:
+
+| big-file tokens | files | share of project | project |
+| ---: | ---: | ---: | --- |
+| 29,569,131 | 63 | 14.8% | `torvalds__linux` |
+| 18,694,378 | 5 | **54.1%** | `kicad__kicad-source-mirror` |
+| 8,034,675 | 8 | **51.4%** | `duckdb__duckdb` |
+| 4,869,803 | 5 | **78.2%** | `elastic__ebpf` |
+| 4,826,334 | 11 | 23.4% | `google__nearby` |
+| 3,397,137 | 7 | **65.1%** | `aws__aws-mysql-odbc` |
+| 2,530,392 | 6 | 23.5% | `tencent__tendbcluster-tdbctl` |
+| 1,925,798 | 7 | 0.8% | `googleapis__google-cloud-java` |
+| 1,872,765 | 2 | **61.4%** | `moarvm__moarvm` |
+| 1,058,219 | 2 | 17.0% | `google__binexport` |
+| 895,624 | 2 | **53.4%** | `wisk__medusa` |
+| 782,164 | 3 | 31.6% | `cuberite__cuberite` |
+| 628,124 | 1 | 24.2% | `apache__incubator-seata` |
+| 254,122 | 1 | 7.5% | `nvidia__libvirt` |
+| 204,672 | 1 | 32.2% | `wyvernlang__wyvern` |
+
+For six of the fifteen, the generated files are the **majority** of the project's dataset.
+
+Three options were considered and rejected: a deterministic size threshold, a per-file
+timeout with fallback to plain blame, and dropping the files from the corpus.
+
+**Decision (2026-09-22, Ellian): run `-C100` on every file, with no cap.** The reason is
+publication, not performance. One unconditional rule — "`git blame -C100`, every file,
+no exceptions" — is a single sentence in a methods section that any reader can
+reproduce. Every alternative makes the dataset's attribution depend on a per-file
+condition that then has to be stated, justified and published as a file list, and a
+timeout would not even be reproducible across machines. The run time is the cheaper
+cost.
+
+**Consequence, accepted:** the wave takes days rather than hours, its finish time cannot
+be estimated, and a single slot can sit on one file for over an hour. Nothing needs
+re-running, and no project carries a mixed rule.
+
+This does not weaken the guidance in [`LIMITATIONS.md`](LIMITATIONS.md): these files
+still must not be counted in any author or firm ranking. Copy detection gives them an
+answer; it does not make the answer meaningful.
 
 ## 7. Effect on the data
 
