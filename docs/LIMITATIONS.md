@@ -442,6 +442,19 @@ Any firm or person ranking by raw row count is partly a ranking of generated
 data. Weight by commits or people, or exclude outsized files, before drawing a
 conclusion.
 
+**Measured, the worst case found so far.** In `moarvm__moarvm`,
+`src/strings/unicode_db.c` — a generated Unicode property table, 23 MB and
+1,666,007 lines — contributes **1,666,007 of the project's 3,048,097 rows, 54.7%**.
+One generated file is the majority of that project's dataset. Detect the pattern
+with a per-file row count, and check it before reading any project-level author or
+firm share:
+
+```sql
+SELECT file_path, COUNT(*) n
+FROM read_parquet('<slug>-dataset.parquet')
+GROUP BY 1 ORDER BY n DESC LIMIT 10;
+```
+
 **Seven columns carry no information and five more are constant.** `repo_tag` is
 **structurally** empty, not accidentally: it comes from the multi-repository
 import tag, which only cregit's Linux-specific import populates. `contested` is

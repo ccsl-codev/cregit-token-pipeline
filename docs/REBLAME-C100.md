@@ -122,13 +122,50 @@ Parquet, in the wave of 2026-09-22:
 That is a **44x** spread, and the worst case is one of the smaller projects.
 `moarvm__moarvm` spent about 10 seconds per file on only 407 files.
 
-**Cost tracks per-file history depth, not project size.** A project with few files and
-a deep, heavily-refactored history is the expensive case, because `-C100` searches
-other files at every commit boundary. Do not size a wave from dataset size, row count,
-or size class. This is the same trap recorded for step 2 memory, where the largest
-consumer was a class-M project.
+**Cost tracks the individual file, not the project.** Do not size a wave from dataset
+size, row count, or size class. This is the same trap recorded for step 2 memory, where
+the largest consumer was a class-M project.
 
 Blame throughput ranged from **0.1 to 14 files per second** per project.
+
+### One file can hold a slot for hours
+
+`moarvm__moarvm` looked hung: its log went silent for 72 minutes after it dispatched
+the last of its 407 files, and no `.blame` file had been written for 10 minutes. It was
+not hung. A single `git blame -C100` was running at 99.8% CPU with **72 minutes of CPU
+time in 72 minutes of wall time** — real work on one file:
+
+```
+src/strings/unicode_db.c   23 MB   1,666,007 lines   104 revisions
+```
+
+A generated Unicode property table. `-C100` searches other files for the origin of
+every line at every commit boundary, so its cost grows with lines × revisions. Plain
+`git blame` handled the same file in the earlier run without trouble.
+
+`kicad__kicad-source-mirror` showed the same shape at the same moment:
+`common/gal/opengl/bitmap_font_img.c`, a generated bitmap-font array, at 10 minutes of
+CPU on one file and still running.
+
+**How to tell this from a hang.** A silent log proves nothing. Read the CPU time of the
+`git blame` child:
+
+```bash
+ps -eo pid,etime,time,pcpu,args | grep 'blame -C100'
+```
+
+If `TIME` tracks `ELAPSED` at near 100% CPU, it is working. If `TIME` is flat, it is
+stuck. The same reasoning as the step-2 rule that a frozen log is not a dead run.
+
+**Consequence for planning.** A project's cost has a long tail set by its single worst
+file, so no per-project estimate is safe. `torvalds__linux` has 64,508 files and
+certainly contains files of this class. Expect the wave's finish time to be decided by
+a handful of generated files, not by the project count.
+
+**Open question, not yet decided.** Whether to cap `-C100` per file — a timeout that
+falls back to plain blame, or a denylist of generated paths. A cap would trade a small
+attribution error on a few generated files for a predictable run time. Nothing
+implements this today.
 
 ## 7. Effect on the data
 
