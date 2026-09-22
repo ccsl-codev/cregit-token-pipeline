@@ -72,46 +72,85 @@ dependencies is therefore an upper bound, not a measurement. Restrict such
 aggregates to non-vendored paths. No column in the dataset marks a path as
 vendored, so the consumer must supply that list.
 
-**Content moved between files is credited to whoever moved it, not to its author.**
-`blameRepo/formatBlame.pl:65-66` runs a plain `git blame` with upstream cregit's
-`-C100` copy detection **commented out**. Plain blame follows a whole-file rename but
-not content moved *between* files, so a header split or a refactor re-credits every
-token it touches.
+**Content moved between files was credited to whoever moved it, not to its author.
+This is now corrected, and the correction is itself a large change to the data.**
+Read [`REBLAME-C100.md`](REBLAME-C100.md) for the method, the cost and the full
+measurement. This entry states the defect and its magnitude.
 
-Confirmed against an independent cregit implementation, `cregit.linuxsources.org`
-release 7.2, on `drivers/power/supply/power_supply.h` — byte-identical content,
-identical history. Token totals agreed **exactly**, 357 = 357, but **114 of 357
-tokens (31.9%) carried a different author** and our top-1 author was wrong: ours
-Thomas Weißschuh at 61.6%, theirs Anton Vorontsov at 56.0%. Reproduced locally on
-the same blob:
+`blameRepo/formatBlame.pl` ran a plain `git blame` with upstream cregit's `-C100`
+copy detection **commented out**. Plain blame follows a whole-file rename but not
+content moved *between* files, so a header split or a refactor re-credited every
+token it touched. No commit in this repository commented that line out, so it
+arrived that way from upstream rather than by a local choice.
+
+`-C100` is **enabled** from 2026-09-22 (`formatBlame.pl:73`). Every project is being
+re-blamed. **Status: in progress — do not mix the two attributions in one analysis.**
+
+| projects | state |
+| ---: | --- |
+| 3 | re-blamed, pilot |
+| 136 | re-blamed by the wave of 2026-09-22 |
+| 47 | **not yet re-blamed** — they also need Rust re-tokenization, which waits on a separate fix |
+
+Detect which one a file carries by comparing it against the snapshot at
+`parquet-backups/pre-reblame/`, which holds the pre-correction attribution for all
+187 projects.
+
+**Magnitude, measured at token level.** Old attribution against new, joined on
+`(file_path, token_index)`, on the first five projects of the wave. Row counts and
+schema were identical in every case, so the difference is attribution alone:
+
+| project | tokens | author changed | firm changed | top-1 author |
+| --- | ---: | ---: | ---: | --- |
+| `citusdata__citus` | 947,699 | **25.011%** | 14.942% | unchanged |
+| `dpdk__dpdk` | 15,200,540 | **16.576%** | 6.253% | **changed** |
+| `open-mpi__ompi` | 2,580,411 | 12.981% | 8.039% | unchanged |
+| `kamailio__kamailio` | 5,276,523 | 12.809% | 7.641% | unchanged |
+| `dolphin-emu__dolphin` | 5,758,507 | 10.877% | 3.080% | unchanged |
+| `buchen__portfolio` (pilot) | — | **23.183%** | 21.3% | **changed** |
+| `google__obr` (pilot) | — | 4.701% | 4.7% | unchanged |
+| `renesas__rz-fsp-examples` (pilot) | — | 0.000% | 0.0% | unchanged |
+
+So between **0% and 25%** of a project's tokens change author, and a project's
+single largest author can change. `buchen__portfolio` moved from Alexander Ott to
+Andreas Buchen.
+
+**The correction introduces a new defect: a corporate address can win an author
+ranking.** `dpdk__dpdk`'s top-1 author became **`intel at intel.com`**, which is not
+a person. Copy detection promoted it. Any per-author result over the corrected data
+needs an identity-hygiene pass first. Related: the vendoring artefact above.
+
+**Earlier line-level exposure figures in this file were wrong and are withdrawn.**
+They were measured with `git blame -C -C`, not the `-C100` the pipeline runs. Under
+`-C100` the same seeded 100-file sample of the 54,075 comparable Linux files gives
+**40.0%** of files with at least one line re-attributed, **12.0%** gaining an author,
+and **3.0%** changing their top-1 author — not the 41% / 20% / 7% previously stated.
+Use the token-level table above in preference: it measures the dataset, not a
+line-level proxy for it.
+
+The independent cross-check that first exposed the defect still stands.
+`cregit.linuxsources.org` release 7.2, on `drivers/power/supply/power_supply.h` —
+byte-identical content, identical history. Token totals agreed **exactly**, 357 =
+357, but **114 of 357 tokens (31.9%) carried a different author**, and our top-1
+author was wrong: ours Thomas Weißschuh at 61.6%, theirs Anton Vorontsov at 56.0%.
+Reproduced locally on the same blob:
 
     git blame       : Weißschuh 52, Vorontsov 33, … 7 authors
     git blame -C -C : Weißschuh 42, Vorontsov 33, Smirnov 9, Kozlowski 1, … 9 authors
 
-Copy detection moves 10 lines off the most recent author and introduces two authors
-we omit entirely. The mover was `44fcc479a574`, "power: supply: hwmon: move interface
-to private header".
+Copy detection moved 10 lines off the most recent author and introduced two authors
+we omitted entirely. The mover was `44fcc479a574`, "power: supply: hwmon: move
+interface to private header".
 
-**Exposure**, measured on a seeded 100-file sample of the 54,075 Linux files
-comparable between v7.2 and our HEAD: **41%** have at least one line re-attributed
-under `-C100` (95% CI 31.9-50.8%), **20%** gain an author (13.3-28.9%), **7%** change
-their top-1 author (3.4-13.7%), and 5.14% of lines move overall. Six of the 100 gain
-Linus Torvalds as an author, the 2.6.12 import surfacing through copy detection.
-These are line-granularity figures on original source, so they bound which files are
-susceptible rather than measuring token-level disagreement.
-
-* **Consequence**: every per-author, per-organisation and truck-factor result in this
-  dataset **systematically over-credits refactorers, file-movers and header-splitters**
-  and under-credits original authors. This is a separate mechanism from the vendoring
-  artefact above, and it moves attribution in the same direction.
-* **Detect**: compare `git blame` with `git blame -C100` on any file of interest.
-* **Work around**: none from the data. Correcting it requires re-tokenizing with copy
-  detection enabled, which changes attribution corpus-wide.
-
-No commit in this repository changed that line, so it arrived already commented and
-may reflect how cregit ships rather than a local choice. It may also have been disabled
-for run time — `-C100` is materially slower. Either way it is currently undocumented
-behaviour, which is why it is recorded here.
+* **Consequence, for the 47 projects not yet re-blamed**: every per-author,
+  per-organisation and truck-factor result over them **systematically over-credits
+  refactorers, file-movers and header-splitters** and under-credits original authors.
+  This is a separate mechanism from the vendoring artefact above, and it moves
+  attribution in the same direction.
+* **Detect**: compare the project's Parquet against `parquet-backups/pre-reblame/`.
+  If the two are identical, the project still carries plain blame.
+* **Work around**: re-blame it. `reblame_wave.sh` does this, and it refuses any
+  project that needs re-tokenization first.
 
 **The same crash mechanism reaches published data, and the corpus-wide count is
 35 files in 19 of the 186 published projects.** Re-measured 2026-09-22 with
