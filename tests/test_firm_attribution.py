@@ -319,11 +319,19 @@ def test_the_table_collapses_forty_seven_firms_out_of_ninety_eight_strings():
 # --------------------------------------------------------------------------- #
 
 def run_args(**over):
+    """allow_empty_provenance defaults to True here and only here, as it does in
+    tests/test_ctp.py's run_args. On the real CLI it is False, and cmd_run then
+    refuses any step-10 run that leaves --project-meta out. These tests are about
+    the firm flags and never pass a sidecar (the stand-in runner in the fixture
+    below does not even advertise --project-meta), so without the hatch every one
+    of them would exit on a refusal about a different flag. The guard itself is
+    tested in tests/test_ctp.py, including its real default."""
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
                 skip_html=False, drop_memo=False, memo_dir="",
                 shards=0, shard_classes="L", from_step=1, gc=None,
                 blame_jobs=0, memory_limit=None, duckdb_threads=0,
-                project_meta="", mask="", firm_map="", firm_canonical="")
+                project_meta="", mask="", firm_map="", firm_canonical="",
+                allow_empty_provenance=True)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -404,11 +412,17 @@ def test_a_map_without_a_canonical_table_is_accepted(sandbox):
     assert ctp._OPTS["firm_canonical"] == ""
 
 
-def test_a_run_without_a_firm_map_says_so(sandbox, capsys):
+def test_a_run_without_a_firm_map_is_refused_not_merely_noted(sandbox):
     """Blank firm columns are the expensive silent outcome of this whole task, so
-    the run that would produce them has to announce it."""
-    assert ctp.cmd_run(run_args()) == 0
-    assert "no --firm-map" in capsys.readouterr().out
+    the run that would produce them has to be stopped.
+
+    This test used to assert a `note: no --firm-map` line on stdout. A note is not
+    enough in this position: it covered 3 of the 32 columns at stake (omitting
+    --project-meta printed nothing at all), and it is line 1 of a log whose other
+    105 lines are 30-second heartbeats. It is now a refusal with an explicit
+    escape hatch, so the assertion changes from "it says so" to "it stops"."""
+    with pytest.raises(SystemExit, match="--firm-map absent"):
+        ctp.cmd_run(run_args(allow_empty_provenance=False))
 
 
 def test_the_runner_argv_carries_both_flags(sandbox, monkeypatch):

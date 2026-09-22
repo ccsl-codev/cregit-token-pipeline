@@ -1045,12 +1045,22 @@ def test_capture_devenv_env_exits_when_devenv_fails(monkeypatch):
 
 def run_args(**over):
     """A complete `ctp run` Namespace. Every cmd_run option belongs here, so
-    adding one is a single edit rather than one per test."""
+    adding one is a single edit rather than one per test.
+
+    allow_empty_provenance defaults to True here and ONLY here. On the real CLI it
+    defaults to False, and cmd_run then refuses any step-10 run that leaves
+    --project-meta, --firm-map or --firm-canonical out. Every test in this file
+    except the provenance-guard section leaves all three empty because it is
+    testing something else entirely, so without the hatch each one would exit on a
+    refusal it never asked about. The guard's own default — False — is exercised
+    explicitly by the tests below, which pass allow_empty_provenance=False.
+    """
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
                 skip_html=False, drop_memo=False, memo_dir="",
                 shards=0, shard_classes="L",
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
+                firm_map="", firm_canonical="", allow_empty_provenance=True,
                 mask="", mask_widened=False, retokenize="")
     base.update(over)
     return argparse.Namespace(**base)
@@ -1905,6 +1915,234 @@ def test_a_relative_sidecar_path_is_made_absolute(
     assert ctp.cmd_run(run_args(project_meta="project_meta.json")) == 0
     assert Path(ctp._OPTS["project_meta"]).is_absolute()
     assert Path(ctp._OPTS["project_meta"]) == meta.resolve()
+
+
+# --------------------------------------------------------------------------- #
+# the provenance guard
+#
+# The defect these tests exist for: `ctp.py run` used to accept --project-meta,
+# --firm-map and --firm-canonical as optional, and when they were absent it simply
+# did not forward them. generate_dataset.py treats an absent sidecar and an absent
+# firm map as supported backwards-compatible modes, so the run SUCCEEDED and
+# published a 70-column, schema-conforming Parquet whose 29 provenance columns and
+# 3 firm columns were empty strings. validate.py passed it, because the schema was
+# right.
+#
+# It is not hypothetical. On 2026-09-21 a torvalds__linux run ran 6h48m and died
+# inside step 10 for an unrelated reason; had it finished it would have published
+# the largest project in the corpus silently inconsistent with the other 185.
+#
+# The argument for an exit rather than a louder note: omitting --project-meta, the
+# 29-column half, printed NOTHING at any layer. Only the 3 firm columns had a
+# note, and a note is line 1 of a log whose other 105 lines are 30-second
+# heartbeats. The tests below therefore pin the refusal, the itemised warning the
+# escape hatch prints, and the fact that the hatch cannot arrive by default.
+# --------------------------------------------------------------------------- #
+
+def provenance_kwargs(root: Path, **override) -> dict:
+    """Real on-disk values for the three provenance flags.
+
+    The files must genuinely exist: cmd_run's per-flag checks refuse a path that
+    is not a file, and that is a DIFFERENT refusal from the guard's. Pass
+    e.g. project_meta="" to leave one flag out.
+    """
+    meta = root / "project_meta.json"
+    meta.write_text('{"jq": {}}')
+    firm = root / "affiliation.merged.csv"
+    firm.write_text("domain,company,source\nredhat.com,Red Hat,gitdm\n")
+    canonical = root / "firm_canonical.csv"
+    canonical.write_text("firm_raw,firm\nRed Hat,Red Hat\n")
+    kwargs = dict(project_meta=str(meta), firm_map=str(firm),
+                  firm_canonical=str(canonical))
+    kwargs.update(override)
+    return kwargs
+
+
+@pytest.fixture
+def ready(sandbox, monkeypatch, runner_script):
+    """A sandbox one cmd_run call away from a run that starts no process."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    return sandbox
+
+
+@pytest.fixture
+def must_not_start(sandbox, monkeypatch, runner_script):
+    """Same sandbox, but starting the run at all fails the test. The guard has to
+    fire before the devenv capture: a refusal that arrives after 6h48m of work is
+    the defect, not the fix."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    return sandbox
+
+
+def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
+    """The canonical corpus invocation — what tmp/wave.sh sends — must pass the
+    guard with allow_empty_provenance at its real CLI default of False."""
+    args = run_args(allow_empty_provenance=False,
+                    **provenance_kwargs(ready.root))
+    assert ctp.cmd_run(args) == 0
+    assert ctp._OPTS["project_meta"].endswith("project_meta.json")
+    assert ctp._OPTS["firm_map"].endswith("affiliation.merged.csv")
+    assert ctp._OPTS["firm_canonical"].endswith("firm_canonical.csv")
+
+
+@pytest.mark.parametrize("absent, expected", [
+    pytest.param({"project_meta": ""}, "--project-meta", id="no-sidecar"),
+    # --firm-canonical goes with it: without a map there is no firm_raw to
+    # canonicalise, and cmd_run already refuses that pair on its own grounds, so
+    # keeping it here would test the older check instead of this one.
+    pytest.param({"firm_map": "", "firm_canonical": ""}, "--firm-map",
+                 id="no-firm-map"),
+    pytest.param({"firm_canonical": ""}, "--firm-canonical",
+                 id="no-canonical-table"),
+])
+def test_each_provenance_flag_missing_on_its_own_is_refused(
+        must_not_start, absent, expected):
+    """One flag left out is enough. Each one owns a different slice of the
+    columns, so any single omission publishes a project that disagrees with the
+    rest of the corpus."""
+    kwargs = provenance_kwargs(must_not_start.root, **absent)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=False, **kwargs))
+    message = str(exc.value)
+    assert "refusing this run" in message
+    assert expected in message
+    assert "--allow-empty-provenance" in message, (
+        "a refusal that does not name its escape hatch sends the operator to "
+        "read the source")
+    assert not (must_not_start.root / "runs.log").exists()
+
+
+def test_the_refusal_names_every_missing_flag_and_the_columns_at_stake(
+        must_not_start):
+    """All three absent is the 2026-09-21 invocation exactly. The message must
+    list all three in one pass — reporting them one per re-run would cost three
+    round trips — and must name columns, because "provenance" alone does not tell
+    an operator what a consumer will see."""
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=False))
+    message = str(exc.value)
+    for flag in ("--project-meta", "--firm-map"):
+        assert flag in message
+    for column in ("stratum", "history_cluster", "firm_raw", "firm_source"):
+        assert column in message, f"{column} is blanked but is not named"
+    assert "29" in message and "3 firm columns" in message
+    # Without this sentence the reader has no reason to believe the run would not
+    # simply have failed, which is the misconception that let it happen.
+    assert "validate.py passes it" in message
+
+
+def test_the_escape_hatch_lets_a_deliberate_blank_run_proceed(ready):
+    """A blanket refusal would break a fixture, a one-project smoke run, and a
+    corpus whose sidecar does not exist yet."""
+    assert ctp.cmd_run(run_args(allow_empty_provenance=True)) == 0
+    assert ctp._OPTS["project_meta"] == ""
+    assert ctp._OPTS["firm_map"] == ""
+
+
+def test_the_escape_hatch_itemises_what_it_gave_up(ready, capsys):
+    """Opting out of the only check between this run and a quietly wrong dataset
+    must be legible in the log, per flag, without inferring it from the absence of
+    a refusal."""
+    assert ctp.cmd_run(run_args(allow_empty_provenance=True)) == 0
+    out = capsys.readouterr().out
+    assert "WARNING: --allow-empty-provenance" in out
+    assert "--project-meta absent" in out
+    assert "--firm-map absent" in out
+    assert "stratum" in out
+
+
+def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
+    """It must never arrive by default. This is the difference between the guard
+    and the note it replaces."""
+    seen: dict = {}
+    monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
+
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run"])
+    assert ctp.main() == 0
+    assert seen["allow_empty_provenance"] is False
+
+    seen.clear()
+    monkeypatch.setattr(ctp.sys, "argv",
+                        ["ctp.py", "run", "--allow-empty-provenance"])
+    assert ctp.main() == 0
+    assert seen["allow_empty_provenance"] is True
+
+
+def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start):
+    """Left in a launcher script the hatch would silence the guard on the next run
+    that does omit a flag, which is how the warning it replaces became useless.
+    So it is only ever valid in the same breath as an omission."""
+    kwargs = provenance_kwargs(must_not_start.root)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=True, **kwargs))
+    assert "nothing to allow" in str(exc.value)
+    assert "wrapper" in str(exc.value)
+
+
+def test_a_run_that_cannot_reach_step_10_is_not_gated(ready, capsys):
+    """Step 10 is the LAST step of run_pipeline_process.sh, so --from-step 11
+    reaches no step at all: every step guard evaluates false and the runner exits
+    0 having done nothing. Such a run writes no Parquet, so it cannot write a
+    blank one, and gating it would refuse a harmless no-op."""
+    assert ctp.cmd_run(run_args(allow_empty_provenance=False, from_step=11)) == 0
+    assert "refusing" not in capsys.readouterr().out
+
+
+def test_a_run_starting_at_step_10_is_still_gated(must_not_start):
+    """The boundary. --from-step 10 runs the dataset step and nothing else, which
+    is exactly how a Parquet gets republished, so it is the case that most needs
+    the guard rather than the one that escapes it."""
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=False, from_step=10))
+    assert "reaches step 10" in str(exc.value)
+
+
+@pytest.mark.parametrize("absent, expected", [
+    pytest.param("project_meta", "--project-meta", id="sidecar"),
+    pytest.param("firm_canonical", "--firm-canonical", id="canonical-table"),
+])
+def test_a_provenance_path_that_is_not_a_file_is_refused_by_its_own_check(
+        must_not_start, absent, expected):
+    """The guard deliberately does NOT re-check that the paths exist. Three layers
+    already do, and every one of them fails hard: cmd_run's own per-flag checks
+    (exercised further in tests/test_firm_attribution.py), then
+    run_pipeline_process.sh's argument validation (exit 2, before the clone), then
+    generate_dataset.py at the top of step 10. A path typo therefore cannot reach
+    the Parquet, so a fourth copy of the check would only be a fourth thing to
+    keep in step.
+
+    What these two assertions pin is the ORDERING: the sharper "is not a file"
+    message must win, because the guard's general one would send an operator
+    looking for a missing flag they did in fact pass."""
+    kwargs = provenance_kwargs(must_not_start.root,
+                               **{absent: str(must_not_start.root / "typo")})
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=False, **kwargs))
+    message = str(exc.value)
+    assert expected in message
+    assert "does not exist" in message or "is not a file" in message
+    assert "refusing this run" not in message
+
+
+def test_project_key_is_not_an_operator_flag(monkeypatch, capsys):
+    """The brief for this guard listed --project-key as a fourth defaultable flag.
+    It is not one: ctp has no such option. run_project derives the key from the
+    manifest name and sends it with the sidecar unconditionally, so it cannot be
+    forgotten or mistyped and needs no guard. Pinned here because the next reader
+    will make the same assumption."""
+    monkeypatch.setattr(ctp.sys, "argv",
+                        ["ctp.py", "run", "--project-key", "jq"])
+    monkeypatch.setattr(ctp, "cmd_run", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.main()
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- #
