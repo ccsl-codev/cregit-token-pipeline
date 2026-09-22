@@ -1,9 +1,14 @@
-# Handoff: re-blame the large projects on a second machine
+# Handoff: re-blame `googleapis__google-cloud-java` on a second machine
 
 **For:** kirocrew, on a machine other than `dev-dsk-ellianco-1e-5a4f0103`.
-**Task:** run pipeline **step 7 only** — `git blame -C100` per file — for a list of large
-projects, then return the `blame/` directory.
+**Task:** run pipeline **step 7 only** — `git blame -C100` per file — for
+**`googleapis__google-cloud-java`**, then return the `blame/` directory.
 **Date written:** 2026-09-22. **Author:** Claude Code session on the primary host.
+
+**Honest scope.** This is one project, and it does not unblock anything. The primary host
+will reach it on its own within a day. What you buy is a shorter tail on a 24-36 hour run,
+and insurance against a file that blames pathologically slowly. Do not treat it as
+critical-path work. If it is inconvenient, say so and nothing is lost.
 
 Read §1 to §4 before you start. §5 is a rehearsal you must pass first.
 
@@ -91,9 +96,9 @@ The four other MVP projects are available if you want a second rehearsal: `rustl
 (6.56 MiB, 293 files), `dubbo` (41.13 MiB, 4,847 files), `redis` (80.17 MiB, 1,860
 files), `terminal` (119.75 MiB, 3,680 files).
 
-## 6. Phase 1 — the real targets
+## 6. Phase 1 — the real target
 
-### 6.1 What you receive, per project
+### 6.1 What you receive
 
 Two things:
 
@@ -138,24 +143,32 @@ Four things about this command:
 Write the output to a **new** directory, `<slug>-blame-out`. Do not write into a directory
 you received.
 
-### 6.3 Targets, in priority order
+### 6.3 The target: one project
 
-These are chosen because the primary host reaches them **last**, so your work does not
-duplicate its work. Take them in this order.
+**Take `googleapis__google-cloud-java`. That is the job.**
 
-| # | project | pack | files in clone | dataset | why |
-| ---: | --- | ---: | ---: | ---: | --- |
-| 1 | `googleapis__google-cloud-java` | **1.21 GiB** | **139,624** | 991 MB | second-largest project in the corpus; by far the biggest remaining blame job |
-| 2 | `kde__krita` | 1.03 GiB | 12,442 | 47.3 MB | large C++ history |
-| 3 | `tencent__tad-sim` | 630 MiB | 11,203 | 31.0 MB | |
-| 4 | `tencent__tendbcluster-tdbctl` | 568 MiB | 7,212 | 82.6 MB | 6 oversized generated files |
-| 5 | `grpc__grpc` | 272 MiB | 10,495 | 48.3 MB | |
-| 6 | `jetbrains__intellij-obsolete-plugins` | 46 MiB | 12,722 | 15.1 MB | many files, small history |
+| | |
+| --- | --- |
+| clone to transfer | `googleapis__google-cloud-java-cregit`, **1.21 GiB** packed |
+| files in the clone | **139,624** — second only to Linux in the whole corpus |
+| dataset it produces | **991 MB** of Parquet |
+| oversized generated files | 7, but only 0.8% of its tokens, so no pathological tail expected |
 
-Total transfer for all six: about **3.8 GiB**.
+One project, because the arithmetic says so. At the time of writing, 50 projects remain
+on the primary host, worth 3,047 MB of dataset. `torvalds__linux` is 1,501 MB of that and
+is already running there on separate cores. Of the 1,546 MB left,
+**`googleapis__google-cloud-java` alone is 991 MB — 64%.**
 
-Ask before you take anything not on this list. The primary host is working through the
-same corpus alphabetically, and a project it has already reached is wasted effort.
+The next largest pending projects are `google__nearby` (76 MB), `grpc__grpc` (48 MB),
+`kde__krita` (47 MB) and `gnome__gtk` (46 MB). Together they are less than a fifth of the
+one project above. Handing them over would cost more coordination than it saves, so do not
+take them unless the primary host asks.
+
+**Ask before you take anything not named here.** The primary host dispatches in
+`manifest.sample.tsv` order, monotonically (`ctp.py:1021` maps over the manifest). It had
+reached position 85 of 135 when this was written; `googleapis__google-cloud-java` sits at
+position 101. So you have a real head start, but it is a head start, not a reservation —
+confirm before you begin.
 
 ## 7. Verification. Every check must pass
 
@@ -260,8 +273,8 @@ ps -eo pid,etime,time,pcpu,args | grep 'blame -C100'
 
 Do not use `pgrep -f` or `pkill -f` for this. Those patterns match your own command line.
 
-Expect at least one such file in `tencent__tendbcluster-tdbctl`, which has 6 oversized
-generated files. **Do not kill these processes.** The decision on this project is that
+Expect at most a mild version of this in `googleapis__google-cloud-java`: it has 7 oversized
+generated files, but they are only 0.8% of its tokens. **Do not kill these processes.** The
 `-C100` runs on every file with no cap, so that the method is one reproducible sentence.
 
 ### 8.3 Throughput you should expect
