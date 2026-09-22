@@ -254,6 +254,19 @@ protecting the mapping is not publishing the registry. And the registry spans
 **one invocation**, so pseudonyms are not stable across runs with different input
 sets — pass every file that will be published together in a single command.
 
+**Nothing runs the anonymiser automatically, and the Parquets on disk are not
+anonymised.** `anonymize_parquet.py` has **no caller anywhere in the pipeline**:
+it appears in no step of `run_pipeline_process.sh`, and neither `ctp.py` nor
+`consolidate.py` invokes it. Step 10 writes
+`<work>/<repo>-dataset.parquet` through `generate_dataset.py` and stops there. So
+every per-project Parquet in the corpus holds real addresses and real names, and
+the release is a separate manual command. Two consequences. A step-10 re-run
+**cannot** undo pseudonymisation, because the two never touch the same file — a
+re-tokenization wave needs no anonymiser precaution. And `OUTDIR` is a mandatory
+positional with **no same-file guard**, so naming a project's own work directory
+as the destination would overwrite the raw Parquet with the pseudonymised one and
+destroy the only copy of the identities. Always write to a fresh directory.
+
 Run `verify_anon.py` over the output directory as an independent check: it tests
 the published files alone for any e-mail local part that is not a pseudonym, needs
 no secrets, and so can be run by a reviewer or a depositor. It is a necessary,
@@ -282,6 +295,39 @@ common — is tokenized as C. The table also has only lowercase keys and both ga
 lowercase the extension, so `.C` and `.H` resolve to C as well, although `.C` is
 conventionally a C++ source file. This decides the grammar every header in the
 dataset was tokenized with, and it is not visible in any column.
+
+**Two files with identical content share one tokenizer cache slot, even in
+different languages — and the measured effect is confined to C against C++.**
+`tokenizeByBlobId/tokenBySha.pl` keys the memo on `sha1_hex($contents)` alone. It
+derives the extension afterwards and uses it only to pick `--language` and to name
+the temporary input file, and it validates nothing when it reads a cached entry
+back. So whichever of two identical-content files is tokenized first decides the
+grammar for both.
+
+Measured over all 188 projects, from `blob_map`, whose key is `(orig_blob, path)`:
+identical content means an identical blob sha, so an affected blob is exactly one
+whose paths span more than one language. Identity rows are excluded, since a blob
+that was never tokenized never reached the memo.
+
+| | count |
+| --- | ---: |
+| tokenized distinct blobs | 11,159,105 |
+| blobs whose paths span two languages | **1,395 (0.0125%)** |
+| projects affected | 33 of 188 |
+| language pairs: C with C++ | 1,393 |
+| language pairs: anything else | **2, and both are the empty file** |
+
+The two exceptions are `e69de29bb2d1…`, git's empty blob, which is not a
+meaningful token stream in any grammar. So **every case involving real content is
+C against C++** — a `foo.c`/`foo.cpp` or `Bar.h`/`Bar.hpp` twin — which is the
+same language-family confusion the `.h` entry above already describes. Worst
+affected project by rate is `cgdb__cgdb`, 66 of 3,404 tokenized blobs (1.9%);
+worst by count is `grpc__grpc` at 616.
+
+The defect is real and no test covers it, so a future corpus with a wider language
+mask could be hurt much more. In this corpus it changes no result that the `.h`
+entry does not already qualify. Reproduce with
+`/local/home/ellianco/tmp/memo-collision-corpus.py`.
 
 **A file can be excluded from a project with no row and no marker in the
 Parquet.** Three mechanisms remove a blob from the tokenized repository entirely,
