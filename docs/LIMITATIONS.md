@@ -72,6 +72,47 @@ dependencies is therefore an upper bound, not a measurement. Restrict such
 aggregates to non-vendored paths. No column in the dataset marks a path as
 vendored, so the consumer must supply that list.
 
+**Content moved between files is credited to whoever moved it, not to its author.**
+`blameRepo/formatBlame.pl:65-66` runs a plain `git blame` with upstream cregit's
+`-C100` copy detection **commented out**. Plain blame follows a whole-file rename but
+not content moved *between* files, so a header split or a refactor re-credits every
+token it touches.
+
+Confirmed against an independent cregit implementation, `cregit.linuxsources.org`
+release 7.2, on `drivers/power/supply/power_supply.h` — byte-identical content,
+identical history. Token totals agreed **exactly**, 357 = 357, but **114 of 357
+tokens (31.9%) carried a different author** and our top-1 author was wrong: ours
+Thomas Weißschuh at 61.6%, theirs Anton Vorontsov at 56.0%. Reproduced locally on
+the same blob:
+
+    git blame       : Weißschuh 52, Vorontsov 33, … 7 authors
+    git blame -C -C : Weißschuh 42, Vorontsov 33, Smirnov 9, Kozlowski 1, … 9 authors
+
+Copy detection moves 10 lines off the most recent author and introduces two authors
+we omit entirely. The mover was `44fcc479a574`, "power: supply: hwmon: move interface
+to private header".
+
+**Exposure**, measured on a seeded 100-file sample of the 54,075 Linux files
+comparable between v7.2 and our HEAD: **41%** have at least one line re-attributed
+under `-C100` (95% CI 31.9-50.8%), **20%** gain an author (13.3-28.9%), **7%** change
+their top-1 author (3.4-13.7%), and 5.14% of lines move overall. Six of the 100 gain
+Linus Torvalds as an author, the 2.6.12 import surfacing through copy detection.
+These are line-granularity figures on original source, so they bound which files are
+susceptible rather than measuring token-level disagreement.
+
+* **Consequence**: every per-author, per-organisation and truck-factor result in this
+  dataset **systematically over-credits refactorers, file-movers and header-splitters**
+  and under-credits original authors. This is a separate mechanism from the vendoring
+  artefact above, and it moves attribution in the same direction.
+* **Detect**: compare `git blame` with `git blame -C100` on any file of interest.
+* **Work around**: none from the data. Correcting it requires re-tokenizing with copy
+  detection enabled, which changes attribution corpus-wide.
+
+No commit in this repository changed that line, so it arrived already commented and
+may reflect how cregit ships rather than a local choice. It may also have been disabled
+for run time — `-C100` is materially slower. Either way it is currently undocumented
+behaviour, which is why it is recorded here.
+
 **The same crash mechanism reaches published data, and the corpus-wide count is
 35 files in 19 of the 186 published projects.** Re-measured 2026-09-22 with
 `measure_dataset_gaps.py`, after `torvalds__linux` published and after the
