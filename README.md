@@ -19,6 +19,7 @@ checkout's `devenv shell`.
 | --- | --- |
 | understand the dataset, its grain and all 70 columns | **[`docs/DATASET-SCHEMA.md`](docs/DATASET-SCHEMA.md)** |
 | know what is wrong with the data before you analyse it | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
+| know why attribution changed in September 2026, and by how much | **[`docs/REBLAME-C100.md`](docs/REBLAME-C100.md)** |
 | know how a project got its `stratum`, or label one yourself | [`docs/CODEBOOK.md`](docs/CODEBOOK.md) |
 | know why the pipeline is built this way | [`docs/DESIGN.md`](docs/DESIGN.md) |
 | see the sampling frame, exclusions and the per-cell draw | [`docs/CORPUS-REVIEW.md`](docs/CORPUS-REVIEW.md), [`docs/CORPUS-SAMPLE.md`](docs/CORPUS-SAMPLE.md) |
