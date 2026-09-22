@@ -507,6 +507,12 @@ def run_project(project: dict) -> str:
         ]
         if _OPTS.get("skip_html"):
             pipeline_args.append("--skip-html")
+        # Replace every .blame file instead of skipping the ones that exist.
+        # blameRepoFiles.pl skips existing output, so a step-7 resume re-blames
+        # NOTHING without this and step 10 then rebuilds the Parquet from the old
+        # blame. cmd_run has checked the runner advertises the flag.
+        if _OPTS.get("reblame"):
+            pipeline_args.append("--reblame")
         # Reuse the tokenizations already in this project's blob map across a mask
         # change. cmd_run has already checked the runner advertises it and that
         # --from-step is 2 or more; blobExec does the per-project verification.
@@ -644,6 +650,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         sys.exit(f"--skip-html is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
                  "Patch that checkout to guard its HTML step, then re-run. Refusing to\n"
                  "start: generating the HTML and deleting it later is not what the flag says.")
+    # Same reasoning as --skip-html: a checkout that does not implement --reblame
+    # would run step 7, skip every file that already has .blame output, and exit 0
+    # having changed nothing. That is the exact failure the flag exists to close, so
+    # refuse rather than report a re-blame that did not happen.
+    if args.reblame and not script_supports("--reblame"):
+        sys.exit(f"--reblame is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                 "That checkout's step 7 cannot replace existing .blame files, so the run\n"
+                 "would skip every one of them and exit 0. Refusing to start.")
+    if args.reblame and args.from_step > 7:
+        sys.exit(f"--reblame needs --from-step 7 or less (got {args.from_step}).\n"
+                 "The re-blame happens inside step 7; from step 8 the flag is skipped and\n"
+                 "step 10 rebuilds the Parquet from the blame already on disk.")
     if args.drop_memo and "--no-memo" in sys.argv:
         say("note: --no-memo is an alias for --drop-memo and does NOT prevent the write. "
             "The tokenizer requires BFG_MEMO_DIR, so memo/ is built and then deleted.")
@@ -925,6 +943,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "genuinely unknown.")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
     _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
+                 reblame=getattr(args, "reblame", False),
                  memo_dir=args.memo_dir,
                  shards=args.shards, shard_classes=shard_classes,
                  from_step=args.from_step, gc=args.gc,
@@ -1186,6 +1205,14 @@ def main() -> int:
     run_p.add_argument("--skip-html", action="store_true",
                        help="forward --skip-html to run_pipeline_process.sh so the HTML "
                             "views (94-255 MB per project) are never generated")
+    run_p.add_argument("--reblame", action="store_true",
+                       help="re-blame every file in step 7 instead of skipping the "
+                            "ones that already have .blame output. Needed whenever the "
+                            "blame itself changed (a git blame flag, a formatBlame.pl "
+                            "fix): without it a step-7 resume reports every file as "
+                            "already done, exits 0, and step 10 rebuilds the Parquet "
+                            "from the old blame. Do NOT use it to resume an interrupted "
+                            "run — the skip is what makes a resume cheap")
     run_p.add_argument("--drop-memo", "--no-memo", action="store_true",
                        help="delete memo/ (45-88%% of the workdir) once a project "
                             "validates. NOT prevention: the tokenizer requires "
