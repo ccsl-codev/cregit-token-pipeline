@@ -50,8 +50,10 @@ stays in `projects` with its reason in `excluded_because` and only the tokens ar
 withheld. Audit it with
 `select name, excluded_because from projects where excluded_because is not null`.
 
-With both exclusions the corpus is **185 published of 186 in scope**. The one further
-gap is `torvalds__linux`, which has no Parquet yet.
+With both exclusions the corpus is **186 published of 186 in scope**: 185 S- and M-class
+projects plus `torvalds__linux`, which published 2026-09-21 with 199,678,137 rows. Of the
+188 run-set rows, `tencent__tencentkona-21` has no Parquet and `tencent__tendbcluster-tendb`
+has one that is withheld.
 
 **A vendored dependency attributes its whole library to the engineer who imported
 it.** cregit credits the commit that introduced a line, so a wholesale vendor drop
@@ -71,17 +73,39 @@ aggregates to non-vendored paths. No column in the dataset marks a path as
 vendored, so the consumer must supply that list.
 
 **The same crash mechanism reaches published data, and the corpus-wide count is
-36 files in 19 of the 186 published projects.** Measured 2026-09-20 over every
-published Parquet, so the denominator is the 186 Parquets that existed then and
-predates the near-duplicate exclusion. Re-run it after the next consolidate to
-restate it over 185: **446,060** mask-selected regular files exist at HEAD and
-**36** of them have no row, which is **0.008%**. Every one of the 36 is a parser
-crash. No other cause contributes a single file, so the residual is zero. The
-largest single project loss is `sumatrapdfreader__sumatrapdf` with 7, including
-one on a 1,263-byte file, so it is not a size limit. `elfmz__far2l`,
-`texasinstruments__simplelink-zephyr` (6) and `util-linux__util-linux` (3) follow.
-All 36 blobs are now on the blob denylist by sha, so a re-run reports them instead
-of losing them.
+35 files in 19 of the 186 published projects.** Re-measured 2026-09-22 with
+`measure_dataset_gaps.py`, after `torvalds__linux` published and after the
+near-duplicate exclusion, so the published set is now 185 S/M-class projects plus
+Linux. **504,117** mask-selected regular files exist at HEAD and **35** of them
+have no row, which is **0.007%**.
+
+The arithmetic, since the script takes one manifest at a time and does not know
+about `PUBLICATION_EXCLUSIONS`:
+
+| | regular files | missing |
+| --- | ---: | ---: |
+| `manifest.phase1-sm.tsv`, 186 with a Parquet | 446,060 | 36 |
+| less `tencent__tendbcluster-tendb`, withheld | −6,954 | −2 |
+| plus `torvalds__linux` | +65,011 | +1 |
+| **published** | **504,117** | **35** |
+
+Every one of the 35 is a parser crash. No other cause contributes a single file, so
+the residual is zero. The largest single project loss is
+`sumatrapdfreader__sumatrapdf` with 7, including one on a 1,263-byte file, so it is
+not a size limit. `elfmz__far2l`, `texasinstruments__simplelink-zephyr` (6) and
+`util-linux__util-linux` (3) follow.
+
+**Linux contributes exactly one, and it is diagnosed.**
+`tools/testing/selftests/mm/protection_keys.c` (46,717 bytes, blob
+`ae6e1530b354`) holds two `__attribute__` occurrences. srcML 1.1.0 exits 0 on it
+without `--position` and **crashes with 139 when `--position` is given**, which is
+what `tokenizeSrcMl.pl` always passes. The result is a **zero-byte `.blame`** that
+no counter records — the file is not on the denylist and the run reported
+`blobsParserCrashed=0`. Measured against a source-tip build, it parses cleanly
+both ways, so this file is in the recoverable class.
+
+The 36 blobs from the earlier sweep are on the blob denylist by sha, so a re-run
+reports them instead of losing them. This Linux blob is **not** yet listed.
 
 **A file absent from the dataset is not, by itself, a gap.** Of the paths that a
 naive detector reports as missing, **354 are symlinks or submodule gitlinks**, not
@@ -89,19 +113,21 @@ source. `powerdns__pdns` alone carries **331** masked symlinks in
 `pdns/dnsdistdist/`; counting them makes its Parquet look 29% incomplete when it
 is complete, because the Parquet holds exactly its 806 regular files.
 `nvidia__opensma` (10) and `facebookincubator__qemu-wearables` (4) are the same
-artefact. So the naive count is 390 and the true count is 36.
+artefact. Over `manifest.phase1-sm.tsv` the naive count is 390 and the true count is
+36; over the published set it is **417 naive and 35 true**, because Linux adds 28
+more masked symlinks and gitlinks and one real gap.
 
 * **Detect**: a path that exists at HEAD, matches the file mask, **and is mode
   100644 or 100755**, and has no row in the Parquet. Read the mode: use
   `git ls-tree -r HEAD` and drop 120000 (symlink) and 160000 (gitlink). Do **not**
   use `ls-tree -r --name-only`, which cannot distinguish them.
-* **The 36 are HEAD only.** A historical revision that crashed is not visible to
+* **The 35 are HEAD only.** A historical revision that crashed is not visible to
   this measurement, because the detector compares against HEAD. The denylist
   covers **197** historical blobs of these same 36 paths, so history is worse than
   HEAD by at least that much. No corpus-wide historical count exists.
 * **A silently empty tokenization contributes nothing at HEAD.** The separate
   mechanism below — a mask-selected file that tokenizes to an empty result with a
-  zero exit status — accounts for **0** of the 36. It is unmeasured for historical
+  zero exit status — accounts for **0** of the 35. Linux's one gap is a signalled crash, not this mechanism. It is unmeasured for historical
   revisions.
 * **Work around**: none from the data. The file's tokens do not exist in the dataset.
 
@@ -239,13 +265,14 @@ symlink or a submodule gitlink whose name matches the mask is not source and is
 never tokenized. There are **354** of them at HEAD, **331** in `powerdns__pdns`
 alone. Any completeness check must read the git mode, not the file name.
 
-**Two of the 188 run-set projects have no Parquet:** `tencent__tencentkona-21`
-and `torvalds__linux`. 186 Parquets exist, all conforming to the 70-column
-contract, and **185 of them are published** — `tencent__tendbcluster-tendb` has a
-conforming Parquet that is withheld as a near-duplicate (§ above). Verify with
-`validate_schema.py` over the output directory rather than assuming a project is
-present, and read published membership from `projects.excluded_because` rather
-than from the presence of a file.
+**One of the 188 run-set projects has no Parquet:** `tencent__tencentkona-21`.
+So 187 Parquets exist, all conforming to the 70-column contract, and **186 of them
+are published** — `tencent__tendbcluster-tendb` has a conforming Parquet that is
+withheld as a near-duplicate (§ above). Verify with `validate_schema.py` over the
+output directory rather than assuming a project is present, and read published
+membership from `projects.excluded_because` rather than from the presence of a file.
+`consolidate.py` reports both numbers: `DONE: 187` with `tokens view: ... across 186
+projects` and the exclusion named beneath.
 
 **`firm` is empty on rows with no attribution and ambiguous on the rest.** A
 project only carries firm attribution if it was generated with `--firm-map`;
