@@ -293,8 +293,8 @@ def test_exit_status_is_non_zero_when_any_project_is_skipped(out, monkeypatch,
     disk full.
 
     EXPECTATION CHANGED: the summary line now reads "not pruned" where it read
-    "not finished". A project is also skipped when a subtree is refused (D4, D7)
-    or when a delete fails (D6), and the summary must not claim those projects
+    "not finished". A project is also skipped when a subtree is refused
+    or when a delete fails, and the summary must not claim those projects
     were unfinished. The per-project line above it still gives the real reason.
     """
     make_project(out, "jq")
@@ -354,7 +354,7 @@ def test_finished_projects_lists_stamped_dirs_in_name_order(out):
     (b"validated\n", True),  # a real stamp
 ])
 def test_finished_projects_agrees_with_finished(out, stamp, listed):
-    """D2. One definition of finished, used everywhere.
+    """One definition of finished, used everywhere.
 
     EXPECTATION CHANGED. This test used to assert the inconsistency instead of
     the fix: finished_projects() checked only that the stamp file existed, while
@@ -368,7 +368,7 @@ def test_finished_projects_agrees_with_finished(out, stamp, listed):
 
 
 def test_finished_projects_agrees_with_finished_about_the_parquet(out):
-    """D2. The stamp is not the only half of finished(), so the lister must not
+    """The stamp is not the only half of finished(), so the lister must not
     treat it as though it were. Before the fix a stamped project with no parquet
     was listed and then refused."""
     make_project(out, "jq", parquet=None)
@@ -378,7 +378,7 @@ def test_finished_projects_agrees_with_finished_about_the_parquet(out):
 
 def test_a_whole_corpus_dry_run_is_clean_when_a_stamp_is_empty(out, monkeypatch,
                                                               capsys):
-    """D2, the user-visible symptom. Before the fix, the zero-byte stamp put
+    """The user-visible symptom. Before the fix, the zero-byte stamp put
     "half" in the default project list, prune() then reported it "not finished",
     and the run exited 1 naming a project the user never asked about."""
     make_project(out, "jq")
@@ -431,7 +431,7 @@ def test_a_protected_entry_deep_inside_a_subtree_is_found(out):
 
 
 def test_a_refusal_in_the_first_subtree_leaves_the_second_alone(out, capsys):
-    """DATA SAFETY, D4. A refusal in memo/ must not let html/ be deleted.
+    """DATA SAFETY. A refusal in memo/ must not let html/ be deleted.
 
     EXPECTATION CHANGED. Before the fix prune() returned at the first refusal, so
     html/ was never scanned. Now html/ IS scanned — the dry-run total needs it —
@@ -451,7 +451,7 @@ def test_a_refusal_in_the_first_subtree_leaves_the_second_alone(out, capsys):
 
 
 def test_a_refusal_in_the_second_subtree_leaves_the_first_alone(out):
-    """DATA SAFETY, D4. The fail-closed rule is about the project, not about
+    """DATA SAFETY. The fail-closed rule is about the project, not about
     ordering. memo/ is clean and comes first, html/ is refused — and memo/ must
     still be there afterwards, because a refusal means the walk did not
     understand this project."""
@@ -480,7 +480,7 @@ def test_is_protected(name, expected):
 # --------------------------------------------------------------------------
 
 def test_a_traversal_project_name_is_refused(out, tmp_path, capsys):
-    """DATA SAFETY, D3. `retain.py ../evil --apply` must not delete a tree
+    """DATA SAFETY. `retain.py ../evil --apply` must not delete a tree
     outside output_dir.
 
     EXPECTATION CHANGED. The refusal now comes from check_name inside prune(),
@@ -513,7 +513,7 @@ def test_a_traversal_project_name_is_refused(out, tmp_path, capsys):
 
 
 def test_an_absolute_project_name_is_refused(out, tmp_path, capsys):
-    """DATA SAFETY, D3. `OUT / "/abs/path"` is "/abs/path": an absolute project
+    """DATA SAFETY. `OUT / "/abs/path"` is "/abs/path": an absolute project
     name escapes output_dir entirely and must be refused.
 
     EXPECTATION CHANGED for the same reason as the traversal test above: the
@@ -716,7 +716,7 @@ def test_scan_reports_an_unreadable_directory_as_a_violation(out, capsys):
     """A stray FILE named memo/ cannot be walked, so scan() must report it
     instead of measuring it.
 
-    EXPECTATION CHANGED at the prune() level (D5). scan() is unchanged: os.scandir
+    EXPECTATION CHANGED at the prune() level. scan() is unchanged: os.scandir
     on a file still raises NotADirectoryError and still becomes an "unreadable"
     violation. But prune() no longer reaches scan() for this case, and it no
     longer costs the whole project. Before the fix, prune returned (0, False) and
@@ -870,7 +870,7 @@ def test_cfg_path_uses_the_default_for_an_unknown_key(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# D1 — the output_dir guard must hold on every entry point
+# The output_dir guard must hold on every entry point
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("path, refused", [
@@ -881,7 +881,7 @@ def test_cfg_path_uses_the_default_for_an_unknown_key(tmp_path, monkeypatch):
 ])
 def test_output_dir_refusal_is_the_one_shared_predicate(monkeypatch, path,
                                                         refused):
-    """D1. main() and prune() must not carry two copies of this rule, so it lives
+    """main() and prune() must not carry two copies of this rule, so it lives
     in one helper that both call."""
     monkeypatch.setattr(retain, "OUT", path)
     assert (retain.output_dir_refusal() is not None) is refused
@@ -890,7 +890,7 @@ def test_output_dir_refusal_is_the_one_shared_predicate(monkeypatch, path,
 @pytest.mark.parametrize("bad", [Path("/"), Path.home(), Path("/tmp")])
 def test_prune_refuses_a_dangerous_output_dir_on_the_ctp_call_path(monkeypatch,
                                                                   capsys, bad):
-    """DATA SAFETY, D1, HIGHEST PRIORITY.
+    """DATA SAFETY, HIGHEST PRIORITY.
 
     Before the fix this guard sat in main() alone. ctp.py:213 calls
     prune(name, ("memo",), apply=True) directly on the --drop-memo path, so on
@@ -906,7 +906,7 @@ def test_prune_refuses_a_dangerous_output_dir_on_the_ctp_call_path(monkeypatch,
 
 def test_prune_refuses_a_dangerous_output_dir_before_reading_the_disk(monkeypatch,
                                                                      capsys):
-    """D1. The guard is worth nothing if it runs after the walk. finished() would
+    """The guard is worth nothing if it runs after the walk. finished() would
     be the first thing to touch the filesystem, so it must never be reached."""
     monkeypatch.setattr(retain, "OUT", Path("/"))
     monkeypatch.setattr(retain, "finished",
@@ -916,14 +916,14 @@ def test_prune_refuses_a_dangerous_output_dir_before_reading_the_disk(monkeypatc
 
 
 # --------------------------------------------------------------------------
-# D3 — the project name must be one plain directory name
+# The project name must be one plain directory name
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", [
     "../evil", "/etc", "a/b", "", "..", "a/../b", "sub/dir", "./jq",
 ])
 def test_check_name_rejects_anything_but_one_directory_name(name):
-    """D3. The four rejects: contains /, contains .., is absolute, is empty."""
+    """The four rejects: contains /, contains .., is absolute, is empty."""
     with pytest.raises(ValueError, match="is not one plain project name"):
         retain.check_name(name)
 
@@ -933,7 +933,7 @@ def test_check_name_rejects_anything_but_one_directory_name(name):
     "dot.in.name", "x",
 ])
 def test_check_name_accepts_a_real_project_name(name):
-    """D3. The check must not be so tight that the corpus cannot be pruned.
+    """The check must not be so tight that the corpus cannot be pruned.
     Corpus names carry dashes, underscores and single dots."""
     assert retain.check_name(name) is None
 
@@ -941,7 +941,7 @@ def test_check_name_accepts_a_real_project_name(name):
 @pytest.mark.parametrize("evil", ["../evil", "/etc", "a/b", "", ".."])
 def test_prune_refuses_a_name_that_is_not_one_plain_project_name(out, tmp_path,
                                                                 capsys, evil):
-    """DATA SAFETY, D3. Before the fix, prune("../evil") and prune("/abs/path")
+    """DATA SAFETY. Before the fix, prune("../evil") and prune("/abs/path")
     both passed finished(), because the parquet and stamp lookups follow the
     traversal too. Only check_target's resolved-path comparison stopped them —
     one comparison between a typo and a delete outside output_dir.
@@ -969,7 +969,7 @@ def test_prune_refuses_a_name_that_is_not_one_plain_project_name(out, tmp_path,
 
 def test_prune_refuses_a_bad_name_before_reading_the_disk(out, monkeypatch,
                                                           capsys):
-    """D3. finished() cannot be the guard, because it follows the traversal
+    """finished() cannot be the guard, because it follows the traversal
     happily, so the name check must run before it."""
     monkeypatch.setattr(retain, "finished",
                         lambda name: pytest.fail("prune read the disk first"))
@@ -978,12 +978,12 @@ def test_prune_refuses_a_bad_name_before_reading_the_disk(out, monkeypatch,
 
 
 # --------------------------------------------------------------------------
-# D4 and D7 — a refusal costs one subtree in a dry run, the project on --apply
+# A refusal costs one subtree in a dry run, the project on --apply
 # --------------------------------------------------------------------------
 
 def test_a_dry_run_with_memo_blocked_still_reports_html_in_the_total(out,
                                                                     capsys):
-    """D4. Before the fix, a blocked memo/ hid html/ from the reclaimable total,
+    """Before the fix, a blocked memo/ hid html/ from the reclaimable total,
     so the capacity plan read low. That plan decides whether a 1,423-project run
     fits in the 1.2 TB free, so under-reporting is a real cost."""
     workdir = make_project(out, "jq")
@@ -1004,7 +1004,7 @@ def test_a_dry_run_with_memo_blocked_still_reports_html_in_the_total(out,
 
 def test_the_main_dry_run_total_spans_a_partly_blocked_corpus(out, monkeypatch,
                                                              capsys):
-    """D4. The corpus-wide figure is the one the capacity plan uses. A project
+    """The corpus-wide figure is the one the capacity plan uses. A project
     with one blocked subtree must still contribute the subtree that passed."""
     jq = make_project(out, "jq")
     zstd = make_project(out, "zstd")
@@ -1023,7 +1023,7 @@ def test_the_main_dry_run_total_spans_a_partly_blocked_corpus(out, monkeypatch,
 
 def test_an_apply_run_with_memo_blocked_deletes_nothing_for_that_project(
         out, monkeypatch, capsys):
-    """DATA SAFETY, D4 and D7. Fail closed. A refusal means the walk did not
+    """DATA SAFETY. Fail closed. A refusal means the walk did not
     understand this project, so no subtree of it is safe to remove — not even
     html/, which passed. The neighbour project is still pruned."""
     jq = make_project(out, "jq")
@@ -1042,7 +1042,7 @@ def test_an_apply_run_with_memo_blocked_deletes_nothing_for_that_project(
 
 
 def test_a_protected_file_in_memo_costs_one_subtree_not_the_project(out, capsys):
-    """D7. The tokenizer writes no .parquet, .validated, metrics.tsv, runs.log,
+    """The tokenizer writes no .parquet, .validated, metrics.tsv, runs.log,
     ctp.duckdb or .git inside memo/ today, so this is latent. Keep refusing —
     erring toward refusal is right — but in a dry run the cost is one subtree,
     not the project's whole reclaim. Before the fix html/ was never measured."""
@@ -1058,11 +1058,11 @@ def test_a_protected_file_in_memo_costs_one_subtree_not_the_project(out, capsys)
 
 
 # --------------------------------------------------------------------------
-# D5 — a path that exists but is not a directory is its own case
+# A path that exists but is not a directory is its own case
 # --------------------------------------------------------------------------
 
 def test_a_file_named_memo_is_reported_and_html_is_still_pruned(out, capsys):
-    """D5. Before the fix a stray FILE named memo cost the whole project's
+    """Before the fix a stray FILE named memo cost the whole project's
     reclaim: os.scandir raised NotADirectoryError, that became an "unreadable"
     violation, and prune returned before html/ was even measured. One stray file
     silently cost a whole project. Now it is named, left alone, and html/ still
@@ -1082,7 +1082,7 @@ def test_a_file_named_memo_is_reported_and_html_is_still_pruned(out, capsys):
 
 
 def test_a_file_named_html_is_reported_in_a_dry_run_too(out, capsys):
-    """D5. The same case in the default mode, and on the second subtree, so the
+    """The same case in the default mode, and on the second subtree, so the
     skip is not an artefact of ordering."""
     workdir = make_project(out, "jq", html=False)
     (workdir / "html").write_text("not a directory")
@@ -1098,7 +1098,7 @@ def test_a_file_named_html_is_reported_in_a_dry_run_too(out, capsys):
 
 
 # --------------------------------------------------------------------------
-# D6 — one delete failure must not abandon the rest of the corpus
+# One delete failure must not abandon the rest of the corpus
 # --------------------------------------------------------------------------
 
 def rmtree_reporting_a_failure(match: str):
@@ -1123,7 +1123,7 @@ def rmtree_reporting_a_failure(match: str):
 
 def test_a_delete_failure_skips_one_project_and_the_next_still_runs(
         out, monkeypatch, capsys):
-    """D6. Before the fix shutil.rmtree was unwrapped, so a permission error
+    """Before the fix shutil.rmtree was unwrapped, so a permission error
     part-way through a tree raised out of prune() and out of main(): every
     remaining project was abandoned with a traceback instead of a per-project
     SKIP and a non-zero exit. Over 1,423 projects that is the whole run."""
@@ -1144,7 +1144,7 @@ def test_a_delete_failure_skips_one_project_and_the_next_still_runs(
 
 def test_a_delete_failure_reports_the_tree_as_partially_deleted(out, monkeypatch,
                                                                 capsys):
-    """D6. rmtree removes entries as it walks, so a failure can leave a tree half
+    """rmtree removes entries as it walks, so a failure can leave a tree half
     gone. The log must say so, because the caller must not treat the project as
     pruned."""
     make_project(out, "locked")
@@ -1160,7 +1160,7 @@ def test_a_delete_failure_reports_the_tree_as_partially_deleted(out, monkeypatch
 
 def test_a_delete_failure_after_a_success_counts_only_what_really_went(
         out, monkeypatch):
-    """D6. memo/ went, html/ failed. The reclaimed figure must be memo/ alone —
+    """memo/ went, html/ failed. The reclaimed figure must be memo/ alone —
     a disk budget built from a number that includes a tree still on disk is
     wrong — and ok must be False so the project is not treated as pruned."""
     workdir = make_project(out, "jq")
@@ -1176,7 +1176,7 @@ def test_a_delete_failure_after_a_success_counts_only_what_really_went(
 
 
 def test_remove_tree_reports_no_errors_when_the_tree_goes(out):
-    """D6. The wrapper must be transparent on the happy path: the tree goes and
+    """The wrapper must be transparent on the happy path: the tree goes and
     the error list is empty."""
     workdir = make_project(out, "jq")
     assert retain.remove_tree(workdir / "memo") == []

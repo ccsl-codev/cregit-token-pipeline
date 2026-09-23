@@ -179,7 +179,7 @@ def test_norm_company_removes_a_trailing_parenthetical(raw, expected):
     "Foo Ltd (Bar) Inc.",
 ])
 def test_norm_company_strips_parentheticals_and_suffixes_in_any_order(raw):
-    """D5. Before the fix the parenthetical was removed once, BEFORE the suffix
+    """Before the fix the parenthetical was removed once, BEFORE the suffix
     loop, so a note followed by a legal form survived: 'Foo (Bar) Inc.' stayed
     'Foo (Bar)' while 'Foo (Bar)' became 'Foo'. Two spellings of one firm stayed
     two firms, which inflates the firm count and deflates each firm's share.
@@ -241,7 +241,7 @@ def test_norm_company_accepts_none_and_empty():
 # --------------------------------------------------------------------------
 
 def test_domain_root_is_gone():
-    """D7. `domain_root` had no caller: its docstring claimed it spotted
+    """`domain_root` had no caller: its docstring claimed it spotted
     self-references, but R4 uses a regex on the company string instead. Dead
     code in a research pipeline reads as a rule that is in force when it is not,
     so the function and its eight parametrised tests were deleted rather than
@@ -435,7 +435,7 @@ def test_r1_a_free_provider_becomes_independent(env):
 
 
 def test_r1_covers_every_free_provider_domain(env, capsys):
-    """D1, the highest-priority defect. Before the fix `per_domain` never held a
+    """The highest-priority defect. Before the fix `per_domain` never held a
     free provider, so cmd_build's R1 arm could not fire and the counter was
     always 0: NO `kind=free_provider` row was ever emitted. Any free provider
     missing from the map falls into `(Unknown)`, which the analysis reads as
@@ -579,7 +579,7 @@ def test_self_reference_leaves_a_real_firm_alone(domain, company):
 
 @pytest.mark.parametrize("company", ["Booking.com", "Salesforce.com"])
 def test_r4_keeps_a_real_firm_whose_registered_name_is_a_domain(env, company):
-    """D2. Before the fix Booking.com and Salesforce.com were dropped from the
+    """Before the fix Booking.com and Salesforce.com were dropped from the
     map entirely, out of BOTH sources, because R4 tested the shape of the string
     rather than whether it named a firm.
 
@@ -621,7 +621,7 @@ def test_r4_tagged_rows_are_countable_and_separable(env, capsys):
 
 def test_a_build_that_drops_every_domain_refuses_to_write(env, monkeypatch,
                                                          capsys):
-    """D6. Before the fix cmd_build aborted only when the source failed to
+    """Before the fix cmd_build aborted only when the source failed to
     parse. A source that parsed but lost every domain to a rule rewrote a good
     artifact as a bare header line. FREE_PROVIDERS is emptied here because the
     R1 floor otherwise keeps the result non-empty on its own."""
@@ -640,7 +640,7 @@ def test_a_build_that_drops_every_domain_refuses_to_write(env, monkeypatch,
 
 def test_a_build_below_the_curated_floor_refuses_to_write(env, monkeypatch,
                                                           capsys):
-    """D6, the floor. The output must never hold fewer rows than the curated
+    """The floor. The output must never hold fewer rows than the curated
     input. `merged.update(curated)` guarantees that today, so the guard is
     driven with a curated map that reports more rows than it yields — the shape
     a merge-order regression would produce. Before the fix there was no floor
@@ -665,7 +665,7 @@ def test_a_build_below_the_curated_floor_refuses_to_write(env, monkeypatch,
 
 
 def test_write_refusal_states_the_curated_map_is_the_floor():
-    """D6 as a rule, tested on the guard itself, since the merge cannot reach it
+    """The same defect as a rule, tested on the guard itself, since the merge cannot reach it
     today. An empty result and a result below the curated row count are both
     refused; anything at or above the floor is written."""
     row = ("Firm", "company", "cncf-gitdm")
@@ -679,7 +679,7 @@ def test_write_refusal_states_the_curated_map_is_the_floor():
 
 
 def test_the_artifact_is_written_through_a_temporary_file(env):
-    """D6. An interrupted write must not truncate a good artifact, so the rows
+    """An interrupted write must not truncate a good artifact, so the rows
     go to a sibling `.tmp` and are renamed into place, as select_corpus.save_json
     does. Nothing may be left behind."""
     env.gitdm(person("s1", ["s1!igalia.com"], ["Igalia"]))
@@ -791,7 +791,7 @@ def test_precedence_spinellis_sec_overwrites_a_cncf_row(env, n_people,
 
 
 def test_the_precedence_comment_states_the_real_rule():
-    """D3. The comment above the merge claimed the ladder
+    """The comment above the merge claimed the ladder
     `cncf-gitdm-single < cncf-gitdm < spinellis < spinellis-sec < curated`,
     which the condition does not implement: a plain `spinellis` row only fills a
     gap. A wrong comment is worse than none here, because the next reader
@@ -935,7 +935,7 @@ def test_spinellis_missing_file_returns_empty_and_does_not_raise(env, capsys):
 
 
 def test_spinellis_counts_a_cross_bucket_name_conflict(env, capsys):
-    """D4, EXPECTATION CHANGED. Ambiguity used to be tested inside the verified
+    """EXPECTATION CHANGED. Ambiguity used to be tested inside the verified
     bucket and inside the plain bucket separately, so a domain whose unflagged
     row and 10-K row named DIFFERENT firms was not reported: two firms claimed
     one domain and the conflict disappeared. The SEC name still wins, because it
@@ -1188,7 +1188,7 @@ def test_main_fetch_dispatches_to_cmd_fetch(env, monkeypatch, fake_urlopen):
 
 
 def test_main_parses_argv_exactly_once(env, monkeypatch):
-    """D8. `return ap.parse_args().fn(ap.parse_args())` built the namespace
+    """`return ap.parse_args().fn(ap.parse_args())` built the namespace
     twice, so the function was called with a DIFFERENT namespace than the one it
     was looked up on. Harmless while parsing is pure, wrong the moment a default
     is computed, a file is read, or a count is kept."""
