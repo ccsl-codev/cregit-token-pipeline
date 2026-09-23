@@ -465,7 +465,7 @@ def test_run_accepts_gc_on_a_checkout_that_implements_it(
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(gc="plain")) == 0
     assert ctp._OPTS["gc"] == "plain"
@@ -491,7 +491,7 @@ def test_run_announces_a_resume_so_the_operator_sees_it(
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(from_step=3)) == 0
     assert "resuming at step 3" in capsys.readouterr().out
@@ -536,7 +536,7 @@ def test_run_starts_when_the_runner_does_support_skip_html(
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     args = run_args(jobs=1, retries=0, skip_html=True, drop_memo=False)
     assert ctp.cmd_run(args) == 0
@@ -560,7 +560,7 @@ def test_no_memo_warns_that_it_does_not_prevent_the_write(
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run", "--no-memo"])
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     args = run_args(jobs=1, retries=0, skip_html=False, drop_memo=True)
     ctp.cmd_run(args)
@@ -711,7 +711,7 @@ def test_run_accepts_a_memo_dir_on_a_patched_runner(
     memo_root = sandbox.root / "memos"
     memo_root.mkdir()
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(memo_dir=str(memo_root))) == 0
     assert ctp._OPTS["memo_dir"] == str(memo_root)
@@ -1080,7 +1080,7 @@ def test_cmd_run_appends_a_start_and_an_end_row_to_runs_log(sandbox, monkeypatch
     write_manifest(sandbox.root, VALID_ROW)
     (sandbox.root / "runs.log").write_text("2026-08-28T03:22:20+00:00\trun-start\tjobs=2\n")
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(jobs=2)) == 0
     lines = (sandbox.root / "runs.log").read_text().splitlines()
@@ -1094,7 +1094,7 @@ def test_cmd_run_returns_one_when_a_project_fails(sandbox, monkeypatch):
     """The exit code is what a cron wrapper or CI checks."""
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "failed")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.FAILED)
     assert ctp.cmd_run(run_args()) == 1
     assert "run-end\trc=1" in (sandbox.root / "runs.log").read_text()
 
@@ -1112,8 +1112,8 @@ def test_cmd_run_retries_only_the_projects_that_are_not_done(
     def flaky(project):
         seen.append(project["name"])
         if project["name"] == "zstd" and seen.count("zstd") == 1:
-            return "failed"
-        return "done"
+            return ctp.RunOutcome.FAILED
+        return ctp.RunOutcome.DONE
 
     monkeypatch.setattr(ctp, "run_project", flaky)
     assert ctp.cmd_run(run_args(retries=1)) == 0
@@ -1126,7 +1126,7 @@ def test_cmd_run_stops_retrying_once_every_project_is_done(sandbox, monkeypatch)
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
     calls = []
-    monkeypatch.setattr(ctp, "run_project", lambda p: calls.append(p["name"]) or "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: calls.append(p["name"]) or ctp.RunOutcome.DONE)
     assert ctp.cmd_run(run_args(retries=3)) == 0
     assert calls == ["jq"]
 
@@ -1144,7 +1144,8 @@ def test_heartbeat_reports_running_projects_done_failed_and_disk():
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(ctp, "HEARTBEAT_S", 0)
         mp.setattr(ctp, "say", lambda msg: (lines.append(msg), stop.set()))
-        ctp.heartbeat(stop, {"jq": "done", "zstd": "failed", "tmux": "skipped"})
+        ctp.heartbeat(stop, {"jq": ctp.RunOutcome.DONE, "zstd": ctp.RunOutcome.FAILED,
+                             "tmux": ctp.RunOutcome.SKIPPED})
 
     assert len(lines) == 1
     assert "jq(pipeline" in lines[0]
@@ -1504,7 +1505,7 @@ def test_run_announces_the_shard_plan(sandbox, monkeypatch, capsys):
     from the logs alone."""
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(shards=6, shard_classes="L,M")) == 0
     out = capsys.readouterr().out
@@ -1516,7 +1517,7 @@ def test_shard_classes_are_parsed_into_a_tuple(sandbox, monkeypatch):
     """Whitespace and a trailing comma are normal in a hand-typed flag."""
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     ctp.cmd_run(run_args(shards=2, shard_classes=" L , M ,"))
     assert ctp._OPTS["shard_classes"] == ("L", "M")
@@ -1590,7 +1591,7 @@ def test_run_accepts_blame_jobs_on_a_patched_runner(
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(blame_jobs=12)) == 0
     assert ctp._OPTS["blame_jobs"] == 12
@@ -1795,7 +1796,7 @@ def test_run_warns_when_the_memory_budget_does_not_fit(
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
     monkeypatch.setattr(ctp, "available_bytes", lambda: 6 * 1024 ** 3)
 
     assert ctp.cmd_run(run_args(memory_limit="8GB", jobs=2)) == 0
@@ -1808,7 +1809,7 @@ def test_run_does_not_warn_when_the_memory_budget_fits(
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
     monkeypatch.setattr(ctp, "available_bytes", lambda: 32 * 1024 ** 3)
 
     assert ctp.cmd_run(run_args(memory_limit="3GB", jobs=2)) == 0
@@ -1821,7 +1822,7 @@ def test_run_accepts_the_memory_flags_on_a_patched_runner(
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
     monkeypatch.setattr(ctp, "available_bytes", lambda: 32 * 1024 ** 3)
 
     assert ctp.cmd_run(run_args(memory_limit="3GB", duckdb_threads=2)) == 0
@@ -1868,7 +1869,7 @@ def test_run_refuses_a_sidecar_path_that_does_not_exist(
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(project_meta=str(sandbox.root / "absent.json")))
     assert "does not exist" in str(exc.value)
-    assert "project_meta.py" in str(exc.value)
+    assert "validate_schema.py" in str(exc.value)
 
 
 def test_run_refuses_a_sidecar_on_a_runner_that_cannot_forward_it(
@@ -1893,7 +1894,7 @@ def test_run_accepts_a_sidecar_on_a_patched_runner(
     meta = sandbox.root / "project_meta.json"
     meta.write_text("{}")
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(project_meta=str(meta))) == 0
     assert ctp._OPTS["project_meta"] == str(meta)
@@ -1910,7 +1911,7 @@ def test_a_relative_sidecar_path_is_made_absolute(
     meta.write_text("{}")
     monkeypatch.chdir(sandbox.root)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(project_meta="project_meta.json")) == 0
     assert Path(ctp._OPTS["project_meta"]).is_absolute()
@@ -1964,7 +1965,7 @@ def ready(sandbox, monkeypatch, runner_script):
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
     return sandbox
 
 
@@ -1981,8 +1982,9 @@ def must_not_start(sandbox, monkeypatch, runner_script):
 
 
 def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
-    """The canonical corpus invocation — what tmp/wave.sh sends — must pass the
-    guard with allow_empty_provenance at its real CLI default of False."""
+    """The canonical corpus invocation — all three provenance flags supplied —
+    must pass the guard with allow_empty_provenance at its real CLI default
+    of False."""
     args = run_args(allow_empty_provenance=False,
                     **provenance_kwargs(ready.root))
     assert ctp.cmd_run(args) == 0
@@ -2418,9 +2420,8 @@ def test_a_blank_file_filter_column_falls_back_to_the_universal_mask(tmp_path):
 
 
 def test_the_manifests_mask_is_what_reaches_the_runner(sandbox, runner, jq):
-    """No override: the manifest column is the mask, because project_meta.py reads
-    that same column for the Parquet's file_mask, and the two must describe the
-    same run."""
+    """No override: the manifest column is the mask that reaches the runner, and
+    the Parquet's file_mask provenance column must describe that same run."""
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
     argv = runner.argv("pipeline")
@@ -2513,7 +2514,7 @@ def test_mask_widened_is_announced_with_what_it_discards(sandbox, monkeypatch, c
     a reader cannot tell that from is not good enough."""
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(mask_widened=True, from_step=2)) == 0
     out = capsys.readouterr().out
@@ -2525,7 +2526,7 @@ def test_mask_widened_is_announced_with_what_it_discards(sandbox, monkeypatch, c
 def test_no_mask_widened_announces_nothing(sandbox, monkeypatch, capsys):
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(from_step=2)) == 0
     assert "--mask-widened" not in capsys.readouterr().out
@@ -2538,7 +2539,7 @@ def test_an_override_warns_that_the_recorded_mask_will_not_match(sandbox, monkey
     were produced, and the operator has to be told."""
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(mask=r"\.rs$")) == 0
     out = capsys.readouterr().out
@@ -2641,7 +2642,7 @@ def test_retokenize_is_announced_with_what_it_discards(sandbox, monkeypatch, cap
     lost their tokenizations without inferring it from the absence of a refusal."""
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(retokenize="rs", from_step=2)) == 0
     out = capsys.readouterr().out
@@ -2654,5 +2655,5 @@ def test_a_blank_retokenize_is_treated_as_absent(sandbox, monkeypatch):
     a request, and must not trip the step-2 refusal on an ordinary run."""
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
     assert ctp.cmd_run(run_args(retokenize="   ", from_step=1)) == 0

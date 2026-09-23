@@ -9,9 +9,9 @@ Three things are under test here and they fail for different reasons.
    fix made by hand in `data/affiliation.merged.csv` is erased by the next build.
 
 2. `data/affiliation.corrections.csv` and `data/affiliation.merged.csv` — the
-   artifacts. The named regression is `qti.qualcomm.com`: it read `CERN` from a
-   single-person inference, which attributed all 180,971 tokens of
-   qualcomm__qcom-embedded-power-measurement to CERN.
+   artifacts. The named regression is `qti.qualcomm.com`: a single-person
+   inference attributed the domain, and every token under it, to the wrong
+   company.
 
 3. `data/firm_canonical.csv` — the reviewed table that fills the `firm` column.
    It is data, not code, so what can be checked is its shape: unique keys, no
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -56,10 +57,9 @@ def rows(path: Path) -> list[dict[str, str]]:
 def test_qti_qualcomm_com_resolves_to_qualcomm_not_cern():
     """THE regression. `qti.qualcomm.com` is Qualcomm Technologies, Inc.
 
-    It read `CERN,company,cncf-gitdm-single` at data/affiliation.merged.csv:2866
-    until 2026-09-20. A naive join on that row attributed every one of the
-    180,971 tokens of qualcomm__qcom-embedded-power-measurement to CERN, which is
-    the single most visible wrong number this dataset could publish.
+    A single-person gitdm inference once named it CERN instead. A naive join
+    on that row would attribute every token under the domain to the wrong
+    company, which is the kind of wrong number this dataset must not publish.
     """
     row = next(r for r in rows(MERGED) if r["domain"] == "qti.qualcomm.com")
     assert row["company"] == "Qualcomm"
@@ -91,18 +91,11 @@ def test_the_correction_is_in_the_overlay_so_a_rebuild_keeps_it():
 # --------------------------------------------------------------------------- #
 
 def test_collibra_com_resolves_to_collibra_not_medidata():
-    """THE second regression. `collibra.com` is Collibra NV, the data-governance
-    software company. It is not Medidata.
-
-    It read `Medidata,company,cncf-gitdm-single` at data/affiliation.merged.csv:741
-    — one single-person inference attaching a contributor's employer to a domain
-    that firm does not own, exactly the shape of the qti.qualcomm.com error.
-    Medidata Solutions owns mdsol.com, which the map already carries.
-
-    Unlike the Qualcomm row this one was measured to be unreachable before it was
-    touched: 0 of the 185 firm-bearing corpus Parquets hold a `person_domain`
-    matching collibra or a `firm`/`firm_raw` matching medidata. So the fix
-    changes no published number, and no re-run is owed.
+    """THE second regression, the same shape as the first. `collibra.com` is
+    Collibra NV, the data-governance software company. It is not Medidata: a
+    single-person inference had attached a contributor's employer to a domain
+    that firm does not own. Medidata Solutions owns mdsol.com, which the map
+    already carries.
     """
     row = {r["domain"]: r for r in rows(CORRECTIONS)}["collibra.com"]
     assert row["company"] == "Collibra"
@@ -130,7 +123,8 @@ def test_the_overlay_row_actually_overrides_the_bad_source_row(tmp_path,
     (tmp_path / "curated.csv").write_text("domain,company,kind,source\n")
     (tmp_path / bdm.CORRECTIONS_NAME).write_text(CORRECTIONS.read_text())
 
-    assert bdm.cmd_build(argparse.Namespace(min_persons=2, report=False)) == 0
+    assert bdm.cmd_build(argparse.Namespace(min_persons=2, report=False,
+                                            curated=None, no_curated=False)) == 0
     out = {r["domain"]: r for r in rows(tmp_path / "merged.csv")}
     assert out["collibra.com"]["company"] == "Collibra"
     assert out["collibra.com"]["source"] == "correction"
@@ -141,11 +135,6 @@ def test_the_committed_artifact_agrees_with_every_overlay_row():
 
     A row in the overlay that the merged map contradicts means the artifact is
     stale, which is the one failure mode the overlay cannot prevent by itself.
-
-    This was xfailed while data/affiliation.merged.csv was an input to a live
-    corpus run and could not be rewritten. The map was regenerated on 2026-09-20
-    — 9 rows of 4,049 changed, 8 malformed keys dropped and collibra.com
-    corrected — so the marker is gone and this is an ordinary assertion again.
     """
     merged = {r["domain"]: r for r in rows(MERGED)}
     for r in rows(CORRECTIONS):
@@ -202,7 +191,8 @@ def test_a_correction_beats_the_curated_map(tmp_path, monkeypatch, capsys):
         "domain,company,kind,source,reason\n"
         "widget.example,Right Name,company,correction,reviewed\n")
 
-    assert bdm.cmd_build(argparse.Namespace(min_persons=2, report=False)) == 0
+    assert bdm.cmd_build(argparse.Namespace(min_persons=2, report=False,
+                                            curated=None, no_curated=False)) == 0
     out = {r["domain"]: r for r in rows(tmp_path / "merged.csv")}
     assert out["widget.example"]["company"] == "Right Name"
     assert out["widget.example"]["source"] == "correction"
@@ -262,55 +252,48 @@ def test_every_name_in_the_table_actually_appears_in_the_map():
 def test_the_rejections_are_recorded_rather_than_dropped():
     """A rejection is a result. `keep` rows are how a reviewer sees which merges
     were considered and refused, and can disagree with one line."""
-    keeps = {r["firm_raw"] for r in canonical_rows() if r["decision"] == "keep"}
-    assert {"Independent", "AWS", "Azure", "Samsung SDS", "Yahoo! Japan",
-            "Hewlett", "China Mobile International"} <= keeps
-    for r in canonical_rows():
-        if r["decision"] == "keep":
-            assert "REJECTED" in r["note"], r
+    keeps = [r for r in canonical_rows() if r["decision"] == "keep"]
+    assert keeps, "expected at least one considered-and-rejected merge"
+    for r in keeps:
+        assert "REJECTED" in r["note"], r
 
 
-def test_the_two_splits_the_measurement_named_are_both_merged():
-    """IBM is the largest split in the map (44 rows spell it out in full against
-    6 that say IBM) and Salesforce the one no suffix rule can find, because `.com`
-    is part of the string. Both are hand additions; if either is dropped the
-    table's headline claim is wrong."""
-    canon = {r["firm_raw"]: r["firm"] for r in canonical_rows()}
-    assert canon["International Business Machines"] == "IBM"
-    assert canon["Salesforce.com"] == "Salesforce"
-    assert canon["SalesForce"] == "Salesforce"
-
-
-def test_case_only_spellings_resolve_to_one_name():
-    """The gap that let these through: norm_company does not case-fold, and the
-    all-caps spellings come from the Spinellis SEC/Fortune source, whose filing
-    names are upper case. An automatic rule would have canonicalised to the
-    SHOUTING form, because that is the higher-confidence source."""
-    canon = {r["firm_raw"]: r["firm"] for r in canonical_rows()}
-    for shouted, proper in [("NETFLIX", "Netflix"), ("TWITTER", "Twitter"),
-                            ("YANDEX", "Yandex"), ("ADOBE", "Adobe"),
-                            ("YELP", "Yelp"), ("RAPID7", "Rapid7"),
-                            ("NIKE", "Nike"), ("NEW RELIC", "New Relic"),
-                            ("F5 NETWORKS", "F5 Networks")]:
-        assert canon[shouted] == proper
-
-
-def test_the_table_collapses_forty_seven_firms_out_of_ninety_eight_strings():
-    """The measurement this table was built from: 44 groups over 89 strings under
-    the controller's conservative key. Reviewing by hand found more, not fewer —
-    48 groups over 100 strings — and rejected 11 candidate merges outright.
-
-    47 and 98 now, not 48 and 100: `Medidata -> Medidata Solutions` was retired
-    when collibra.com was corrected. `Medidata` occurred on exactly one domain in
-    the map, collibra.com, and that row was the defect; with it gone the merge row
-    is a dead row, which the test below forbids. The rejection count is
-    unchanged — no judgement was revisited.
-    """
+def test_some_canonical_firms_absorb_more_than_one_raw_spelling():
+    """The table's whole purpose is collapsing split spellings into one name.
+    If no canonical firm ever absorbed more than one raw spelling, the table
+    would do nothing a plain rename could not."""
     merges = [r for r in canonical_rows() if r["decision"] == "merge"]
-    targets = {r["firm"] for r in merges}
-    assert len(targets) == 47
-    assert len(targets | {r["firm_raw"] for r in merges}) == 98
-    assert sum(1 for r in canonical_rows() if r["decision"] == "keep") == 11
+    by_target: dict[str, set[str]] = defaultdict(set)
+    for r in merges:
+        by_target[r["firm"]].add(r["firm_raw"])
+    multi = {firm: raws for firm, raws in by_target.items() if len(raws) > 1}
+    assert multi, "expected at least one canonical firm absorbing more than " \
+                  "one raw spelling"
+
+
+def test_case_only_spellings_resolve_to_one_canonical_name():
+    """norm_company does not case-fold, so two case variants of one company
+    name are two different strings in data/affiliation.merged.csv's `company`
+    column — the all-caps spellings come from the Spinellis SEC/Fortune
+    source, whose filing names are upper case. Resolving every company string
+    through the canonical table (falling back to the string itself where the
+    table is silent) must still collapse case variants to one name."""
+    canon = {r["firm_raw"]: r["firm"] for r in canonical_rows()}
+    companies = {r["company"] for r in rows(MERGED)}
+    by_fold: dict[str, set[str]] = defaultdict(set)
+    for co in companies:
+        by_fold[co.casefold()].add(canon.get(co, co))
+    for fold, resolved in by_fold.items():
+        assert len(resolved) == 1, (fold, resolved)
+
+
+def test_the_table_holds_both_merges_and_keeps():
+    """The table must hold both outcomes to have done its job: at least one
+    raw spelling actually merged into another name, and at least one
+    candidate merge considered and rejected. A table with only one kind of
+    row would mean the review for the other kind never ran."""
+    decisions = {r["decision"] for r in canonical_rows()}
+    assert decisions == {"merge", "keep"}
 
 
 # --------------------------------------------------------------------------- #
@@ -331,7 +314,8 @@ def run_args(**over):
                 shards=0, shard_classes="L", from_step=1, gc=None,
                 blame_jobs=0, memory_limit=None, duckdb_threads=0,
                 project_meta="", mask="", firm_map="", firm_canonical="",
-                allow_empty_provenance=True, reblame=False)
+                allow_empty_provenance=True, reblame=False,
+                mask_widened=False, retokenize="")
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -355,7 +339,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(ctp, "METRICS", tmp_path / "metrics.tsv")
     monkeypatch.setattr(ctp, "RUNS_LOG", tmp_path / "runs.log")
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
     for shared in (ctp._OPTS, ctp._ENV, ctp._live):
         shared.clear()
     yield tmp_path

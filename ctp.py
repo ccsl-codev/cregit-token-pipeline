@@ -6,7 +6,7 @@
     ./ctp.py status
     ./ctp.py db
 
-Disk flags (the corpus does not fit otherwise — see retain.py and DESIGN.md §6):
+Disk flags (the corpus does not fit otherwise — see retain.py and docs/DESIGN.md §6):
   --skip-html  prevention. Forwarded to run_pipeline_process.sh, which skips the
                HTML step outright. 94-255 MB per project never written.
   --drop-memo  cleanup, NOT prevention. memo/ is 45-88% of a workdir but the
@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import fcntl
+import functools
 import os
 import re
 import shutil
@@ -47,6 +48,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from pathlib import Path
 
 import configparser
@@ -68,7 +70,10 @@ def _cfg_path(key: str, default: str) -> Path:
 
 CREGIT = _cfg_path("cregit_dir", "../cregit-workspace/cregit")
 OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
-OUT.mkdir(parents=True, exist_ok=True)
+# Not created here: this module is imported at collection time by four test
+# files, and an uncreatable configured path would then abort the whole test
+# run instead of just the commands that write to OUT. cmd_run and cmd_db
+# create it themselves before they need it.
 METRICS = CORPUS / "metrics.tsv"
 RUNS_LOG = CORPUS / "runs.log"
 
@@ -172,12 +177,27 @@ _ENV: dict = {}
 _OPTS: dict = {}
 
 
-def script_supports(flag: str) -> bool:
-    """True when the configured run_pipeline_process.sh advertises `flag`."""
+@functools.lru_cache(maxsize=None)
+def _script_supports_cached(cregit: Path, flag: str) -> bool:
     try:
-        return flag in (CREGIT / "run_pipeline_process.sh").read_text()
+        text = (cregit / "run_pipeline_process.sh").read_text()
     except OSError:
         return False
+    # Matched as a whole flag, not a substring: --mask is not "supported"
+    # merely because --mask-widened is mentioned in the script or a comment.
+    return re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", text) is not None
+
+
+def script_supports(flag: str) -> bool:
+    """True when the configured run_pipeline_process.sh advertises `flag`.
+
+    Cached per (CREGIT, flag): cmd_run's preflight calls this once per
+    optional flag, and the script does not change during a run. Keying on
+    CREGIT too, rather than caching script_supports directly, keeps the cache
+    correct across a process that reconfigures CREGIT (as the test suite
+    does per test).
+    """
+    return _script_supports_cached(CREGIT, flag)
 
 
 _SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s?(B|K|M|G|T|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$")
@@ -186,8 +206,9 @@ _SIZE_UNITS = {"B": 1, "K": 1024, "KB": 1024, "KIB": 1024,
                "G": 1024 ** 3, "GB": 1024 ** 3, "GIB": 1024 ** 3,
                "T": 1024 ** 4, "TB": 1024 ** 4, "TIB": 1024 ** 4}
 
-# Measured 2026-09-15: memory_limit bounds DuckDB's buffer manager, not the
-# process. RssAnon settled at 11.0-11.6 GB under an 8GB limit.
+# memory_limit bounds DuckDB's buffer manager, not the process: actual RSS
+# runs higher. This ratio approximates that overhead for the memory budget
+# check.
 SETTLE_RATIO = 1.4
 
 
@@ -222,8 +243,8 @@ def available_bytes() -> int | None:
 def memory_budget_warning(limit: str, jobs: int) -> str | None:
     """Warn when 1.4 x jobs x limit does not fit in MemAvailable.
 
-    This is the guard whose absence killed the 2026-09-15 run: two projects at
-    the generator's 8GB default need ~22 GB, and this box had 6 GB free.
+    Without this guard, concurrent jobs whose memory limits sum higher than
+    available RAM risk the kernel or the harness killing the run.
     """
     available = available_bytes()
     if available is None:
@@ -364,7 +385,7 @@ class ResourceSampler:
         while True:
             try:
                 busy, total = self._sample(busy, total)
-            except Exception as e:                      # never break the phase
+            except Exception as e:
                 say(f"{self.name} resource sample failed: {e}")
             if self._stop.wait(self.interval):
                 return
@@ -438,6 +459,7 @@ def run_phase(project: dict, phase: str, args: list[str]) -> int:
     latest = logdir / f"{phase}-latest.log"
     tmp = logdir / f".{phase}-latest.tmp"
     logfile.touch()
+    tmp.unlink(missing_ok=True)  # a crash can leave this behind; symlink_to refuses to overwrite
     tmp.symlink_to(logfile)
     tmp.rename(latest)
     start = time.time()
@@ -465,178 +487,250 @@ def run_phase(project: dict, phase: str, args: list[str]) -> int:
     return rc
 
 
-def run_project(project: dict) -> str:
-    """Returns: done | skipped | failed | deferred"""
+class RunOutcome(StrEnum):
+    """The result of one run_project call. Wire/log strings match the value,
+    so a member prints and compares equal to the strings already on disk in
+    metrics.tsv and runs.log."""
+    DONE = "done"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+    DEFERRED = "deferred"
+
+    @property
+    def is_success(self) -> bool:
+        return self in (RunOutcome.DONE, RunOutcome.SKIPPED)
+
+
+def check_memo_dir(name: str, opts: dict, workdir: Path) -> bool:
+    """True unless --memo-dir would put the memo where the runner's own wipe
+    can reach it — worse than no flag at all, because the operator believes
+    it is safe and it is not. Says the refusal itself; the caller just needs
+    the bool."""
+    memo_dir_opt = opts.get("memo_dir")
+    if not memo_dir_opt:
+        return True
+    memo_dir = Path(memo_dir_opt).resolve() / name
+    resolved_work = workdir.resolve()
+    if memo_dir == resolved_work or resolved_work in memo_dir.parents:
+        say(f"{name} — refusing to run: --memo-dir puts the memo at "
+            f"{memo_dir}, inside the work directory the runner deletes. "
+            "Point --memo-dir outside the corpus output directory.")
+        return False
+    return True
+
+
+def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
+    """The run_pipeline_process.sh argv for one project, from `opts` (the
+    disk/tokenizer flags cmd_run resolved) and `workdir` (this project's
+    output directory). Assumes check_memo_dir has already refused an unsafe
+    --memo-dir — this function only builds the flag.
+    """
+    name = project["name"]
+    # Flag names are the runner's, not ours. run_pipeline_process.sh accepts
+    # --work and --mask; it exits 2 on anything it does not know. ctp.py used
+    # to send --work-dir and --file-filter, so every project failed rc=2
+    # before doing any work. cmd_run preflights these names, so a rename
+    # upstream stops the run once with a clear message.
+    pipeline_args = [
+        "./run_pipeline_process.sh",
+        "--repo-url", project["url"],
+        "--repo-name", name,
+        "--work", str(workdir),
+        # The manifest's mask, which every generated manifest fills with the
+        # universal mask. --mask overrides it for one deliberate run.
+        "--mask", opts.get("mask") or project["file_filter"],
+    ]
+    if opts.get("skip_html"):
+        pipeline_args.append("--skip-html")
+    # Replace every .blame file instead of skipping the ones that exist.
+    # blameRepoFiles.pl skips existing output, so a step-7 resume re-blames
+    # NOTHING without this and step 10 then rebuilds the Parquet from the old
+    # blame. cmd_run has checked the runner advertises the flag.
+    if opts.get("reblame"):
+        pipeline_args.append("--reblame")
+    # Reuse the tokenizations already in this project's blob map across a mask
+    # change. cmd_run has already checked the runner advertises it and that
+    # --from-step is 2 or more; blobExec does the per-project verification.
+    if opts.get("mask_widened"):
+        pipeline_args.append("--mask-widened")
+    # Invalidate the tokenizations of ONE extension set, because the tokenizer
+    # that produced them was corrected. This is not --mask-widened's problem:
+    # the mask decides WHICH files are tokenized, this decides HOW, and the
+    # blob map keys reuse on the command string and the mask, neither of which
+    # a rebuilt binary changes. The runner supplies --memo-dir alongside it,
+    # because a dropped blob_map row whose memo entry survives is served the
+    # stale tokens straight back.
+    if opts.get("retokenize"):
+        pipeline_args += ["--retokenize", opts["retokenize"]]
+    # Put the memo outside the work directory, which a FROM_STEP=1 run
+    # deletes. It matters now because the mask changed corpus-wide and
+    # blobExec refuses to resume against a different one (Mapping.open), so
+    # every re-run starts from step 1 — and a memo hit returns without
+    # invoking srcml at all, so preserving memo/ across such a re-run turns
+    # a cold tokenize into a commit walk.
+    #
+    # One SUBDIRECTORY PER PROJECT, never one shared directory: tokenBySha.pl
+    # keys the memo on sha1 of the file contents, with neither the repository
+    # nor the extension in the key. Two projects sharing a directory would
+    # serve each other's entries, and identical bytes under a different
+    # extension are a different language and different tokens.
+    if opts.get("memo_dir"):
+        memo_dir = Path(opts["memo_dir"]).resolve() / name
+        pipeline_args += ["--memo-dir", str(memo_dir)]
+    # Sharding is for the L class only. The per-blob chain spawns three
+    # processes per file, and the pipelined walk leaves most cores idle
+    # on a large project because of it. A shard is an independent
+    # process with its own worker pool, so N shards multiply tokenizer
+    # throughput. It costs transient disk, which is why it is opt-in
+    # rather than the default: three concurrent S-class projects
+    # already fill this box.
+    if shard_class(project):
+        pipeline_args += ["--mode", "sharded", "--shards", str(opts["shards"])]
+    if opts.get("gc"):
+        pipeline_args += ["--gc", opts["gc"]]
+    # The runner names this flag --jobs; ctp.py keeps --blame-jobs as its
+    # own CLI name, because ctp.py's --jobs already means concurrent
+    # projects.
+    if opts.get("blame_jobs"):
+        pipeline_args += ["--jobs", str(opts["blame_jobs"])]
+    # Step 10 is the only step that can exhaust RAM: actual RSS runs
+    # about 1.4x the configured limit (see SETTLE_RATIO), so budget
+    # 1.4 x --jobs x --memory-limit of available memory.
+    if opts.get("memory_limit"):
+        pipeline_args += ["--memory-limit", opts["memory_limit"]]
+    if opts.get("duckdb_threads"):
+        pipeline_args += ["--duckdb-threads", str(opts["duckdb_threads"])]
+    # Per-project provenance for the Parquet. The sidecar is keyed by the
+    # manifest name, and generate_dataset.py refuses a key it cannot find, so
+    # a stale sidecar fails loudly instead of writing 29 blank columns.
+    if opts.get("project_meta"):
+        pipeline_args += ["--project-meta", str(opts["project_meta"]),
+                          "--project-key", name]
+    # Firm attribution. The same file for every project — it is keyed by
+    # e-mail domain, not by project — so unlike --project-key there is
+    # nothing per-project to send. The generator refuses a map with a
+    # repeated domain, because a duplicate key would multiply token rows
+    # through the LEFT JOIN and nothing downstream would notice.
+    if opts.get("firm_map"):
+        pipeline_args += ["--firm-map", str(opts["firm_map"])]
+        if opts.get("firm_canonical"):
+            pipeline_args += ["--firm-canonical", str(opts["firm_canonical"])]
+    # FROM_STEP is positional and must come last. The runner only wipes the
+    # workdir when it is 1, so a resume keeps whatever finished before.
+    from_step = opts.get("from_step", 1)
+    if from_step > 1:
+        pipeline_args.append(str(from_step))
+    return pipeline_args
+
+
+def run_project(project: dict) -> RunOutcome:
+    """Runs one project's pipeline and validate phases. Returns a RunOutcome."""
     name = project["name"]
     workdir = OUT / name
     stamp = workdir / f"{name}.validated"
     if stamp.exists():
         say(f"{name} — already validated, skip")
-        return "skipped"
+        return RunOutcome.SKIPPED
 
     workdir.mkdir(parents=True, exist_ok=True)
     state_dir(name).mkdir(parents=True, exist_ok=True)
 
     # Single-instance guard per project (held for the whole job). Lives in STATE,
     # not in workdir, because the runner deletes workdir out from under it.
-    lockfile = lock_path(name).open("w")
-    try:
-        fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        say(f"{name} — another run holds the lock, skipping")
-        return "deferred"
+    with lock_path(name).open("w") as lockfile:
+        try:
+            fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            say(f"{name} — another run holds the lock, skipping")
+            return RunOutcome.DEFERRED
 
-    try:
-        if shutil.disk_usage(OUT).free < DISK_FLOOR_GB * 2**30:
-            say(f"{name} — disk below {DISK_FLOOR_GB}G floor, deferred")
-            return "deferred"
+        try:
+            if shutil.disk_usage(OUT).free < DISK_FLOOR_GB * 2**30:
+                say(f"{name} — disk below {DISK_FLOOR_GB}G floor, deferred")
+                return RunOutcome.DEFERRED
 
-        # Flag names are the runner's, not ours. run_pipeline_process.sh accepts
-        # --work and --mask; it exits 2 on anything it does not know. ctp.py used
-        # to send --work-dir and --file-filter, so every project failed rc=2
-        # before doing any work. cmd_run now preflights these names, so a rename
-        # upstream stops the run once with a clear message.
-        pipeline_args = [
-            "./run_pipeline_process.sh",
-            "--repo-url", project["url"],
-            "--repo-name", name,
-            "--work", str(workdir),
-            # The manifest's mask, which every generated manifest fills with the
-            # universal mask. --mask overrides it for one deliberate run.
-            "--mask", _OPTS.get("mask") or project["file_filter"],
-        ]
-        if _OPTS.get("skip_html"):
-            pipeline_args.append("--skip-html")
-        # Replace every .blame file instead of skipping the ones that exist.
-        # blameRepoFiles.pl skips existing output, so a step-7 resume re-blames
-        # NOTHING without this and step 10 then rebuilds the Parquet from the old
-        # blame. cmd_run has checked the runner advertises the flag.
-        if _OPTS.get("reblame"):
-            pipeline_args.append("--reblame")
-        # Reuse the tokenizations already in this project's blob map across a mask
-        # change. cmd_run has already checked the runner advertises it and that
-        # --from-step is 2 or more; blobExec does the per-project verification.
-        if _OPTS.get("mask_widened"):
-            pipeline_args.append("--mask-widened")
-        # Invalidate the tokenizations of ONE extension set, because the tokenizer
-        # that produced them was corrected. This is not --mask-widened's problem:
-        # the mask decides WHICH files are tokenized, this decides HOW, and the
-        # blob map keys reuse on the command string and the mask, neither of which
-        # a rebuilt binary changes. The runner supplies --memo-dir alongside it,
-        # because a dropped blob_map row whose memo entry survives is served the
-        # stale tokens straight back.
-        if _OPTS.get("retokenize"):
-            pipeline_args += ["--retokenize", _OPTS["retokenize"]]
-        # Put the memo outside the work directory, which a FROM_STEP=1 run
-        # deletes. It matters now because the mask changed corpus-wide and
-        # blobExec refuses to resume against a different one (Mapping.open), so
-        # every re-run starts from step 1 — and a memo hit returns without
-        # invoking srcml at all. torvalds__linux holds ~2.6 million memo entries
-        # against 3,228,137 blobs, so preserving them turns a cold tokenize into
-        # a commit walk.
-        #
-        # One SUBDIRECTORY PER PROJECT, never one shared directory: tokenBySha.pl
-        # keys the memo on sha1 of the file contents, with neither the repository
-        # nor the extension in the key. Two projects sharing a directory would
-        # serve each other's entries, and identical bytes under a different
-        # extension are a different language and different tokens.
-        if _OPTS.get("memo_dir"):
-            memo_dir = Path(_OPTS["memo_dir"]).resolve() / name
-            resolved_work = workdir.resolve()
-            if memo_dir == resolved_work or resolved_work in memo_dir.parents:
-                say(f"{name} — refusing to run: --memo-dir puts the memo at "
-                    f"{memo_dir}, inside the work directory the runner deletes. "
-                    "Point --memo-dir outside the corpus output directory.")
-                return "failed"
-            pipeline_args += ["--memo-dir", str(memo_dir)]
-        # Sharding is for the L class only. Measured on Linux: --mode pipeline
-        # leaves ~14 of 16 cores idle, because the per-blob chain spawns three
-        # processes and the pipelined walk never keeps 16 of them in flight. A
-        # shard is an independent process with its own worker pool, so N shards
-        # multiply tokenizer throughput. It costs transient disk, which is why it
-        # is opt-in rather than the default: three concurrent S-class projects
-        # already fill this box.
-        if shard_class(project):
-            pipeline_args += ["--mode", "sharded", "--shards", str(_OPTS["shards"])]
-        if _OPTS.get("gc"):
-            pipeline_args += ["--gc", _OPTS["gc"]]
-        # The runner calls this --jobs. cregit-issue61 7a70a92 renamed it from
-        # --blame-jobs on 2026-09-18, mid-run, and ctp.py kept sending the old
-        # name — so every invocation exited at the preflight. ctp.py's own CLI
-        # name stays --blame-jobs, because its --jobs means concurrent projects.
-        if _OPTS.get("blame_jobs"):
-            pipeline_args += ["--jobs", str(_OPTS["blame_jobs"])]
-        # Step 10 is the only step that can exhaust RAM. Measured 2026-09-15: at
-        # the generator's own 8GB default, two concurrent projects need ~22 GB and
-        # the run died on this 30 GB box, which already gives ~17 GB to other
-        # software. Budget 1.4 x --jobs x --memory-limit.
-        if _OPTS.get("memory_limit"):
-            pipeline_args += ["--memory-limit", _OPTS["memory_limit"]]
-        if _OPTS.get("duckdb_threads"):
-            pipeline_args += ["--duckdb-threads", str(_OPTS["duckdb_threads"])]
-        # Per-project provenance for the Parquet. The sidecar is keyed by the
-        # manifest name, and generate_dataset.py refuses a key it cannot find, so
-        # a stale sidecar fails loudly instead of writing 29 blank columns.
-        if _OPTS.get("project_meta"):
-            pipeline_args += ["--project-meta", str(_OPTS["project_meta"]),
-                              "--project-key", name]
-        # Firm attribution. The same file for every project — it is keyed by
-        # e-mail domain, not by project — so unlike --project-key there is
-        # nothing per-project to send. The generator refuses a map with a
-        # repeated domain, because a duplicate key would multiply token rows
-        # through the LEFT JOIN and nothing downstream would notice.
-        if _OPTS.get("firm_map"):
-            pipeline_args += ["--firm-map", str(_OPTS["firm_map"])]
-            if _OPTS.get("firm_canonical"):
-                pipeline_args += ["--firm-canonical",
-                                  str(_OPTS["firm_canonical"])]
-        # FROM_STEP is positional and must come last. The runner only wipes the
-        # workdir when it is 1, so a resume keeps whatever finished before.
-        from_step = _OPTS.get("from_step", 1)
-        if from_step > 1:
-            pipeline_args.append(str(from_step))
-        rc = run_phase(project, "pipeline", pipeline_args)
-        if rc != 0:
-            return "failed"
+            if not check_memo_dir(name, _OPTS, workdir):
+                return RunOutcome.FAILED
 
-        rc = run_phase(project, "validate", [
-            "python3", str(CORPUS / "validate.py"),
-            str(workdir / f"{name}-dataset.parquet"), str(stamp),
-        ])
-        if rc != 0:
-            return "failed"
+            pipeline_args = build_pipeline_args(project, _OPTS, workdir)
+            rc = run_phase(project, "pipeline", pipeline_args)
+            if rc != 0:
+                return RunOutcome.FAILED
 
-        if _OPTS.get("drop_memo"):
-            # Cleanup, not prevention: memo/ is already on disk. retain.prune
-            # re-checks the keepers itself and refuses if they are not there.
-            _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
-            if not ok:
-                say(f"{name} — memo/ kept, retain refused the prune (see above)")
-        return "done"
-    finally:
-        _live.pop(name, None)
-        lockfile.close()
+            rc = run_phase(project, "validate", [
+                "python3", str(CORPUS / "validate.py"),
+                str(workdir / f"{name}-dataset.parquet"), str(stamp),
+            ])
+            if rc != 0:
+                return RunOutcome.FAILED
+
+            if _OPTS.get("drop_memo"):
+                # retain.prune re-checks the keepers itself and refuses if they
+                # are not there.
+                _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
+                if not ok:
+                    say(f"{name} — memo/ kept, retain refused the prune (see above)")
+            return RunOutcome.DONE
+        finally:
+            _live.pop(name, None)
 
 
 def heartbeat(stop: threading.Event, results: dict) -> None:
     while not stop.wait(HEARTBEAT_S):
         running = ", ".join(f"{n}({p} {int(time.time() - t)}s)" for n, (p, t) in sorted(_live.items()))
         free_gb = shutil.disk_usage(OUT).free // 2**30
-        done = sum(1 for v in results.values() if v in ("done", "skipped"))
-        failed = sum(1 for v in results.values() if v == "failed")
+        done = sum(1 for v in results.values() if v.is_success)
+        failed = sum(1 for v in results.values() if v == RunOutcome.FAILED)
         say(f"♥ running: {running or '—'} | done {done} failed {failed} | disk {free_gb}G free")
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    projects = read_manifest(CORPUS / args.manifest, set(args.only.split(",")) if args.only else None)
-    if not projects:
-        say("nothing to run (empty manifest / --only filter matched nothing)")
-        return 0
+# Consequence text for each optional flag ctp.py forwards to the runner: what
+# forwarding it to an unpatched checkout would do. Checked once before the
+# run in preflight_runner_flags, instead of once per project.
+REQUIRES: dict[str, str] = {
+    "--skip-html": ("Patch that checkout to guard its HTML step, then re-run. Refusing to "
+                    "start: generating the HTML and deleting it later is not what the flag says."),
+    "--reblame": ("That checkout's step 7 cannot replace existing .blame files, so the run "
+                  "would skip every one of them and exit 0. Refusing to start."),
+    "--memo-dir": ("That checkout hard-codes BFG_MEMO_DIR to <work>/memo, which a step-1 "
+                   "run deletes, so the flag would be silently dropped. Patch it first."),
+    "--shards": ("Point pipeline.cfg at a checkout that supports sharded mode, "
+                 "or drop --shards and accept the single-process rate."),
+    "--gc": ("That checkout still packs unconditionally, and an unguarded "
+             "repack failure deletes the workdir. Patch it before relying on --gc."),
+    "--blame-jobs": ("That checkout blames serially, at roughly 3 files per minute. "
+                     "Patch it before relying on the flag."),
+    "--memory-limit": ("That checkout runs step 10 at the generator's own default, so the "
+                        "flag would be silently dropped. Patch it before relying on it."),
+    "--duckdb-threads": "Patch it before relying on the flag.",
+    "--mask-widened": ("That checkout would drop the flag, and blobExec would then refuse "
+                        "every project whose recorded mask differs from the manifest's "
+                        "(exit 3)."),
+    "--retokenize": ("That checkout would drop the flag, step 2 would reuse the cached "
+                      "tokenizations you asked to discard, and the run would exit 0 having "
+                      "changed nothing. Check pipeline.cfg points at a checkout that has it."),
+}
 
-    # Fail before the run, not 1,900 times during it. Every project passes these
-    # flags, so a name the runner does not know costs one rc=2 per project and
-    # produces no artefact. This is a defect, caught by a check instead of by a
-    # wasted run.
+# --blame-jobs and --shards check a differently-named or additional runner
+# flag: cregit's own --jobs is reached through ctp's --blame-jobs (ctp's own
+# --jobs already means concurrent projects), and sharding needs both --mode
+# and --shards. Every other entry in REQUIRES checks a runner flag with the
+# same name as the key.
+CHECKS: dict[str, tuple[str, ...]] = {
+    "--blame-jobs": ("--jobs",),
+    "--shards": ("--mode", "--shards"),
+}
+
+
+def preflight_runner_flags(args: argparse.Namespace) -> tuple[bool, str]:
+    """Refuse before the run if the configured checkout cannot honour a flag
+    ctp.py is about to forward, or if two of ctp's own flags contradict each
+    other. One refusal here costs one message; discovering the same gap per
+    project would cost one rc=2 (or a silently wrong run) per project.
+
+    Returns (mask_widened, retokenize), the two derived values cmd_run still
+    needs after this check.
+    """
     missing = [f for f in REQUIRED_RUNNER_FLAGS if not script_supports(f)]
     if missing:
         sys.exit(f"{CREGIT}/run_pipeline_process.sh does not accept: {', '.join(missing)}.\n"
@@ -644,20 +738,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                  "unknown flag. Check pipeline.cfg points at the right checkout, or\n"
                  "update REQUIRED_RUNNER_FLAGS and run_project together.")
 
-    # Fail before the run rather than quietly doing something else: --skip-html
-    # only means anything if the configured checkout implements it.
-    if args.skip_html and not script_supports("--skip-html"):
-        sys.exit(f"--skip-html is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                 "Patch that checkout to guard its HTML step, then re-run. Refusing to\n"
-                 "start: generating the HTML and deleting it later is not what the flag says.")
-    # Same reasoning as --skip-html: a checkout that does not implement --reblame
-    # would run step 7, skip every file that already has .blame output, and exit 0
-    # having changed nothing. That is the exact failure the flag exists to close, so
-    # refuse rather than report a re-blame that did not happen.
-    if args.reblame and not script_supports("--reblame"):
-        sys.exit(f"--reblame is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                 "That checkout's step 7 cannot replace existing .blame files, so the run\n"
-                 "would skip every one of them and exit 0. Refusing to start.")
     if args.reblame and args.from_step > 7:
         sys.exit(f"--reblame needs --from-step 7 or less (got {args.from_step}).\n"
                  "The re-blame happens inside step 7; from step 8 the flag is skipped and\n"
@@ -674,95 +754,17 @@ def cmd_run(args: argparse.Namespace) -> int:
                  "where no wipe can reach it, the other deletes it after each project.\n"
                  "--drop-memo also only prunes <workdir>/memo, so it would not even find "
                  "an external memo. Pick one.")
-    if args.memo_dir:
-        if not script_supports("--memo-dir"):
-            sys.exit(f"--memo-dir is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                     "That checkout hard-codes BFG_MEMO_DIR to <work>/memo, which a step-1\n"
-                     "run deletes, so the flag would be silently dropped. Patch it first.")
-        if not Path(args.memo_dir).is_dir():
-            sys.exit(f"--memo-dir {args.memo_dir} is not an existing directory. Create it "
-                     "first: a typo here would quietly start a second corpus of memos "
-                     "instead of reusing the one you meant.")
-    # Same rule as --skip-html: refuse before the run rather than discover per
-    # project that the configured checkout cannot shard.
-    if args.shards > 1:
-        missing = [f for f in ("--mode", "--shards") if not script_supports(f)]
-        if missing:
-            sys.exit(f"--shards needs {', '.join(missing)}, which "
-                     f"{CREGIT}/run_pipeline_process.sh does not advertise.\n"
-                     "Point pipeline.cfg at a checkout that supports sharded mode,\n"
-                     "or drop --shards and accept the single-process rate.")
-    # Same rule again: refuse before the run rather than per project.
-    if args.gc and not script_supports("--gc"):
-        sys.exit(f"--gc is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                 "That checkout still packs unconditionally, and an unguarded\n"
-                 "repack failure deletes the workdir. Patch it before relying on --gc.")
-    # Validate our own value before probing the runner. A negative count is the
-    # caller's mistake either way, and reporting it as "not implemented" sends
-    # them to patch a checkout that is not the problem.
+    if args.memo_dir and not Path(args.memo_dir).is_dir():
+        sys.exit(f"--memo-dir {args.memo_dir} is not an existing directory. Create it "
+                 "first: a typo here would quietly start a second corpus of memos "
+                 "instead of reusing the one you meant.")
+    # Validate our own values before probing the runner. A negative count or a
+    # bad size is the caller's mistake either way, and reporting it as "not
+    # implemented" would send them to patch a checkout that is not the problem.
     if args.blame_jobs < 0:
         sys.exit(f"--blame-jobs cannot be negative (got {args.blame_jobs}).")
-    # The runner calls this --jobs; cregit-issue61 7a70a92 renamed it from
-    # --blame-jobs on 2026-09-18. ctp.py keeps --blame-jobs as its own CLI name,
-    # because ctp.py's --jobs already means concurrent projects.
-    if args.blame_jobs and not script_supports("--jobs"):
-        sys.exit(f"--blame-jobs needs --jobs, which {CREGIT}/run_pipeline_process.sh\n"
-                 "does not advertise. That checkout blames serially, at roughly 3 files\n"
-                 "per minute. Patch it before relying on the flag.")
-    if args.memory_limit and not script_supports("--memory-limit"):
-        sys.exit(f"--memory-limit is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                 "That checkout runs step 10 at the generator's own default, so the\n"
-                 "flag would be silently dropped. Patch it before relying on it.")
-    if args.duckdb_threads and not script_supports("--duckdb-threads"):
-        sys.exit(f"--duckdb-threads is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                 "Patch it before relying on the flag.")
     if args.duckdb_threads < 0:
         sys.exit(f"--duckdb-threads cannot be negative (got {args.duckdb_threads}).")
-    # Same rule again, and the stakes are higher: without the check the run would
-    # produce a corpus of Parquets carrying blank provenance, which no consumer
-    # could tell from provenance that is genuinely unknown.
-    project_meta = ""
-    if args.project_meta:
-        if not Path(args.project_meta).exists():
-            sys.exit(f"--project-meta {args.project_meta} does not exist. "
-                     "Generate it with project_meta.py.")
-        missing = [f for f in ("--project-meta", "--project-key")
-                   if not script_supports(f)]
-        if missing:
-            sys.exit(f"--project-meta needs {', '.join(missing)}, which "
-                     f"{CREGIT}/run_pipeline_process.sh does not accept.")
-        # Absolute, because the runner is started with cwd=CREGIT while this path
-        # was typed relative to this repository. Sending it through unresolved
-        # made the runner reject its own sidecar (rc=2) on the first real run.
-        project_meta = str(Path(args.project_meta).resolve())
-    # The firm map, under the same rules and for a sharper reason: a map that
-    # never arrives does not fail the run, it publishes blank firm columns across
-    # the whole corpus, and firm attribution is the measurement this corpus
-    # exists for. getattr, because callers build this Namespace directly.
-    firm_map = firm_canonical = ""
-    if getattr(args, "firm_map", ""):
-        if not Path(args.firm_map).is_file():
-            sys.exit(f"--firm-map {args.firm_map} is not a file. Build it with "
-                     "build_domain_map.py.")
-        missing = [f for f in ("--firm-map", "--firm-canonical")
-                   if not script_supports(f)]
-        if missing:
-            sys.exit(f"--firm-map needs {', '.join(missing)}, which "
-                     f"{CREGIT}/run_pipeline_process.sh does not accept.\n"
-                     "That checkout would run step 10 without the firm join, so "
-                     "every Parquet would carry three blank firm columns.")
-        # Absolute, for the same reason as --project-meta: the runner is started
-        # with cwd=CREGIT while this path was typed relative to this repository.
-        firm_map = str(Path(args.firm_map).resolve())
-        if getattr(args, "firm_canonical", ""):
-            if not Path(args.firm_canonical).is_file():
-                sys.exit(f"--firm-canonical {args.firm_canonical} is not a file.")
-            firm_canonical = str(Path(args.firm_canonical).resolve())
-    elif getattr(args, "firm_canonical", ""):
-        sys.exit("--firm-canonical without --firm-map has no firm_raw to "
-                 "canonicalise. Pass data/affiliation.merged.csv too.")
-    # Refuse a bad size now. Step 10 is the last step, so the alternative is
-    # finding the typo after every earlier step has already run.
     if args.memory_limit:
         try:
             size_to_bytes(args.memory_limit)
@@ -770,20 +772,39 @@ def cmd_run(args: argparse.Namespace) -> int:
             sys.exit(f"--memory-limit: {exc}")
     if args.from_step < 1:
         sys.exit(f"--from-step must be 1 or greater (got {args.from_step}).")
-    # --mask-widened, under the same rule as every other forwarded flag, and with
-    # the sharpest stakes of any of them: an unimplemented flag would be dropped
-    # and blobExec would refuse every project on the recorded mask (exit 3), which
-    # reads as a failed corpus rather than as a missing feature.
-    mask_widened = bool(getattr(args, "mask_widened", False))
+
+    mask_widened = bool(args.mask_widened)
+    retokenize = (args.retokenize or "").strip()
+
+    requested = {
+        "--skip-html": args.skip_html,
+        "--reblame": args.reblame,
+        "--memo-dir": bool(args.memo_dir),
+        "--shards": args.shards > 1,
+        "--gc": bool(args.gc),
+        "--blame-jobs": bool(args.blame_jobs),
+        "--memory-limit": bool(args.memory_limit),
+        "--duckdb-threads": bool(args.duckdb_threads),
+        "--mask-widened": mask_widened,
+        "--retokenize": bool(retokenize),
+    }
+    for flag, consequence in REQUIRES.items():
+        if not requested[flag]:
+            continue
+        needed = CHECKS.get(flag, (flag,))
+        gap = [f for f in needed if not script_supports(f)]
+        if not gap:
+            continue
+        if flag in CHECKS:
+            sys.exit(f"{flag} needs {', '.join(gap)}, which "
+                     f"{CREGIT}/run_pipeline_process.sh does not advertise.\n{consequence}")
+        sys.exit(f"{flag} is not implemented by {CREGIT}/run_pipeline_process.sh.\n{consequence}")
+
+    # The flag exists to preserve the work in the workdir, and step 1 deletes
+    # the workdir. Sending both would run, preserve nothing, and look like a
+    # success. The runner refuses this too; refusing here means it costs one
+    # message rather than one clone per project.
     if mask_widened:
-        if not script_supports("--mask-widened"):
-            sys.exit(f"--mask-widened is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                     "That checkout would drop the flag, and blobExec would then refuse every\n"
-                     "project whose recorded mask differs from the manifest's (exit 3).")
-        # The flag exists to preserve the work in the workdir, and step 1 deletes
-        # the workdir. Sending both would run, preserve nothing, and look like a
-        # success. The runner refuses this too; refusing here means it costs one
-        # message rather than one clone per project.
         if args.from_step < 2:
             sys.exit("--mask-widened needs --from-step 2 or greater. Step 1 deletes the project\n"
                      "workdir, taking with it the blob map this flag reuses and the cregit.git\n"
@@ -791,21 +812,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.shards > 1:
             sys.exit("--mask-widened cannot be combined with sharding: each shard builds a fresh\n"
                      "blob map, so there is no recorded mask to widen.")
-    # --retokenize, under the same rule, and with stakes of its own. An unimplemented
-    # flag would be DROPPED and step 2 would then reuse the very tokenizations the
-    # operator asked to discard, and exit 0. That reads as a successful re-run rather
-    # than as a missing feature, which is the worst of the two failures: nothing in
-    # the output says the corrected tokenizer never ran.
-    retokenize = (getattr(args, "retokenize", "") or "").strip()
+    # The runner requires EXACTLY 2, not 2-or-more. Step 1 deletes the blob map
+    # this flag edits; step 3 and later skip step 2 altogether, so the run would
+    # rebuild blame, HTML and the dataset over tokens nobody re-made.
     if retokenize:
-        if not script_supports("--retokenize"):
-            sys.exit(f"--retokenize is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
-                     "That checkout would drop the flag, step 2 would reuse the cached\n"
-                     "tokenizations you asked to discard, and the run would exit 0 having\n"
-                     "changed nothing. Check pipeline.cfg points at a checkout that has it.")
-        # The runner requires EXACTLY 2, not 2-or-more. Step 1 deletes the blob map
-        # this flag edits; step 3 and later skip step 2 altogether, so the run would
-        # rebuild blame, HTML and the dataset over tokens nobody re-made.
         if args.from_step != 2:
             sys.exit(f"--retokenize needs --from-step 2 exactly (got {args.from_step}).\n"
                      "Step 1 deletes the blob map this flag edits. Step 3 and later skip step 2,\n"
@@ -819,62 +829,63 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.shards > 1:
             sys.exit("--retokenize cannot be combined with sharding: each shard builds a fresh\n"
                      "blob map, so there are no cached tokenizations to invalidate.")
-    # ------------------------------------------------------------------ #
-    # The provenance guard. It REFUSES rather than warns, for three reasons.
-    #
-    # 1. For 29 of the 32 columns there was nothing to warn WITH. Omitting
-    #    --project-meta produced no diagnostic at any layer: not here, not in
-    #    run_pipeline_process.sh, and not in generate_dataset.py, whose
-    #    load_project_meta() treats an absent sidecar as a supported
-    #    backwards-compatible mode and fills all 29 with ''. The only notice that
-    #    existed was the `say("note: no --firm-map ...")` this block replaces, and
-    #    it covered 3 columns.
-    #
-    # 2. A note cannot carry this weight in this log. The 2026-09-21
-    #    torvalds__linux resume ran 6 h 48 m and wrote 113 lines, 105 of them
-    #    30-second heartbeats. A note is line 1, scrolled past inside the first
-    #    minute of an overnight run, and the operator who reads the log next reads
-    #    the tail. (That run's log holds no `note:` line, so it did pass
-    #    --firm-map; what it cannot tell us either way is --project-meta, because
-    #    omitting that printed nothing at all. Which is the point of reason 1.)
-    #
-    # 3. Nothing downstream catches the result. The file still has all 70 columns
-    #    in the right order and the right types, so validate.py and
-    #    validate_schema.py both pass it, and a consumer reading `stratum = ''`
-    #    cannot distinguish a project whose stratum was never supplied from one
-    #    that genuinely has none. A quietly wrong dataset is worse than a failed
-    #    run: the cost of a false refusal is one re-typed command, the cost of a
-    #    miss is hours of compute and a corpus whose members disagree with each
-    #    other. torvalds__linux is the largest of 186; its re-run with the flags
-    #    filled stratum on 100% of rows, firm on 83.6% and history_cluster on
-    #    100%, so those columns were never "unknown", only never asked for.
-    #
-    # Refusing is also the house idiom in cmd_run. Every other flag combination
-    # that would run to completion while doing the wrong thing exits here with a
-    # message naming the consequence: --memo-dir with --drop-memo, --retokenize
-    # with the wrong --from-step, --firm-canonical without --firm-map. This is the
-    # same shape, deliberately.
-    #
-    # The escape hatch is --allow-empty-provenance, because a blanket refusal
-    # would break three legitimate uses: a test fixture, a one-project smoke run,
-    # and a corpus whose sidecar does not exist yet. It is store_true with no
-    # default, so it cannot arrive except by being typed, and taking it prints
-    # what it gave up.
-    #
-    # NOT re-checked here: that the paths exist and are readable. That check is
-    # already made three times over and it fails hard every time — this function
-    # above (`--project-meta ... does not exist`, `--firm-map ... is not a file`),
-    # run_pipeline_process.sh's own argument validation (exit 2 before the clone),
-    # and generate_dataset.py at the top of step 10 (exit 1, or an uncaught
-    # FileNotFoundError for the sidecar). A path typo therefore cannot reach the
-    # Parquet, so adding a fourth existence check here would only duplicate the
-    # first one. The failure this guard exists for is the opposite one: a flag
-    # that is not there at all, which no layer treats as an error because an
-    # absent sidecar is a supported backwards-compatible mode in the generator.
-    #
-    # Placed last, after the per-flag checks, so that a typo'd path or a checkout
-    # that cannot forward the flag is still reported by its own sharper message
-    # rather than by this general one.
+
+    return mask_widened, retokenize
+
+
+def resolve_provenance_paths(args: argparse.Namespace) -> tuple[str, str, str]:
+    """Validates and resolves --project-meta, --firm-map and --firm-canonical
+    to absolute paths (empty string when a flag was omitted). Exits with a
+    message naming the missing file, or the flag the configured checkout
+    does not accept, before anything the flag would have gated starts.
+    """
+    project_meta = ""
+    if args.project_meta:
+        if not Path(args.project_meta).exists():
+            sys.exit(f"--project-meta {args.project_meta} does not exist. "
+                     "The sidecar format is documented in validate_schema.py, "
+                     "in the comment above EXPECTED_COLUMNS.")
+        missing = [f for f in ("--project-meta", "--project-key")
+                   if not script_supports(f)]
+        if missing:
+            sys.exit(f"--project-meta needs {', '.join(missing)}, which "
+                     f"{CREGIT}/run_pipeline_process.sh does not accept.")
+        # Absolute, because the runner is started with cwd=CREGIT while this path
+        # was typed relative to this repository. Sending it through unresolved
+        # made the runner reject its own sidecar (rc=2) on the first real run.
+        project_meta = str(Path(args.project_meta).resolve())
+
+    # The firm map, under the same rules and for a sharper reason: a map that
+    # never arrives does not fail the run, it publishes blank firm columns across
+    # the whole corpus, and firm attribution is the measurement this corpus
+    # exists for.
+    firm_map = firm_canonical = ""
+    if args.firm_map:
+        if not Path(args.firm_map).is_file():
+            sys.exit(f"--firm-map {args.firm_map} is not a file. Build it with "
+                     "build_domain_map.py.")
+        missing = [f for f in ("--firm-map", "--firm-canonical")
+                   if not script_supports(f)]
+        if missing:
+            sys.exit(f"--firm-map needs {', '.join(missing)}, which "
+                     f"{CREGIT}/run_pipeline_process.sh does not accept.\n"
+                     "That checkout would run step 10 without the firm join, so "
+                     "every Parquet would carry three blank firm columns.")
+        firm_map = str(Path(args.firm_map).resolve())
+        if args.firm_canonical:
+            if not Path(args.firm_canonical).is_file():
+                sys.exit(f"--firm-canonical {args.firm_canonical} is not a file.")
+            firm_canonical = str(Path(args.firm_canonical).resolve())
+    elif args.firm_canonical:
+        sys.exit("--firm-canonical without --firm-map has no firm_raw to "
+                 "canonicalise. Pass data/affiliation.merged.csv too.")
+
+    return project_meta, firm_map, firm_canonical
+
+
+def provenance_gaps(project_meta: str, firm_map: str, firm_canonical: str) -> list[tuple[str, str]]:
+    """Which provenance flags are missing, paired with what publishing
+    without them costs. Empty when nothing is missing."""
     gaps: list[tuple[str, str]] = []
     if not project_meta:
         gaps.append(("--project-meta",
@@ -899,7 +910,22 @@ def cmd_run(args: argparse.Namespace) -> int:
                      "`firm` repeats `firm_raw` instead of the reviewed canonical "
                      "name, so the 48 split spellings stay split and every firm's "
                      "share is understated"))
-    allow_empty = bool(getattr(args, "allow_empty_provenance", False))
+    return gaps
+
+
+def enforce_provenance(gaps: list[tuple[str, str]], args: argparse.Namespace) -> None:
+    """Refuses a run that would reach step 10 with a provenance gap, unless
+    --allow-empty-provenance says otherwise.
+
+    Refuses rather than warns: most of these columns have no other
+    diagnostic anywhere in the pipeline (an absent sidecar is a supported,
+    silent, backwards-compatible mode downstream), and nothing later can
+    tell a blank column from provenance that is genuinely unknown — so a
+    quietly wrong dataset is schema-valid and indistinguishable from a
+    correct one. The escape hatch takes no default, so it cannot arrive
+    except by being typed, and taking it prints what it gave up.
+    """
+    allow_empty = bool(args.allow_empty_provenance)
     reaches_dataset = args.from_step <= DATASET_STEP
     if gaps and reaches_dataset and not allow_empty:
         sys.exit(
@@ -908,13 +934,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             + "".join(f"  {flag} absent — {cost}\n" for flag, cost in gaps)
             + "This does not fail anything. The file keeps all 70 columns in the "
               "right order, so validate.py passes it and no consumer can tell a "
-              "blank column from provenance that is genuinely unknown.\n"
-              "This is why it matters: a torvalds__linux run on 2026-09-21 spent "
-              "6h48m and died in step 10 for an unrelated reason. Had it "
-              "succeeded it would have published the largest project in the "
-              "corpus silently inconsistent with the other 185.\n"
-              "Pass the flags — this is what tmp/wave.sh does, and its comment says "
-              "they cannot be defaulted on:\n"
+              "blank column from provenance that is genuinely unknown, which is "
+              "why a long, expensive run can finish and publish silently "
+              "inconsistent with the rest of the corpus.\n"
+              "Pass the flags this run is missing:\n"
               "  --project-meta project_meta.json \\\n"
               "  --firm-map data/affiliation.merged.csv \\\n"
               "  --firm-canonical data/firm_canonical.csv\n"
@@ -941,47 +964,37 @@ def cmd_run(args: argparse.Namespace) -> int:
         say("         Do not mix these rows into the corpus: they are "
             "schema-valid and indistinguishable from rows whose provenance is "
             "genuinely unknown.")
-    shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
-    _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
-                 reblame=getattr(args, "reblame", False),
-                 memo_dir=args.memo_dir,
-                 shards=args.shards, shard_classes=shard_classes,
-                 from_step=args.from_step, gc=args.gc,
-                 mask_widened=mask_widened,
-                 retokenize=retokenize,
-                 blame_jobs=args.blame_jobs,
-                 memory_limit=args.memory_limit,
-                 duckdb_threads=args.duckdb_threads,
-                 # getattr, because callers build this Namespace directly; an
-                 # absent --mask means "use the manifest's", which is the default.
-                 mask=getattr(args, "mask", ""),
-                 project_meta=project_meta,
-                 firm_map=firm_map, firm_canonical=firm_canonical)
-    if _OPTS["mask"]:
+
+
+def announce_run(opts: dict, jobs: int) -> None:
+    """Logs, before the run starts, every choice that changes what this run
+    publishes or how it behaves — so an operator reading the log later does
+    not have to infer it from the absence of a message."""
+    if opts["mask"]:
         # Loud, because the mask in the Parquet's file_mask column comes from the
         # sidecar, which reads the manifest — so an override makes the recorded
         # mask a lie unless the operator updates the manifest too.
         say(f"WARNING: --mask overrides the manifest for every project in this "
-            f"run: {_OPTS['mask']}")
+            f"run: {opts['mask']}")
         say("         project_meta.json records the MANIFEST's mask, so the "
             "Parquet's file_mask column will not match this run.")
-    if args.memory_limit:
-        warning = memory_budget_warning(args.memory_limit, args.jobs)
+    if opts["memory_limit"]:
+        warning = memory_budget_warning(opts["memory_limit"], jobs)
         if warning:
             say(f"WARNING: {warning}")
-    if args.from_step > 1:
-        say(f"resuming at step {args.from_step}: the runner keeps the existing workdir")
-    if retokenize:
+    if opts["from_step"] > 1:
+        say(f"resuming at step {opts['from_step']}: the runner keeps the existing workdir")
+    if opts["retokenize"]:
         # Loud, because this flag DELETES cached work. A reader of the log must be
         # able to see which extensions lost their tokenizations without inferring it
         # from the absence of a refusal.
-        say(f"--retokenize {retokenize}: step 2 will DISCARD the cached tokenizations "
+        say(f"--retokenize {opts['retokenize']}: step 2 will DISCARD the cached tokenizations "
             f"for these extensions and redo them.")
         say("         Every other extension's cached work is kept. blobExec drops the "
             "blob_map rows and the memo entries together, and refuses the run (exit 7) "
             "if the request would have invalidated nothing — so a typo cannot pass as "
             "a successful re-run.")
-    if mask_widened:
+    if opts["mask_widened"]:
         # Loud, because this is the one flag that lets a blob map recorded under one
         # mask be reused under another, and the reader of a log should not have to
         # infer that from the absence of a refusal.
@@ -994,9 +1007,38 @@ def cmd_run(args: argparse.Namespace) -> int:
         say("         tree_map, commit_map, ref_map and blob_map's identity rows are "
             "discarded, so files the wider mask newly selects are tokenized rather "
             "than passed through as raw source.")
-    if args.shards > 1:
-        say(f"sharding {args.shards}-way for size class"
-            f"{'es' if len(shard_classes) > 1 else ''} {', '.join(shard_classes)}")
+    if opts["shards"] > 1:
+        say(f"sharding {opts['shards']}-way for size class"
+            f"{'es' if len(opts['shard_classes']) > 1 else ''} {', '.join(opts['shard_classes'])}")
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    OUT.mkdir(parents=True, exist_ok=True)
+    projects = read_manifest(CORPUS / args.manifest, set(args.only.split(",")) if args.only else None)
+    if not projects:
+        say("nothing to run (empty manifest / --only filter matched nothing)")
+        return 0
+
+    mask_widened, retokenize = preflight_runner_flags(args)
+    project_meta, firm_map, firm_canonical = resolve_provenance_paths(args)
+    enforce_provenance(provenance_gaps(project_meta, firm_map, firm_canonical), args)
+
+    shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
+    _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
+                 reblame=args.reblame,
+                 memo_dir=args.memo_dir,
+                 shards=args.shards, shard_classes=shard_classes,
+                 from_step=args.from_step, gc=args.gc,
+                 mask_widened=mask_widened,
+                 retokenize=retokenize,
+                 blame_jobs=args.blame_jobs,
+                 memory_limit=args.memory_limit,
+                 duckdb_threads=args.duckdb_threads,
+                 # An absent --mask means "use the manifest's", which is the default.
+                 mask=args.mask,
+                 project_meta=project_meta,
+                 firm_map=firm_map, firm_canonical=firm_canonical)
+    announce_run(_OPTS, args.jobs)
 
     run_start = time.time()
     say("capturing devenv environment (once)...")
@@ -1012,7 +1054,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         for attempt in range(1 + args.retries):
-            todo = [p for p in projects if results.get(p["name"]) not in ("done", "skipped")]
+            todo = [p for p in projects
+                   if results.get(p["name"]) not in (RunOutcome.DONE, RunOutcome.SKIPPED)]
             if not todo:
                 break
             if attempt:
@@ -1023,7 +1066,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     finally:
         stop.set()
 
-    rc = 0 if all(v in ("done", "skipped") for v in results.values()) else 1
+    rc = 0 if all(v.is_success for v in results.values()) else 1
     with RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
 
@@ -1067,9 +1110,23 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def _lock_held(lockfile: Path) -> bool:
+    """True when another process holds this project's flock.
+
+    Opened "r": a probe must not write to the thing it observes, and "w"
+    truncates on open, which would wipe a RUNNING job's lock file on every
+    `ctp.py status`. consolidate.py's lock_held carries the same predicate;
+    keep the two in step.
+
+    An unreadable lock file returns True: refusing to guess is the safe
+    answer when the question is "is a run in flight".
+    """
     if not lockfile.exists():
         return False
-    with lockfile.open("w") as f:
+    try:
+        f = lockfile.open("r")
+    except OSError:
+        return True
+    with f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return False
@@ -1079,8 +1136,8 @@ def _lock_held(lockfile: Path) -> bool:
 
 BAR_WIDTH = 30
 # Only a full run measures the rate. metrics.tsv cannot tell a full run from a
-# --from-step resume, and a resume looks impossibly fast: kamailio's step-10
-# resume took 74 s for 61k commits. The median over projects rejects those.
+# --from-step resume, and a resume looks impossibly fast since it skips
+# already-finished steps. The median over projects rejects those outliers.
 MIN_RATE_SAMPLES = 2
 
 
@@ -1188,6 +1245,7 @@ def cmd_progress(args: argparse.Namespace) -> int:
 
 def cmd_db(args: argparse.Namespace) -> int:
     """Rebuild ctp.duckdb (derived index over stamps/metrics/parquets)."""
+    OUT.mkdir(parents=True, exist_ok=True)
     _ENV.update(capture_devenv_env())
     return subprocess.run(["python3", str(CORPUS / "consolidate.py")],
                           cwd=CREGIT, env=_ENV).returncode
@@ -1219,18 +1277,10 @@ def main() -> int:
                             "BFG_MEMO_DIR, so memo/ is written first, then removed")
     run_p.add_argument("--memo-dir", default="", metavar="DIR",
                        help="keep each project's memo in DIR/<project> instead of "
-                            "<workdir>/memo, so a from-scratch run (step 1, which "
-                            "deletes the workdir) still gets every memo hit. A hit "
-                            "returns without invoking srcml at all, so this is the "
-                            "difference between re-walking the commits and "
-                            "tokenizing from cold: torvalds__linux holds ~2.6 "
-                            "million memo entries against 3,228,137 blobs. Needed "
-                            "because a changed mask forces a step-1 rebuild — "
-                            "blobExec records the mask and refuses to resume "
-                            "against a different one. DIR must exist; each project "
-                            "gets its own subdirectory, because the memo key is a "
-                            "content hash that names neither repository nor "
-                            "extension. Cannot be combined with --drop-memo")
+                            "<workdir>/memo, so a from-scratch run (which deletes "
+                            "the workdir) still gets every memo hit. DIR must "
+                            "exist; each project gets its own subdirectory. "
+                            "Cannot be combined with --drop-memo")
     run_p.add_argument("--shards", type=int, default=0,
                        help="tokenize in N shards (needs >1 to take effect). "
                             "Measured: --mode pipeline leaves ~14 of 16 cores idle "
@@ -1243,41 +1293,20 @@ def main() -> int:
     run_p.add_argument("--from-step", type=int, default=1, metavar="N",
                        help="resume the runner at step N instead of cloning again. "
                             "Only step 1 wipes the workdir, so N>1 keeps finished "
-                            "work. Use this after a late failure: the Linux run "
-                            "lost its repack at the end of step 2 with 15.2 h of "
-                            "tokenizing already on disk, and --from-step 3 skips "
-                            "the clone, the tokenize and the repack")
+                            "work — use this after a late failure to skip the "
+                            "steps that already succeeded")
     run_p.add_argument("--retokenize", metavar="EXTS", default="",
-                       help="re-tokenize only these extensions, because the tokenizer "
-                            "that produced their cached tokens was corrected. Comma "
-                            "separated, without dots: --retokenize rs. Needs "
-                            "--from-step 2 exactly, and cannot be combined with "
-                            "--mask-widened or sharding. This is NOT a mask change: "
-                            "the mask decides WHICH files are tokenized, this decides "
-                            "HOW. It exists because the blob map keys reuse on the "
-                            "command string and the mask, and rebuilding a tokenizer "
-                            "binary changes neither, so a plain resume would serve the "
-                            "poisoned tokens back and exit 0. blobExec drops the "
-                            "matching blob_map rows and the memo entries together, in "
-                            "one transaction with the tree, commit and ref maps, and "
-                            "refuses the run rather than invalidating nothing.")
+                       help="re-tokenize only these extensions (comma separated, "
+                            "no dots: --retokenize rs), because the tokenizer "
+                            "that produced their cached tokens was corrected. "
+                            "Needs --from-step 2 exactly; cannot be combined "
+                            "with --mask-widened or sharding")
     run_p.add_argument("--mask-widened", action="store_true",
                        help="reuse each project's existing tokenizations across a "
-                            "MASK CHANGE instead of rebuilding from cold. Needs "
-                            "--from-step 2 or more, because step 1 deletes the "
-                            "workdir that holds both the blob map and the "
-                            "cregit.git its ids point into. Without this flag a "
-                            "mask change is refused, which is the correct default "
-                            "and is not being weakened: blobExec still verifies, "
-                            "per project and against the rows rather than by "
-                            "comparing regexes, that every already-tokenized path "
-                            "is still selected and that the retained new_blob ids "
-                            "resolve in cregit.git. Valid because the mask decides "
-                            "WHICH files are tokenized and never HOW — the language "
-                            "comes from the extension, per file. tree_map, "
-                            "commit_map, ref_map and blob_map's identity rows are "
-                            "discarded, so a newly selected file is tokenized "
-                            "rather than passed through as raw source")
+                            "mask change instead of rebuilding from cold. Needs "
+                            "--from-step 2 or more. blobExec verifies per project "
+                            "that every already-tokenized path is still selected "
+                            "by the new mask before reusing it")
     run_p.add_argument("--gc", choices=("none", "plain", "aggressive"),
                        help="forward --gc to run_pipeline_process.sh, which packs "
                             "the generated repo after tokenizing. Omit to accept "
@@ -1285,37 +1314,23 @@ def main() -> int:
     run_p.add_argument("--memory-limit", metavar="SIZE",
                        help="forward --memory-limit to step 10, the DuckDB "
                             "generator. Omit to accept that script's own 8GB "
-                            "default. Measured 2026-09-15: the limit bounds "
-                            "DuckDB's buffers, not the process, which settles at "
-                            "about 1.4x the limit. Two projects at 8GB therefore "
-                            "need ~22 GB, and the corpus run died on this 30 GB "
-                            "box. Budget 1.4 x --jobs x SIZE. Takes an absolute "
-                            "size such as 3GB, never a percentage")
+                            "default. The limit bounds DuckDB's buffers, not the "
+                            "process, which settles at about 1.4x the limit — "
+                            "budget 1.4 x --jobs x SIZE. Takes an absolute size "
+                            "such as 3GB, never a percentage")
     run_p.add_argument("--duckdb-threads", type=int, default=0, metavar="N",
                        help="forward --duckdb-threads to step 10. Each sorting "
                             "thread holds its own buffers, so fewer threads lower "
                             "the peak. Omit to accept the generator's default")
     run_p.add_argument("--project-meta", default="", metavar="PATH",
-                       help="JSON sidecar from project_meta.py, carrying each "
-                            "project's provenance (which roster found it, which "
-                            "stratum it was assigned, its shared-history cluster "
-                            "and the mask it was tokenized with) into the "
-                            "Parquet. OMITTING THIS SILENTLY EMPTIES 29 COLUMNS "
-                            "on every row of the project: clone_url, "
-                            "provenance_status, source, stratum, fact, "
-                            "contested, label_date, owner, repo, roster_name, "
-                            "roster_lang, language, commits, size_class, "
-                            "size_kb, stars, pushed_at, license, owner_type, "
-                            "archived, fork, the seven history_* columns, "
-                            "manifest_category and file_mask. Nothing fails: the "
-                            "file keeps all 70 columns, validate.py passes it, "
-                            "and a blank column is indistinguishable from "
-                            "provenance that is genuinely unknown. ctp therefore "
-                            "REFUSES a run that reaches step 10 without it, "
-                            "unless you pass --allow-empty-provenance. The "
-                            "matching --project-key is not yours to pass: ctp "
-                            "sends the manifest name per project, so it cannot "
-                            "be forgotten or mistyped")
+                       help="JSON sidecar, keyed by project name, carrying each "
+                            "project's provenance into the Parquet — format "
+                            "documented in validate_schema.py above "
+                            "EXPECTED_COLUMNS. Omitting it leaves 29 provenance "
+                            "columns blank on every row; ctp REFUSES a run that "
+                            "reaches step 10 without it, unless you pass "
+                            "--allow-empty-provenance. --project-key is sent "
+                            "for you, from the manifest")
     run_p.add_argument("--firm-map", default="", metavar="PATH",
                        help="domain->firm CSV (data/affiliation.merged.csv) to "
                             "join per row against person_domain, filling "
@@ -1341,11 +1356,9 @@ def main() -> int:
     run_p.add_argument("--allow-empty-provenance", action="store_true",
                        help="publish Parquets whose provenance and firm columns "
                             "are blank, which ctp refuses by default. There is "
-                            "no way to reach this except by typing it, and that "
-                            "is the point: omitting --project-meta used to print "
-                            "nothing at all, at any layer, while emptying 29 "
-                            "columns of a 6h48m run. Legitimate uses "
-                            "are a test fixture, a one-project smoke run, and a "
+                            "no way to reach this except by typing it. "
+                            "Legitimate uses are a test fixture, a one-project "
+                            "smoke run, and a "
                             "corpus whose sidecar does not exist yet. Taking it "
                             "prints, itemised, which columns were given up. Do "
                             "not leave it in a launcher script: ctp refuses it "
