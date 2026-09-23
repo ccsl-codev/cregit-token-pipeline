@@ -635,7 +635,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Fail before the run, not 1,900 times during it. Every project passes these
     # flags, so a name the runner does not know costs one rc=2 per project and
-    # produces no artefact. This is defect D1, caught by a check instead of by a
+    # produces no artefact. This is a defect, caught by a check instead of by a
     # wasted run.
     missing = [f for f in REQUIRED_RUNNER_FLAGS if not script_supports(f)]
     if missing:

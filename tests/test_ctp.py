@@ -499,7 +499,7 @@ def test_run_announces_a_resume_so_the_operator_sees_it(
 
 def test_run_refuses_to_start_when_the_runner_lacks_a_required_flag(
         sandbox, monkeypatch, runner_script):
-    """Defect D1, turned into a gate. Every project passes --work and --mask, so a
+    """A defect, turned into a gate. Every project passes --work and --mask, so a
     runner that does not know them costs one exit-2 per project and produces
     nothing. Refuse once instead, before the devenv capture starts anything.
     """
@@ -726,7 +726,7 @@ def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
 
     The flag names are the runner's: run_pipeline_process.sh takes --work and
     --mask. ctp used to send --work-dir and --file-filter, which the runner
-    rejects with exit 2, so every project failed before doing any work. Defect D1.
+    rejects with exit 2, so every project failed before doing any work. A defect.
     """
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
@@ -742,7 +742,7 @@ def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
 
 
 def test_the_log_survives_the_runner_deleting_the_workdir(sandbox, monkeypatch, jq):
-    """Defect D2. run_pipeline_process.sh runs `rm -rf "$WORK"` at FROM_STEP=1 and
+    """A defect. run_pipeline_process.sh runs `rm -rf "$WORK"` at FROM_STEP=1 and
     again from its EXIT trap on failure. $WORK is the project workdir. The log of
     the failing run used to live inside it, so the evidence died with the run.
 
@@ -814,7 +814,7 @@ def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
 def test_pipeline_argv_uses_flags_the_runner_accepts(runner_script, runner, jq):
     """Every long flag ctp passes must be advertised by the runner.
 
-    This is the general form of D1. It compares the argv against the runner's own
+    This is the general form of that defect. It compares the argv against the runner's own
     usage text, so it catches a rename in either direction. Keep it even though
     REQUIRED_RUNNER_FLAGS now preflights: the constant can drift from the argv,
     and this test reads the argv itself.
@@ -833,7 +833,7 @@ def test_required_runner_flags_are_exactly_what_run_project_sends(runner, jq):
 
     cmd_run checks REQUIRED_RUNNER_FLAGS before starting. If run_project later
     gains a flag that the constant does not list, the preflight passes and the
-    run fails per project instead — D1 again, with a check that looked green.
+    run fails per project instead — the same defect again, with a check that looked green.
     """
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)

@@ -73,7 +73,7 @@ git --version
 perl -e 'use Errno; use File::Path; use File::Temp; use Getopt::Long; use Pod::Usage; print "perl deps ok\n"'
 ```
 
-## 5. Phase 0 — the rehearsal. Do this first
+## 5. The rehearsal. Do this first
 
 Do not start on a large project. Prove the procedure on a small one whose output nobody
 depends on.
@@ -90,13 +90,13 @@ Steps:
 1. Receive `scrcpy-cregit` and the two perl scripts (§6.1).
 2. Run the blame command (§6.2) with `scrcpy-cregit` as the repository.
 3. Confirm every check in §7 passes.
-4. Send the result back and wait for confirmation before you start Phase 1.
+4. Send the result back and wait for confirmation before you start the real target.
 
 The four other MVP projects are available if you want a second rehearsal: `rustlings`
 (6.56 MiB, 293 files), `dubbo` (41.13 MiB, 4,847 files), `redis` (80.17 MiB, 1,860
 files), `terminal` (119.75 MiB, 3,680 files).
 
-## 6. Phase 1 — the real target
+## 6. The real target
 
 ### 6.1 What you receive
 
