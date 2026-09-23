@@ -1,2 +1,0 @@
-# Shard-path validation. size_class forced to L so the sharded branch runs.
-shardtest__scrcpy	https://github.com/Genymobile/scrcpy.git	community	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	L

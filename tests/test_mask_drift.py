@@ -10,8 +10,8 @@
 
 (2) is the authority: it decides whether a selected blob can actually be
 tokenized. (1) only has to agree with it. They are versioned separately and
-nothing else keeps them in step, so this is the same arrangement — and the same
-kind of test — as tests/test_meta_field_drift.py.
+nothing else keeps them in step, so a drift test is the only thing that catches
+a mismatch before a run does.
 
 A divergence does not crash. The mask in this repo selects a file, the tokenizer
 in the other repo has no parser for it, and the run dies part-way through with
@@ -156,6 +156,7 @@ def test_m4_is_routed_but_not_masked():
 def test_the_configured_cregit_checkout_is_the_one_the_pipeline_runs():
     """If pipeline.cfg pointed somewhere else, everything above would be checking
     a tokenizer no run uses."""
+    _need_cregit()
     assert (ctp.CREGIT / "run_pipeline_process.sh").exists(), (
         f"{ctp.CREGIT} does not look like a cregit checkout; pipeline.cfg is stale")
 

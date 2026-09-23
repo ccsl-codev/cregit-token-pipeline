@@ -15,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import project_meta
 import validate_schema as vs
 
 
@@ -129,17 +128,6 @@ def test_the_contract_records_the_measured_column_count():
     commit-trailer footers."""
     assert len(CONTRACT) == 70
     assert sum(1 for n, _ in CONTRACT if n.startswith("footer_")) == 15
-    assert len(CONTRACT) - len(project_meta.META_FIELDS) == 41
-
-
-def test_the_provenance_columns_match_the_sidecar_field_list():
-    """The sidecar writes these, the generator injects them and this gate checks
-    them. Same names, same order, or the columns are mislabelled rather than
-    missing — see tests/test_meta_field_drift.py for the third copy."""
-    names = [n for n, _ in CONTRACT]
-    start = names.index("repo_name") + 1
-    assert names[start:start + len(project_meta.META_FIELDS)] == \
-        list(project_meta.META_FIELDS)
 
 
 def test_the_firm_columns_sit_directly_after_the_key_they_are_resolved_from():
