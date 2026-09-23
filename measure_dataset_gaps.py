@@ -5,7 +5,7 @@ This reproduces the number `docs/LIMITATIONS.md` publishes for the parser-crash
 class. Run it after any corpus run, and update that entry if the count moves.
 
     ./measure_dataset_gaps.py                      # the frozen corpus, 187 rows
-    ./measure_dataset_gaps.py --manifest manifest.sample.tsv
+    ./measure_dataset_gaps.py --manifest manifest.tsv
     ./measure_dataset_gaps.py --json gaps.json     # keep the per-path detail
 
 Two things make this measurement wrong if you skip them, and both cost real
@@ -88,7 +88,7 @@ def head_entries(git_dir: Path) -> tuple[list[str], list[str]]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--manifest", default="manifest.phase1-sm.tsv")
+    ap.add_argument("--manifest", default="manifest.tsv")
     ap.add_argument("--out-dir", default=None, help="overrides pipeline.cfg output_dir")
     ap.add_argument("--json", default=None, help="write per-path detail here")
     ap.add_argument(

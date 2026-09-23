@@ -24,16 +24,27 @@
 # from $STAMPS.
 set -uo pipefail
 
-CTP=/local/home/ellianco/Projects/cregit-token-pipeline
-CORPUS=/local/home/ellianco/Projects/cregit-workspace/corpus-files
-BACKUPS=/local/home/ellianco/Projects/cregit-workspace/parquet-backups/pre-reblame
-CREGIT=/local/home/ellianco/Projects/cregit-workspace/cregit-issue61
+die() { echo "reblame_wave: $*" >&2; exit 1; }
+
+# Every path default below is relative to where this script lives, not to a
+# machine name, so a checkout anywhere still finds its own sibling
+# cregit-workspace.
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+CTP=${CTP:-$SCRIPT_DIR}
+CORPUS=${CORPUS:-$CTP/../cregit-workspace/corpus-files}
+BACKUPS=${BACKUPS:-$CTP/../cregit-workspace/parquet-backups/pre-reblame}
 
 # Step 10 needs python3 with the duckdb module, which only the cregit devenv
 # supplies. Without it run_pipeline_process.sh SKIPS step 10 and still exits 0, so
-# a long run ends with no Parquet.
-CREGIT_PY3=/nix/store/3n4qphl9s728sz8frmpqqrv9b1m87g68-python3-3.14.7/bin/python3
-CREGIT_PY3_SITE=/nix/store/5gnikzfb2hkysq9d45mjl74h7vj4c5ad-python3-3.14.7-env/lib/python3.14/site-packages
+# a long run ends with no Parquet. That interpreter's path is a Nix store hash
+# that changes on every rebuild, and there is no clean way to rediscover it from
+# outside the devenv it comes from, so it is a required override rather than a
+# guessed default: run this script from inside `devenv shell` in the cregit
+# checkout, or export CREGIT_PY3 yourself to that interpreter.
+CREGIT_PY3=${CREGIT_PY3:?export CREGIT_PY3 to the cregit devenv python3 with the duckdb module}
+command -v "$CREGIT_PY3" >/dev/null || die "CREGIT_PY3=$CREGIT_PY3 is not executable"
+CREGIT_PY3_SITE=${CREGIT_PY3_SITE:-$("$CREGIT_PY3" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')}
 export PATH="$(dirname "$CREGIT_PY3"):$PATH"
 export PYTHONPATH="${CREGIT_PY3_SITE}${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -43,31 +54,31 @@ shift || true
 JOBS=${JOBS:-3}
 BLAME_JOBS=${BLAME_JOBS:-4}
 MEMORY_LIMIT=${MEMORY_LIMIT:-2GB}
-MANIFEST=${MANIFEST:-manifest.sample.tsv}
-
-die() { echo "reblame_wave: $*" >&2; exit 1; }
+MANIFEST=${MANIFEST:-manifest.tsv}
+PROJECT_META=${PROJECT_META:-project_meta.json}
 
 command -v python3 >/dev/null || die "no python3 on PATH"
 python3 -c 'import duckdb' 2>/dev/null \
     || die "the python3 on PATH lacks duckdb; step 10 would be skipped silently"
 
 # The checkout the pipeline actually runs is named by pipeline.cfg, not by this
-# script. Read it the way ctp.py does rather than trusting $CREGIT above.
-RUN_CREGIT=$(cd "$CTP" && python3 - <<'PY'
+# script, so CREGIT defaults to reading it the way ctp.py does. A caller who
+# overrides CREGIT is trusted instead.
+CREGIT=${CREGIT:-$(cd "$CTP" && python3 - <<'PY'
 import configparser, pathlib
 c = configparser.ConfigParser(); c.read("pipeline.cfg")
 print((pathlib.Path(".").resolve() /
        c.get("paths", "cregit_dir", fallback="../cregit-workspace/cregit")).resolve())
 PY
-)
-[ -d "$RUN_CREGIT" ] || die "pipeline.cfg names a checkout that does not exist: $RUN_CREGIT"
+)}
+[ -d "$CREGIT" ] || die "cregit checkout does not exist: $CREGIT"
 
 # Refuse if the code that will run does not actually have copy detection on. A
 # re-blame against plain git blame costs the same hours and changes nothing.
-grep -q "blame -C100" "$RUN_CREGIT/blameRepo/formatBlame.pl" \
-    || die "$RUN_CREGIT/blameRepo/formatBlame.pl does not pass -C100; nothing to re-blame for"
-grep -q -- "--reblame" "$RUN_CREGIT/run_pipeline_process.sh" \
-    || die "$RUN_CREGIT/run_pipeline_process.sh has no --reblame; step 7 would skip every file"
+grep -q "blame -C100" "$CREGIT/blameRepo/formatBlame.pl" \
+    || die "$CREGIT/blameRepo/formatBlame.pl does not pass -C100; nothing to re-blame for"
+grep -q -- "--reblame" "$CREGIT/run_pipeline_process.sh" \
+    || die "$CREGIT/run_pipeline_process.sh has no --reblame; step 7 would skip every file"
 
 mapfile -t MEMBERS < <(grep -v '^[[:space:]]*$' "$SLUGS" | grep -v '^#')
 [ "${#MEMBERS[@]}" -gt 0 ] || die "no members in $SLUGS"
@@ -130,7 +141,7 @@ echo "              snapshot, and none needing Rust re-tokenization"
 # Stamps out, then removed. Copied BEFORE any removal, so an interrupt between the
 # two leaves every stamp either in place or backed up.
 # ---------------------------------------------------------------------------
-STAMPS=/local/home/ellianco/Projects/cregit-workspace/parquet-backups/stamps-reblame-$(date +%Y%m%dT%H%M%S)
+STAMPS="$(dirname "$BACKUPS")/stamps-reblame-$(date +%Y%m%dT%H%M%S)"
 mkdir -p "$STAMPS" || die "cannot create $STAMPS"
 for s in "${MEMBERS[@]}"; do
     cp -p "$CORPUS/$s/$s.validated" "$STAMPS/$s.validated" || die "cannot back up $s.validated"
@@ -145,13 +156,20 @@ echo "stamps removed; restore with: cp -p $STAMPS/*.validated into each project 
 ONLY=$(IFS=,; echo "${MEMBERS[*]}")
 echo "starting: jobs=$JOBS blame-jobs=$BLAME_JOBS memory-limit=$MEMORY_LIMIT"
 cd "$CTP" || die "cannot cd $CTP"
+
+# The provenance sidecar is supplied by the caller and is not tracked here, so
+# pass --project-meta only when the file is present. Without it the 29
+# provenance columns come out empty, which ctp.py refuses unless you say so.
+META_ARGS=()
+[ -f "$PROJECT_META" ] && META_ARGS=(--project-meta "$PROJECT_META")
+
 python3 ./ctp.py run \
     --manifest "$MANIFEST" \
     --only "$ONLY" \
     --from-step 7 --reblame --skip-html \
     --jobs "$JOBS" --blame-jobs "$BLAME_JOBS" \
     --memory-limit "$MEMORY_LIMIT" \
-    --project-meta project_meta.json \
+    "${META_ARGS[@]}" \
     --firm-map data/affiliation.merged.csv \
     --firm-canonical data/firm_canonical.csv \
     "$@"

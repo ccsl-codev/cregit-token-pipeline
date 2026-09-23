@@ -38,24 +38,6 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # pipeline.cfg is committed with one developer's absolute paths
-      # (/home/ellianco/Projects/cregit-workspace/...), and ctp.py creates
-      # output_dir at import time:
-      #
-      #     OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
-      #     OUT.mkdir(parents=True, exist_ok=True)      # ctp.py:70-71
-      #
-      # so on a clean runner `import ctp` raises PermissionError on /home and the
-      # suite dies with 4 collection errors before a single test runs. ctp.py
-      # resolves a relative value against the repository root, so rewriting the
-      # prefix keeps the run inside the workspace. This is a workaround, not a
-      # fix: the fix is to stop hard-coding paths in a tracked config, and it
-      # cannot be made here while a corpus run is reading these files.
-      - name: Point pipeline.cfg at runner-local paths
-        run: |
-          sed -i 's#/home/ellianco/Projects/cregit-workspace/#../cregit-workspace/#' pipeline.cfg
-          grep -E '^(cregit_dir|output_dir)' pipeline.cfg
-
       # Creating .venv rather than installing into the interpreter is not
       # ceremony: run_tests.sh, the repository's documented entry point, looks for
       # .venv/bin/coverage and exits 2 without it. CI therefore runs the same
@@ -71,19 +53,10 @@ jobs:
       # `coverage report`, under `set -eu`, so a failing test or coverage below
       # the 80% floor in .coveragerc fails this step and the build.
       #
-      # The two deselected tests are not flaky and are not being silenced: both
-      # assert that ../cregit-workspace/cregit-issue61 is a real cregit checkout,
-      # which is true on the maintainer's machine and false on any runner. Every
-      # other cross-repository test in those two files self-skips when that
-      # checkout is absent (8 skips on a runner); these two do not, so they are
-      # named here instead. Deleting these two lines is the check that the
-      # underlying coupling has been fixed.
+      # Nothing is deselected. Every cross-repository test self-skips when the
+      # configured cregit checkout is absent, which it always is on a runner.
       - name: Run the test suite
-        run: |
-          ./run_tests.sh \
-            --junitxml=junit-${{ matrix.python-version }}.xml \
-            --deselect 'tests/test_mask_drift.py::test_the_configured_cregit_checkout_is_the_one_the_pipeline_runs' \
-            --deselect 'tests/test_meta_field_drift.py::test_the_configured_cregit_checkout_is_the_one_the_pipeline_runs'
+        run: ./run_tests.sh --junitxml=junit-${{ matrix.python-version }}.xml
 
       # `devenv shell -- pytest` does not flush its summary line, so the terminal
       # count is not trustworthy. Read the counts from the JUnit XML instead, and

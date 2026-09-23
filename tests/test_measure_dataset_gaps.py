@@ -150,7 +150,7 @@ def test_cfg_path_falls_back_when_the_key_is_absent(tmp_path: Path, monkeypatch)
 #
 # These write and read an actual Parquet, so they need the real duckdb from
 # `devenv shell` and skip without it -- the same gate tests/test_consolidate.py
-# and tests/test_backfill_rust_tokens.py use.
+# uses.
 # --------------------------------------------------------------------------- #
 
 try:                                          # pragma: no cover - import plumbing

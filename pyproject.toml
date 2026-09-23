@@ -56,8 +56,10 @@ dev = [
 # Not Python, not installable from here, and deliberately optional:
 #   perl  tests/test_mask_drift.py shells out to `perl tokenize/fileMask.pl` in the
 #         cregit checkout. Self-skips when perl or that checkout is absent.
-#   gh    select_corpus.py and shared_history.py call the GitHub CLI. Every test
-#         fakes subprocess.run, so no test needs it installed.
+#   gh    no shipped script calls the GitHub CLI any more. The `network` marker
+#         in pytest.ini, and the `-m "not network"` in run_tests.sh, are kept so
+#         a test that needs the network can be added and stay deselected by
+#         default. No test carries the marker today.
 
 [build-system]
 requires = ["setuptools>=77"]
@@ -73,13 +75,9 @@ py-modules = [
     "consolidate",
     "ctp",
     "file_mask",
-    "mask_impact",
-    "project_meta",
+    "measure_dataset_gaps",
     "retain",
-    "select_corpus",
-    "shared_history",
     "validate",
     "validate_schema",
-    "validate_spinellis",
     "verify_anon",
 ]
