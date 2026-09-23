@@ -1,0 +1,8 @@
+# Corpus manifest (TSV): name	url	category	file_filter	size_class
+# Linux from a FRESH clone of torvalds/linux, not the local cregit-kernel-fast tree.
+# Clone verified at v7.3-rc2-671-g2f0c1cf72f46, tip dated 2026-09-12.
+# L class: 1,482,779 commits. --mode pipeline, so transient disk is not multiplied.
+# Stratum is foundation, not community: select_corpus emit classifies
+# torvalds/linux from the control facts, and this file said community by hand.
+# The hand-written value was the outlier, so it now follows emit.
+torvalds__linux	/local/home/ellianco/Projects/cregit-workspace/staging/linux.git	foundation	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	L
