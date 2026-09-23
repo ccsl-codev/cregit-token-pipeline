@@ -20,8 +20,7 @@ Plain `git blame` follows a whole-file rename. It does not follow content moved
 every token it touched to whoever moved it.
 
 The defect was found by cross-checking an independent cregit implementation, not by
-reading the code. See [`SPINELLIS-VALIDATION.md`](SPINELLIS-VALIDATION.md) and the
-`power_supply.h` case in [`LIMITATIONS.md`](LIMITATIONS.md).
+reading the code. See the `power_supply.h` case in [`LIMITATIONS.md`](LIMITATIONS.md).
 
 ## 2. The decision
 
@@ -191,7 +190,7 @@ For six of the fifteen, the generated files are the **majority** of the project'
 Three options were considered and rejected: a deterministic size threshold, a per-file
 timeout with fallback to plain blame, and dropping the files from the corpus.
 
-**Decision (2026-09-22, Ellian): run `-C100` on every file, with no cap.** The reason is
+**Decision (2026-09-22): run `-C100` on every file, with no cap.** The reason is
 publication, not performance. One unconditional rule — "`git blame -C100`, every file,
 no exceptions" — is a single sentence in a methods section that any reader can
 reproduce. Every alternative makes the dataset's attribution depend on a per-file
@@ -226,39 +225,48 @@ pass is needed before any per-author result is published from the corrected data
 ## 8. How to run it
 
 ```bash
+CREGIT_PY3=/path/to/cregit/devenv/python3 \
 JOBS=3 BLAME_JOBS=4 MEMORY_LIMIT=2GB bash ./reblame_wave.sh <slugs-file>
 ```
 
 `reblame_wave.sh` runs `ctp.py run --from-step 7 --reblame --skip-html`. It is under
-version control on purpose; the earlier scratch dispatcher was not.
+version control on purpose; the earlier scratch dispatcher was not. Every path it
+uses defaults relative to where the script itself lives, so a checkout anywhere
+still finds its own sibling `cregit-workspace`; `CREGIT_PY3` is the one exception
+and is a required override, not a guessed default, because it must be the cregit
+devenv's own `python3` (the one with the `duckdb` module) and its path is a Nix
+store hash that changes on every rebuild. The provenance sidecar is passed with
+`--project-meta` only when `$PROJECT_META` (default `project_meta.json`) exists on
+disk, since it is supplied by the caller and is not tracked in this repository.
 
 It refuses, before it changes any state, when:
 
-1. the python on `PATH` lacks `duckdb` — step 10 would be skipped silently;
-2. the checkout named by `pipeline.cfg` does not pass `-C100`;
-3. that checkout's runner has no `--reblame`;
-4. a member cannot resume at step 7, or has no Parquet snapshot;
-5. a member holds a tokenized `.rs` blob, so it needs step 2 as well.
+1. `CREGIT_PY3` is unset, or is not executable;
+2. the python on `PATH` lacks `duckdb` — step 10 would be skipped silently;
+3. the checkout named by `pipeline.cfg` does not pass `-C100`;
+4. that checkout's runner has no `--reblame`;
+5. a member cannot resume at step 7, or has no Parquet snapshot;
+6. a member holds a tokenized `.rs` blob, so it needs step 2 as well.
 
 **Steps 7-10 only, and that matters.** The crash gate lives inside step 2, and
 `run_step` returns early below `FROM_STEP`. So a re-blame needs neither the tokenizer
 fix nor the crash denylist, and it skips step 1's `rm -rf "$WORK"`. Step 9 is
 skippable because nothing downstream reads `$WORK/html`.
 
-**Order the slugs file largest-first.** `ctp.py` dispatches alphabetically, so the
-wave of 2026-09-22 put `torvalds__linux` at line 128 of 136 and the longest job started
-last. Do not fix this by launching the giant in a second concurrent run: `ctp.py` holds
-a per-project lock and the wave would mark the project failed.
+**Order the slugs file largest-first.** `ctp.py` dispatches alphabetically, so an
+alphabetically-ordered slugs file can leave its longest job to start last, wasting
+the parallelism at the end of a wave. Do not fix this by launching the giant
+project in a second, concurrent run: `ctp.py` holds a per-project lock and the
+wave would mark the project failed.
 
 ## 9. Status
 
-| date | event |
-| --- | --- |
-| 2026-09-22 | 3-project pilot; `-C100` deployed; `--reblame` added after the no-op was found |
-| 2026-09-22 17:19 | wave launched over 136 blame-only projects, `--jobs 3 --blame-jobs 4` |
-| — | **47 Rust members still pending.** They need step 2 as well, which waits on the `fix/tokenizer-correctness` review |
+A project carries either attribution, plain `git blame` or `-C100`, depending on
+whether it has been re-blamed yet through this method. A member needing Rust
+re-tokenization needs step 2 first, run as a separate wave, before it can go
+through `reblame_wave.sh`.
 
-Until the 47 are done, the corpus carries two attributions. Do not mix them in one
-analysis. Detect which one a project has by comparing it against
-`parquet-backups/pre-reblame/`: if the two files are identical, it still carries plain
-blame.
+Until every project has been re-blamed, a corpus can carry two attributions at
+once. Do not mix them in one analysis. Detect which one a project has by
+comparing it against `parquet-backups/pre-reblame/`: if the two files are
+identical, it still carries plain blame.

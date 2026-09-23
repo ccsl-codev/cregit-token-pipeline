@@ -27,89 +27,70 @@ found, how it was labelled, which mask tokenized it) repeated verbatim on every
 row, so a consumer can filter a corpus without a second join. A column is cheap
 to drop at publish time and expensive to add later.
 
-### 1.1 The corpus
+### 1.1 The shape of a corpus
 
 | | Value | Source |
 | --- | --- | --- |
 | Languages tokenized | C, C++, Java, Rust | `file_mask.TOKENIZABLE_LANGUAGES` |
-| File mask (identical for every project) | `(?i)\.(c\|c\+\+\|cc\|cp\|cpp\|cxx\|h\|h\+\+\|hh\|hpp\|hxx\|java\|rs\|tcc)$` | `file_mask.UNIVERSAL_MASK` |
-| Candidate rows considered | 24,405 (28 fields) | `candidates.csv` |
-| Eligible rows | 3,948 | `candidates.csv`, `included == True` |
-| Sampling frame (distinct repositories) | 3,842 | eligible rows collapsed by `clone_url` |
-| Projects drawn | 200 — 156 S, 31 M, 13 L | `manifest.sample.tsv` |
-| Strata drawn | 103 community, 69 company-owned, 28 foundation | `manifest.sample.tsv` field 3 |
-| Sampling seed | `20261110` | `select_corpus.SAMPLE_SEED` |
-| Cell floor | 2 per `(stratum, language, size_class)` cell | `select_corpus.SAMPLE_FLOOR` |
-| Size classes | S < 30,000 commits; M 30,000–150,000; L > 150,000 | `select_corpus.SIZE_S`, `SIZE_M` |
+| File mask (identical for every project in one run) | `(?i)\.(c\|c\+\+\|cc\|cp\|cpp\|cxx\|h\|h\+\+\|hh\|hpp\|hxx\|java\|rs\|tcc)$` | `file_mask.UNIVERSAL_MASK` |
 
-The draw is stratified by `(stratum, language, size_class)`: a floor of 2 from
-every cell first, then the remainder by largest remainder, and a cell is never
-asked for more than it holds. `docs/CORPUS-SAMPLE.md` is the per-cell allocation.
-One `random.Random` is seeded per cell from `f"{seed}:{cell_key}"`, so adding a
-cell does not re-draw the others.
+Which repositories go into a corpus, how many, and what stratum, size class or
+history relationship each one carries, is entirely up to whoever writes the
+manifest and the optional provenance sidecar. Nothing in this repository drafts
+a manifest, draws a sample, or assigns a stratum: it runs cregit over the
+manifest it is given and records whatever the sidecar says about each project.
+`size_class` (`S`/`M`/`L`) is likewise a free label you assign per project; this
+repository does not enforce a threshold on it, though `--shard-classes` and the
+`--jobs` mix you choose are worth basing on one, since a bigger project can need
+sharding or a longer retry budget.
 
-**The run set is smaller than the draw.** `manifest.phase1-sm.tsv` holds the 187
-S- and M-class projects and `manifest.linux.tsv` holds one L-class project: 188
-of the 200. The other 12 L-class projects are held back on disk grounds (one
-L-class working directory measured 435 GB). Run them from
-`manifest.sample.tsv` once retention has a Parquet-only level.
+**A run can be smaller than the manifest, and a published set smaller than the
+run.** A project can fail to complete — a disk-space hold-back, a parser crash,
+a timeout — and stay in the manifest without a Parquet. A project that
+completes can still be excluded from publication on purpose: `consolidate.py`'s
+`PUBLICATION_EXCLUSIONS` names a project and a reason without deleting its row,
+so the sampling and run record stays complete. Read published membership from
+`projects.excluded_because`, never from the presence of a Parquet file.
+[`LIMITATIONS.md`](LIMITATIONS.md) holds the measurements for the projects this
+pipeline has published so far.
 
-**The published set is smaller than the run set: 185 of the 188.** Two projects are
-excluded on purpose and one is still running. `tencent__tencentkona-21` cannot be
-parsed completely and `tencent__tendbcluster-tendb` is a near-duplicate of
-`tencent__tendbcluster-tdbctl`; both keep their manifest row and their `projects`
-row, and `consolidate.py` records the reason in `excluded_because`. Read published
-membership from that column, never from the presence of a Parquet file.
-`docs/LIMITATIONS.md` holds the measurements.
+**Every project in one run is tokenized with the same mask**, so `file_mask`
+(column 30) does not distinguish projects within a run — it distinguishes
+*runs*, which is what it exists for. The mask used to be chosen from GitHub's
+primary-language field, which dropped a polyglot project's other languages;
+widening it to the union of every parseable extension is provably a superset —
+no project loses a file. Note that `./ctp.py run --mask REGEX` overrides the
+manifest for a run without updating the sidecar, so a run using it publishes a
+`file_mask` that does not describe what happened. The runner warns; nothing
+enforces it.
 
-How a project gets its `stratum` is `docs/CODEBOOK.md`. It is a claim about who
-*controls* a project and never about who contributes to it.
+### 1.2 Selecting rows out of the index
 
-**Every project is tokenized with the same mask**, so `file_mask` (column 30) does
-not distinguish projects — it distinguishes *runs*, which is what it exists for.
-All 186 Parquets that conform to the contract today carry one `file_mask` value.
-The mask used to be chosen from GitHub's primary-language field, which dropped a
-polyglot project's other languages; `data/mask-impact.csv` is the record of what
-that cost, re-derivable with `./mask_impact.py`, and the widening is provably a
-superset — no project loses a file. Note that `./ctp.py run --mask REGEX`
-overrides the manifest for a run without updating `project_meta.json`, so a run
-using it publishes a `file_mask` that does not describe what happened. The runner
-warns; nothing enforces it.
+`./ctp.py db` builds `ctp.duckdb` — a `projects` state table, a `phase_metrics`
+table, and a `tokens` view — from the manifest or manifests you name it (default
+`manifest.tsv`). Nothing is discovered by scanning the output directory: a
+project has to be named in a manifest to appear in the index at all.
 
-### 1.2 Selecting the corpus out of the output directory
+The `tokens` view is not simply every Parquet a manifest names. `read_parquet`
+over a list binds **one** schema for the whole list, so a single file at a
+different column count would abort the view outright. `consolidate.py` builds
+the view only from files whose schema matches `validate_schema.EXPECTED_COLUMNS`,
+and **names and counts every file it leaves out** in its printed summary — a
+silent exclusion would be worse, because the row count would still look
+plausible.
 
-The output directory also holds development fixtures. One predicate separates
-them:
+A project that ran and validated, but that you decide should not be published,
+is excluded the same way without losing its row: name it and the reason in
+`consolidate.PUBLICATION_EXCLUSIONS`, and it keeps its row in `projects`, with
+the reason in `excluded_because`, while contributing no rows to `tokens`. Read
+published membership from that column, never from the presence of a Parquet
+file.
 
-```sql
-CREATE VIEW tokens AS
-SELECT * FROM read_parquet('<output_dir>/*/*-dataset.parquet')
-WHERE provenance_status = 'candidates.csv';   -- drops the fixtures
-```
-
-`provenance_status` is `candidates.csv` for a corpus project and
-`fixture-needs-rework` for a fixture. `project_meta.json` holds 210 entries of 29
-fields: 200 corpus projects and 10 fixtures. A fixture has only four real fields
-— `provenance_status`, `clone_url`, `manifest_category`, `file_mask` — and the
-other **25 are empty strings**. It was never selected, so it has no stratum, no
-draw and no history cluster, and empty strings read as findings rather than as
-absences. `provenance_status` is deliberately the second column, because it
-qualifies everything after it.
-
-A corpus project that is *not* found in `candidates.csv` is a hard error rather
-than a silent blank row.
-
-`./ctp.py db` builds the same view (plus a `projects` tracking table and a
-`phase_metrics` table) into `ctp.duckdb`, over the run set rather than over the
-glob. It is a derived index; the files are the authority.
-
-Filtering on `provenance_status` is necessary but not sufficient, because
-`read_parquet` over a list binds **one** schema for the whole list: the 10 fixtures
-in the output directory are at older 23- and 38-column schemas and will abort the
-view outright. `consolidate.py` handles this by including only files whose schema
-matches `validate_schema.EXPECTED_COLUMNS`, and by **naming and counting every
-file it leaves out** — a silent exclusion would be worse, because the row count
-would still look plausible.
+`provenance_status` (column 3) is a free string that your provenance sidecar
+sets; this repository does not read or filter on its value anywhere. If you
+need to separate one kind of row from another in the view — a real project from
+a test fixture, say — filter on a column your own sidecar fills, not on
+`provenance_status`.
 
 ---
 
@@ -122,22 +103,26 @@ a cregit checkout that has `rustTokenizer` and at an output directory.
 
 | Step | Command | Writes |
 | --- | --- | --- |
-| 1. Fetch rosters | `./select_corpus.py rosters` | `.corpus-cache/` |
-| 2. Resolve repositories | `./select_corpus.py enrich` | `.corpus-cache/repo-meta.json` |
-| 3. Find shared histories | `./shared_history.py scan` then `ancestry` | history cluster cache |
-| 4. Emit candidates | `./select_corpus.py emit` | `candidates.csv`, `manifest.tsv` |
-| 5. Draw the sample | `./select_corpus.py sample` | `manifest.sample.tsv`, `docs/CORPUS-SAMPLE.md` |
-| 6. Build the provenance sidecar | `./project_meta.py --candidates candidates.csv --manifest manifest.sample.tsv --fixture-manifest manifest.tsv --fixture-manifest manifest.mvp5.tsv --fixture-manifest manifest.shardtest.tsv --out project_meta.json` | `project_meta.json` (200 + 10) |
-| 7. Build the domain→firm map | `./build_domain_map.py fetch` then `build` | `data/affiliation.merged.csv` |
-| 8. Run the corpus | `./ctp.py run --manifest manifest.phase1-sm.tsv --jobs N --skip-html --drop-memo --project-meta project_meta.json --firm-map data/affiliation.merged.csv --firm-canonical data/firm_canonical.csv` | one Parquet per project, plus a `.validated` stamp |
-| 9. Gate the schema | `./validate_schema.py <out>/*/*-dataset.parquet` | exit 1 on any drift |
-| 10. Build the index | `./ctp.py db` | `ctp.duckdb` |
-| 11. Prune | `./retain.py --apply` | deletes `memo/` and `html/` only |
-| 12. Pseudonymize for release | `./anonymize_parquet.py OUTDIR <in>.parquet ...` | anonymized Parquets + JSON report |
-| 13. Verify the release | `./verify_anon.py OUTDIR` | exit 1 on any residue |
+| 1. Write a manifest | a TSV file, one line per project: `name  url  category  file_filter  size_class` | `manifest.*.tsv` |
+| 2. Point the pipeline at cregit | edit `pipeline.cfg`'s `[paths]` section: `cregit_dir`, `output_dir` | — |
+| 3. Write a provenance sidecar (optional) | a JSON object, one key per project; format is `validate_schema.py`'s comment block above `EXPECTED_COLUMNS` | e.g. `project_meta.json` |
+| 4. Run it | `./ctp.py run --manifest manifest.tsv --jobs N --skip-html --drop-memo --project-meta project_meta.json --firm-map data/affiliation.merged.csv --firm-canonical data/firm_canonical.csv` | one Parquet per project, plus a `.validated` stamp |
+| 5. Gate the schema | `./validate_schema.py <out>/*/*-dataset.parquet` | exit 1 on any drift |
+| 6. Build the index | `./ctp.py db` | `ctp.duckdb` |
+| 7. Prune | `./retain.py --apply` | deletes `memo/` and `html/` only |
+| 8. Pseudonymize for release | `./anonymize_parquet.py OUTDIR <in>.parquet ...` | anonymized Parquets + JSON report |
+| 9. Verify the release | `./verify_anon.py OUTDIR` | exit 1 on any residue |
 
-**`--manifest` defaults to `manifest.tsv`, which is four legacy pilot projects.**
-Name the manifest you mean on every `ctp.py` subcommand that takes one.
+`data/affiliation.merged.csv` and `data/firm_canonical.csv` already ship in this
+repository, built from public affiliation data plus a curated overlay. Rebuild
+either only if you want a different map: `./build_domain_map.py fetch` then
+`build`, and see [`LIMITATIONS.md`](LIMITATIONS.md) for what the shipped map
+gets wrong.
+
+**`--manifest` defaults to `manifest.tsv`.** That file is the only manifest in
+this repository — 4 small public pilot projects — and is a worked example, not
+a real corpus. Name the manifest you mean on every `ctp.py` subcommand that
+takes one.
 
 Runs are idempotent. A validated project is skipped, an interrupted one resumes
 through the tokenizer's incremental blob map, and a failed one is retried on the
@@ -188,7 +173,7 @@ per-project constant: it comes from a per-row join on `person_domain`.
 | ---: | --- | --- | --- | --- |
 | 1 | `repo_name` | VARCHAR | `--repo-name` | the manifest name; a lossy slug, see §3.5 |
 | 2 | `clone_url` | VARCHAR | sidecar | **the identity. Join on this.** |
-| 3 | `provenance_status` | VARCHAR | sidecar | `candidates.csv` \| `fixture-needs-rework` |
+| 3 | `provenance_status` | VARCHAR | sidecar | a free string the sidecar sets; this repository does not interpret it |
 | 4 | `source` | VARCHAR | sidecar | which roster or search found the project |
 | 5 | `stratum` | VARCHAR | sidecar | `community` \| `company-owned` \| `foundation` |
 | 6 | `fact` | VARCHAR | sidecar | the control fact that assigned the stratum |
@@ -356,19 +341,20 @@ of characters outside `[a-z0-9-]` with a hyphen. `_` and `.` both become `-`, so
 the transform is **not invertible**. The owner recorded is also the owner the
 roster used, which may no longer own the repository.
 
-Measured over the 200 drawn projects: 125 names equal `owner__repo` verbatim, 60
-need slugging to match the URL, and **15 do not derive from the clone URL at
-all** because the repository was renamed or transferred upstream. Any analysis
-that joins back to a roster on `repo_name` silently loses at least those 15.
-Reproduce the split with `select_corpus.project_name(owner, repo)` over
-`manifest.sample.tsv`.
+Measured over the 200 drawn projects that produced this dataset: 125 names
+equal `owner__repo` verbatim, 60 needed slugging to match the URL, and **15 do
+not derive from the clone URL at all** because the repository was renamed or
+transferred upstream. Any analysis that joins back to a roster on `repo_name`
+silently loses at least those 15.
 
-`clone_url` is the identity. `candidates.csv` keeps **one row per provenance
-fact**, not one per project, so a repository that two rosters name appears twice:
-24,405 rows cover 23,707 distinct non-empty `clone_url`s, 196 of which carry more
-than one row. `select_corpus.dedupe_by_clone_url` is the resolution rule — group
-by `clone_url`, and the row whose owner matches the URL wins — and anything
-reading `candidates.csv` must apply it. `project_meta.py` does.
+`clone_url` is the identity, never `repo_name`. The selection process that built
+this dataset kept one row per provenance fact rather than one per project, so a
+repository that two rosters both named appeared twice: 24,405 candidate rows
+covered 23,707 distinct non-empty `clone_url`s, 196 of which carried more than
+one row. Its resolution rule — group by `clone_url`, and the row whose recorded
+owner matches the URL wins — is the one to apply if you build a similar
+candidate table yourself; nothing in this repository does that for you any
+more.
 
 ---
 
@@ -442,11 +428,11 @@ analysing the data. The ones most likely to change a result:
 | Invariant | Enforced by |
 | --- | --- |
 | every Parquet has the same 70 columns, types and order | `validate_schema.py` — exit 1 on any drift |
-| the 29 provenance names agree across three files in two repositories | `tests/test_meta_field_drift.py` — `project_meta.META_FIELDS`, `validate_schema.EXPECTED_COLUMNS[1:30]`, and the generator's own list |
+| the 29 provenance names agree between the sidecar format and the external generator | **not tested in this repository.** `validate_schema.py`'s comment block above `EXPECTED_COLUMNS` is the description; check it by hand against the generator's `PROJECT_META_FIELDS` |
 | the mask names only extensions with a working parser | `tests/test_mask_drift.py`, against the tokenizer's own language table |
 | the mask string is byte-stable | `file_mask.build_mask` sorts the extension list; the blob map compares the mask character for character on every resume |
 | a missing sidecar key fails loudly rather than blanking 29 columns | the generator raises on load |
-| duplicate `clone_url`s resolve the same way everywhere | `select_corpus.dedupe_by_clone_url`, called by `project_meta.build_meta` |
+| duplicate `clone_url`s resolve the same way everywhere, if you build a candidate list of your own | **not applicable here.** This repository does not build or de-duplicate a candidate list; that choice, and its consistency, is on whoever writes the manifest |
 | anonymization never silently shrinks the schema | `anonymize_parquet.py` classifies every input column and raises on an unknown one |
 
 If you change `EXPECTED_COLUMNS`, change §3.2 in the same commit.

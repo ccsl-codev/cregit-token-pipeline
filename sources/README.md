@@ -2,18 +2,19 @@
 
 The two large files in this directory are **not produced by this pipeline.** They
 are the published enterprise/cohort dataset of Spinellis et al., MSR 2020
-(Zenodo `10.5281/zenodo.3742962`, CC-BY-4.0), vendored here so that corpus
-selection is reproducible without a network fetch:
+(Zenodo `10.5281/zenodo.3742962`, CC-BY-4.0).
 
 | File | Rows | Read by |
 | --- | ---: | --- |
-| `enterprise_projects.txt` | 17,264 | `select_corpus.parse_spinellis` → `F1_pool:spinellis-*` |
-| `cohort_project_details.txt` | 311,223 | `select_corpus.parse_spinellis_cohort` → `F1_pool:spinellis-cohort` |
+| `enterprise_projects.txt` | 17,264 | `build_domain_map.parse_spinellis_domains`, for firm attribution |
+| `cohort_project_details.txt` | 311,223 | nothing in this repository |
 
-Both are used as **candidate pools only, never as stratum labels**: they label
-contribution composition, and this pipeline labels control. `docs/CODEBOOK.md`
-§5 states the rule and why; `docs/SPINELLIS-VALIDATION.md` is the generated
-comparison between the two labellings.
+Only `enterprise_projects.txt` is read today, and only for
+`data/affiliation.merged.csv`: each row's dominant e-mail domain plus its
+SEC/Fortune-matched company name becomes a domain→firm fact, tagged
+`spinellis-sec` (see `docs/DATASET-SCHEMA.md` §3.4). `cohort_project_details.txt`
+is vendored beside it for the licence's sake, but nothing in this repository
+fetches or reads it; do not fetch it expecting a consumer to exist.
 
 The rest of this file is the upstream authors' own description of those files,
 reproduced verbatim.

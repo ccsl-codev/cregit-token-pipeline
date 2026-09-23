@@ -1,8 +1,7 @@
 # Design
 
 Why the pipeline is built the way it is. For what it produces, read
-[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md); for how a project is labelled, read
-[`CODEBOOK.md`](CODEBOOK.md).
+[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md).
 
 **Goal.** Run cregit end-to-end over a stratified corpus of FLOSS projects and
 produce per-project token-authorship datasets that share one schema, on a single
@@ -41,7 +40,7 @@ manifest.*.tsv ──► ctp.py run ──► run_pipeline_process.sh ──► 
 ## 2. The manifest is a five-field contract
 
 ```
-name	url	category	file_mask	size_class
+name	url	category	file_filter	size_class
 ```
 
 Three parsers unpack exactly those five positions and four tests assert them.
@@ -59,13 +58,15 @@ extension the tokenizer can parse, derived in `file_mask.py` from one extension
 list rather than typed out, because a mask and an extension list maintained
 separately drift in both directions and both directions are silent. It used to
 come from a per-language matrix keyed on GitHub's primary language, which dropped
-a polyglot project's other languages; `data/mask-impact.csv` measures what that
-cost. The column stays because it records which mask a Parquet was built with.
-Projects whose primary language has no tokenizer are still excluded at selection
-time.
+a polyglot project's other languages; widening it to the union of every
+parseable extension is provably a superset, so no project loses a file. The
+column stays because it records which mask a Parquet was built with. A project
+whose language has no tokenizer still fails to produce useful rows; nothing in
+this repository screens for that before a run.
 
-Selection heuristics are a separate concern: `select_corpus.py` emits candidate
-rows for curation, and the runner only consumes a curated manifest.
+Choosing which repositories to run is a separate concern, and out of scope for
+this tool: it consumes a manifest you write; it does not draft, sample or
+curate one.
 
 ## 3. Per-project pipeline: the delta
 
@@ -156,24 +157,44 @@ The checks are plain `if` statements rather than `assert`, because `assert`
 vanishes under `python -O` and a gate an interpreter flag can delete is not a
 gate.
 
-## 7. Corpus-level stages
+## 7. The provenance guard
+
+`ctp.py run` refuses to reach the Parquet-writing step with a provenance gap —
+a missing `--project-meta`, a missing `--firm-map`, or a `--firm-map` given
+without `--firm-canonical` — unless `--allow-empty-provenance` says otherwise.
+
+It refuses rather than warns. Nothing downstream can tell a blank column from
+provenance that is genuinely unknown: the file still carries all 70 columns in
+the right order, so both validation gates pass it, and a long run can finish and
+publish a Parquet that is silently inconsistent with the rest of a corpus. A
+warning is easy to miss at the end of a long log; a refusal is not.
+
+The escape hatch takes no default, so it can only arrive by being typed, and it
+prints exactly which columns it gave up. It is refused in turn when nothing
+would actually be blank, so it cannot sit unused in a launcher script and
+silence a real gap on a later run that does have one.
+
+`--firm-canonical` is checked separately from `--firm-map` because the two fail
+differently. Omitting `--firm-map` leaves three columns empty, which the guard
+reports as a blank. Omitting `--firm-canonical` alone does not blank anything:
+`firm` silently repeats `firm_raw`, so split spellings of one firm stay split
+and every firm's share is understated. A wrong column is a different failure
+from a blank one, so the guard reports it as its own gap rather than folding it
+into the same message.
+
+## 8. Corpus-level stages
 
 Built:
 
-1. **`select_corpus.py`** — rosters and searches → control facts → `candidates.csv`
-   → a stratified `manifest.sample.tsv`. See `CODEBOOK.md`.
-2. **`shared_history.py`** — finds projects that carry another project's history,
-   which GitHub's fork flag does not. They are flagged, not excluded.
-3. **`project_meta.py`** — the 29-field provenance sidecar.
-4. **`build_domain_map.py`** — the domain→firm map, from public affiliation data
+1. **`build_domain_map.py`** — the domain→firm map, from public affiliation data
    plus a curated overlay applied last, so a rebuild keeps the corrections.
-5. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
+2. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
    and a `tokens` view over every Parquet whose schema matches the contract. The
-   manifests indexed are selectable and default to the corpus run set; a
+   manifests indexed are selectable and default to `manifest.tsv`; a
    non-conforming file is excluded **by name, counted in the summary**, because a
    silent exclusion is worse than the crash it replaces — the row count then
    looks plausible.
-6. **`anonymize_parquet.py`** / **`verify_anon.py`** — the release path. The
+3. **`anonymize_parquet.py`** / **`verify_anon.py`** — the release path. The
    e-mail local part becomes `author_NNNN` and names become `Author N`, through a
    single registry so one person has one pseudonym everywhere, including inside
    the trailer arrays. **The e-mail domain is preserved on purpose**: firm
@@ -187,6 +208,10 @@ Built:
 
 Not built. Each is a gap, not a plan:
 
+- **Choosing which repositories to run.** No script here drafts a manifest,
+  draws a sample, or assigns a project's stratum or history cluster. Those
+  choices, and the 29 provenance columns that record them, are entirely on the
+  person who writes the manifest and the optional sidecar.
 - **A corpus-level firm or organisation rollup.** Attribution is per token only.
 - **A per-project metadata table / dataset card** — name, category, URL, pinned
   sha, commit count, token rows, file count, languages, run duration, and the
@@ -197,7 +222,7 @@ Not built. Each is a gap, not a plan:
   cannot cite the cregit revision, tool versions and pinned commit it was built
   from. This is the single largest reproducibility gap.
 
-## 8. Failure modes and how they are handled
+## 9. Failure modes and how they are handled
 
 | Failure | Handling |
 | --- | --- |

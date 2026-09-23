@@ -2,8 +2,7 @@
 
 What is wrong with the dataset, ordered by how likely it is to change a result.
 Read this before analysing the data. [`DATASET-SCHEMA.md`](DATASET-SCHEMA.md) is
-the column reference; [`CODEBOOK.md`](CODEBOOK.md) §9 holds the gaps specific to
-the stratum labels.
+the column reference.
 
 Every entry states the defect, its measured magnitude where one exists, how to
 detect it in the data, and the workaround if there is one. An entry with no
@@ -83,14 +82,12 @@ content moved *between* files, so a header split or a refactor re-credited every
 token it touched. No commit in this repository commented that line out, so it
 arrived that way from upstream rather than by a local choice.
 
-`-C100` is **enabled** from 2026-09-22 (`formatBlame.pl:73`). Every project is being
-re-blamed. **Status: in progress — do not mix the two attributions in one analysis.**
-
-| projects | state |
-| ---: | --- |
-| 3 | re-blamed, pilot |
-| 136 | re-blamed by the wave of 2026-09-22 |
-| 47 | **not yet re-blamed** — they also need Rust re-tokenization, which waits on a separate fix |
+`-C100` is now **enabled** (`formatBlame.pl:73`), and a project is re-blamed by
+running it through `reblame_wave.sh` (see [`REBLAME-C100.md`](REBLAME-C100.md)
+§8). A corpus can hold projects re-blamed at different times, so **two
+attributions can coexist. Do not mix them in one analysis.** A project needing
+Rust re-tokenization needs that fix first, since a re-blame alone cannot reach
+it.
 
 Detect which one a file carries by comparing it against the snapshot at
 `parquet-backups/pre-reblame/`, which holds the pre-correction attribution for all
@@ -142,8 +139,8 @@ Copy detection moved 10 lines off the most recent author and introduced two auth
 we omitted entirely. The mover was `44fcc479a574`, "power: supply: hwmon: move
 interface to private header".
 
-* **Consequence, for the 47 projects not yet re-blamed**: every per-author,
-  per-organisation and truck-factor result over them **systematically over-credits
+* **Consequence, for any project not yet re-blamed**: every per-author,
+  per-organisation and truck-factor result over it **systematically over-credits
   refactorers, file-movers and header-splitters** and under-credits original authors.
   This is a separate mechanism from the vendoring artefact above, and it moves
   attribution in the same direction.
@@ -164,7 +161,7 @@ about `PUBLICATION_EXCLUSIONS`:
 
 | | regular files | missing |
 | --- | ---: | ---: |
-| `manifest.phase1-sm.tsv`, 186 with a Parquet | 446,060 | 36 |
+| the 186 S- and M-class projects with a Parquet | 446,060 | 36 |
 | less `tencent__tendbcluster-tendb`, withheld | −6,954 | −2 |
 | plus `torvalds__linux` | +65,011 | +1 |
 | **published** | **504,117** | **35** |
@@ -193,8 +190,8 @@ source. `powerdns__pdns` alone carries **331** masked symlinks in
 `pdns/dnsdistdist/`; counting them makes its Parquet look 29% incomplete when it
 is complete, because the Parquet holds exactly its 806 regular files.
 `nvidia__opensma` (10) and `facebookincubator__qemu-wearables` (4) are the same
-artefact. Over `manifest.phase1-sm.tsv` the naive count is 390 and the true count is
-36; over the published set it is **417 naive and 35 true**, because Linux adds 28
+artefact. Over the 186 S- and M-class projects the naive count is 390 and the true
+count is 36; over the published set it is **417 naive and 35 true**, because Linux adds 28
 more masked symlinks and gitlinks and one real gap.
 
 * **Detect**: a path that exists at HEAD, matches the file mask, **and is mode
@@ -251,12 +248,13 @@ reading, rather than un-shifting a field.
   `line:col` and `split_part(token_type, chr(9), 2)` the real token type; skip the
   `-:-` end-of-unit marker. **`token_value` is correct** on content rows.
   `source_text` is not recoverable from the Parquet.
-* **`backfill_rust_tokens.py` does this repair**, fails closed on a non-contract
-  schema, and is idempotent. It leaves `source_text` wrong on content rows on
-  purpose, and sets it to `''` on structural rows only, because every structural
-  branch of `classify_and_skip` writes `''` there — so `is_structural = 1` implies
-  `source_text = ''` in correct data, and repairing one without the other would
-  create a new inconsistency.
+* **The defect is not repaired in place, and no repair script ships in this
+  repository.** A repair would need to leave `source_text` wrong on content rows
+  on purpose, and set it to `''` on structural rows only, because every
+  structural branch of `classify_and_skip` writes `''` there — so
+  `is_structural = 1` implies `source_text = ''` in correct data, and repairing
+  one without the other would create a new inconsistency. The only clean fix is
+  a re-run of the Rust-bearing projects once the tokenizer itself is corrected.
 * **`is_structural` becomes correct, not useful.** After the repair a Rust file has
   about 3 structural rows, against roughly 59% of rows in a C file, because the Rust
   tokenizer emits no `begin_*`/`end_*` tag markers, no `blank` and no `DECL`. A
@@ -365,8 +363,7 @@ worst by count is `grpc__grpc` at 616.
 
 The defect is real and no test covers it, so a future corpus with a wider language
 mask could be hurt much more. In this corpus it changes no result that the `.h`
-entry does not already qualify. Reproduce with
-`/local/home/ellianco/tmp/memo-collision-corpus.py`.
+entry does not already qualify.
 
 **A file can be excluded from a project with no row and no marker in the
 Parquet.** Three mechanisms remove a blob from the tokenized repository entirely,
@@ -433,6 +430,29 @@ All are visible in `data/affiliation.merged.csv`:
   revision — no `keep` row has `firm <> firm_raw` — but editing a rejected row's
   `firm` would silently apply the merge the review refused.
 
+**`data/affiliation.merged.csv` weights heavily toward single-person inference,
+and shipping it as it stands is a re-identification risk.** Of its 4,041
+domain-to-company rows, **2,789 — 69%** — carry a `source` of
+`cncf-gitdm-single` or `cncf-gitdm-single-self-reference`: one person's own
+claim about their employer, with no second person to corroborate it. The
+remaining 1,252 rows come from hand-curated or multi-person sources.
+
+A personal domain attributed to an employer is not dangerous by itself. Joined
+against the repository the domain's owner contributed to, it can identify a
+specific person: a vanity domain plus a project is often enough on its own. At
+least one domain in the map today has exactly this shape.
+
+**A mitigation exists: read `firm_source`.** It is published on every row
+(column 54), so any analysis can filter to the corroborated tier and drop the
+single-person rows before publishing a result; an empty `firm_source` already
+means no attribution at all, and is the column to check first.
+
+**A further mitigation does not exist, on purpose.** k-anonymity over the
+domain is the standard remedy for this kind of exposure, and it is not applied
+here. It is not an oversight: it would suppress exactly the small-firm,
+single-contributor tail that this dataset exists to measure, so applying it
+would remove the population the analysis is for.
+
 **Token count is not a measure of human contribution.** The mask retains
 generated C/C++ sources — bitmap-font arrays, constant tables, embedded binary
 blobs rendered as arrays — and a single generated file can contribute millions of
@@ -495,16 +515,17 @@ fix in `data/affiliation.corrections.csv`, which `build_domain_map.py` applies
 last, and rerun `./build_domain_map.py build`. A hand edit is lost on the next
 rebuild; a correction survives it.
 
-**`community` is a residual stratum, and `contested` is empty for every row.**
-Three of the five control facts in `docs/CODEBOOK.md` are not implemented, so a
-project that no namespace fact reaches stays `community` by default.
-`contested` (column 7) is non-empty in **0 of 24,405** candidate rows, so the
-contested-case protocol in `docs/CODEBOOK.md` §6 has not flagged anything and the
-column cannot currently be used to find disputed labels. `docs/CODEBOOK.md` §9 is
-the full gap list with a worked example per gap;
-`docs/SPINELLIS-VALIDATION.md` §4 names seven eligible rows that an independent
-published registry attests to a company and that this pipeline nonetheless labels
-`community`.
+**`community` is a residual stratum, and `contested` is empty for every row of
+the corpus this pipeline built.** Three of the five control facts the selection
+process used were not implemented, so a project that no namespace fact reached
+stayed `community` by default. `contested` (column 7) was non-empty in **0 of
+24,405** candidate rows, so whatever contested-case protocol the labelling
+process defined never flagged anything, and the column could not be used to find
+disputed labels. An independent published registry separately attested a
+company for at least seven of the eligible rows that this pipeline nonetheless
+labelled `community`. Both gaps belonged to the now-removed selection tooling; a
+sidecar you write yourself can set `contested` to whatever your own process
+finds.
 
 **GitHub's `fork` flag finds nothing.** Among eligible rows `fork = True` counts
 zero, because a tree pushed as an independent repository is not marked. Projects
@@ -514,11 +535,11 @@ excluded: filter on `history_cluster` for one project per history, and read
 topology occurs with the origin on either side.
 
 **A stratum is a label at a date.** Namespaces get donated, so two rows for one
-repository can disagree: of the 196 duplicate `clone_url` groups in
-`candidates.csv`, **28 disagree on `stratum`** — **5** of them within the 106
-groups that fall inside the eligible frame. `label_date` (column 8) records when
-the label was assigned, and there is no relicensing time-boxing anywhere in the
-pipeline (`docs/CODEBOOK.md` §7), so a project that changed licence or owner
+repository can disagree: of the 196 duplicate `clone_url` groups the selection
+process found, **28 disagreed on `stratum`** — **5** of them within the 106
+groups that fell inside the eligible frame. `label_date` (column 8) records when
+the label was assigned, and nothing in this pipeline time-boxes a label against a
+relicensing or ownership change, so a project that changed licence or owner
 mid-history carries one label for all of it.
 
 **`manifest_category` (column 29) has a fourth value outside the stratum
@@ -540,7 +561,7 @@ strings, so a consumer must cast before any temporal query.
 
 **Corpus-level firm and org rollups do not exist.** The firm columns are per
 token; there is no aggregated firm table, no package step and no dataset card
-generator. `docs/DESIGN.md` §7 is the intended shape of those.
+generator. `docs/DESIGN.md` §8 is the intended shape of those.
 
 **Reproducibility depends on an unpinned sibling checkout.** The per-project
 pipeline, the tokenizer and their flag names live in the cregit checkout that
