@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """build_domain_map — widen the domain->firm map from public affiliation data.
 
-    ./build_domain_map.py fetch          # cache the cncf/gitdm affiliation files
-    ./build_domain_map.py build          # emit data/affiliation.merged.csv
-    ./build_domain_map.py build --min-persons 3 --report
+    ./build_domain_map.py fetch                       # cache the cncf/gitdm affiliation files
+    ./build_domain_map.py build --curated PATH        # emit data/affiliation.merged.csv
+    ./build_domain_map.py build --no-curated          # ...or without one, if you have none
+    ./build_domain_map.py build --min-persons 3 --report --curated PATH
 
 Source: cncf/gitdm developers_affiliations{1..10}.txt (grey literature; the CNCF
 DevStats affiliation list). We read it for one thing only: which e-mail DOMAIN
@@ -27,8 +28,8 @@ that up:
      real employer. 35 of the 77 domain-shaped values are self-references; the
      other 42 are firms, so the two cases must not share one tag.
 
-The curated kernel map always wins on conflict — it was hand-checked for the
-VEM paper and carries identity-level corrections this source cannot express.
+The curated kernel map always wins on conflict — it was hand-checked and
+carries identity-level corrections this source cannot express.
 
 Output matches the existing schema exactly: domain,company,kind,source
 `source` is `gitdm` / `patch` / `rich` (all curated and pre-existing, read from
@@ -45,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import sys
 import urllib.request
@@ -57,9 +59,13 @@ CACHE = CORPUS / ".corpus-cache" / "affil"
 DATA = CORPUS / "data"
 OUT = DATA / "affiliation.merged.csv"
 
-# The curated map from the VEM paper. Authoritative on any conflict.
-CURATED = Path("/local/home/ellianco/Projects/cregit-workspace/"
-               "cbsoft-vem2026-corporate-truck-factor/pipeline/data/affiliation.csv")
+# The curated map. Authoritative on any conflict. No built-in default: every
+# checkout supplies its own, via `--curated PATH` or $CURATED_ENV_VAR.
+# `cmd_build` sets this module global from args before the first read, the
+# same way CACHE/DATA/OUT/SPINELLIS_TSV are bare globals a caller may
+# override rather than arguments threaded through every function.
+CURATED_ENV_VAR = "CURATED_AFFILIATION_CSV"
+CURATED: Path | None = None
 
 # This repository's own correction overlay, applied AFTER `curated` and so
 # authoritative over everything. It exists because `CURATED` lives in a third
@@ -341,8 +347,13 @@ def parse_spinellis_domains() -> dict[str, tuple[str, str]]:
 
 
 def load_curated() -> dict[str, tuple[str, str, str]]:
-    if not CURATED.exists():
-        say(f"WARNING curated map not found at {CURATED}")
+    """Read CURATED. Returns {} when it is unset or absent.
+
+    Whether an absent curated map is acceptable is a decision for the caller
+    (cmd_build), not this function: it depends on whether the caller passed
+    --no-curated.
+    """
+    if CURATED is None or not CURATED.exists():
         return {}
     out = {}
     with CURATED.open() as f:
@@ -394,90 +405,86 @@ def write_refusal(merged: dict, curated: dict) -> str:
     return ""
 
 
-def cmd_build(args: argparse.Namespace) -> int:
-    per_domain = parse_source()
-    if not per_domain:
-        return 1
-    curated = load_curated()
-
+def apply_rules(per_domain: dict[str, Counter], curated: dict,
+                min_persons: int) -> tuple[dict, Counter]:
+    """Apply R1-R4 to the parsed import. Returns the kept rows and a count of
+    how many domains each rule affected, under the label it is reported by."""
     kept: dict[str, tuple[str, str, str]] = {}
-    drop = Counter()
+    rule_hits = Counter()
     for d, counter in per_domain.items():
         if d in curated:
-            drop["curated-wins"] += 1
+            rule_hits["curated-wins"] += 1
             continue
         total = sum(counter.values())
         company, n = counter.most_common(1)[0]
         if n / total <= PLURALITY:
-            drop["R3-no-plurality"] += 1
+            rule_hits["R3-no-plurality"] += 1
             continue
-        # R4 is a TAG, not a filter, and it fires only on a self-reference. See
-        # self_reference() for why the shape of the string is not enough.
         tag = ""
         if self_reference(d, company):
             tag = DOMAIN_NAME_TAG
-            drop["R4-self-reference (tagged)"] += 1
+            rule_hits["R4-self-reference"] += 1
         # R2 is a confidence tier, not a filter. Most company domains here are
         # attested by exactly one person, so excluding them costs ~92% of the
         # yield; but a one-person domain may be that person's personal domain
         # carrying their employer. Both tiers ship, distinguished by `source`,
         # so a consumer can restrict to the corroborated tier.
-        if total >= args.min_persons:
+        if total >= min_persons:
             kept[d] = (company, "company", "cncf-gitdm" + tag)
         else:
             kept[d] = (company, "company", "cncf-gitdm-single" + tag)
-            drop["R2-single-person (kept, flagged)"] += 1
+            rule_hits["R2-single-person"] += 1
 
-    # R1. FREE_PROVIDERS is our own curated constant, so every domain in it
-    # earns a row whether or not the imported source happens to mention it. The
-    # consuming analysis keeps `(Independent)`, a person positively identified
-    # as using a free provider, apart from `(Unknown)`, unresolved; a free
-    # provider missing from the map lands in `(Unknown)` and is counted as
-    # unmeasured instead of as a volunteer. The assignment is unconditional
-    # because R1 is absolute: nothing the import can say about a free provider
-    # may turn it into a firm. The curated map still wins, it is merged last.
     for d in sorted(FREE_PROVIDERS):
         kept[d] = ("(Independent)", "free_provider", "builtin")
-        drop["R1-free-provider (builtin)"] += 1
+        rule_hits["R1-free-provider"] += 1
 
-    # Precedence, as the merge below actually behaves: `spinellis-sec` and
-    # `curated` OVERRIDE what is already there, while plain `spinellis` only
-    # FILLS A GAP, so even a one-person CNCF row outranks a published CC-BY row.
-    # Reason: an unflagged Spinellis row is not externally checkable, so it is
-    # not evidence enough to overturn a pairing the CNCF source attests.
-    merged = dict(kept)
-    for d, (co, src) in parse_spinellis_domains().items():
+    return kept, rule_hits
+
+
+def merge_sources(gitdm: dict, spinellis: dict, curated: dict,
+                  corrections: dict) -> dict:
+    """The three-source precedence, exactly as implemented: `spinellis-sec`
+    and `curated` OVERRIDE whatever is already in the merge, while a plain
+    `spinellis` row only FILLS A GAP, so even a one-person CNCF row outranks a
+    published CC-BY row. Reason: an unflagged Spinellis row is not externally checkable,
+    so it is not evidence enough to overturn a pairing the CNCF source attests.
+
+    `corrections` is merged last, so a reviewed correction outranks every
+    source including `curated`. This layer exists because a single-person
+    gitdm row once misattributed a whole project to the wrong company.
+    """
+    merged = dict(gitdm)
+    for d, (co, src) in spinellis.items():
         if src.startswith("spinellis-sec") or d not in merged:
             merged[d] = (co, "company", src)
     merged.update(curated)
-    # Last, so a reviewed correction outranks every source including `curated`.
-    # `qti.qualcomm.com -> CERN` is why this layer exists: one cncf-gitdm-single
-    # row attributed all 180,971 tokens of
-    # qualcomm__qcom-embedded-power-measurement to CERN.
-    merged.update(load_corrections())
+    merged.update(corrections)
+    return merged
 
-    reason = write_refusal(merged, curated)
-    if reason:
-        say(f"REFUSING to write {OUT}: {reason}")
-        say("the existing artifact is left untouched")
-        return 1
 
-    DATA.mkdir(parents=True, exist_ok=True)
-    # Write through a temporary file and rename, as select_corpus.save_json
-    # does, so an interrupted write cannot truncate a good artifact.
-    tmp = OUT.parent / (OUT.name + ".tmp")
+def write_map(merged: dict, path: Path) -> None:
+    """Write `merged` to `path` through a temporary sibling file, then rename.
+
+    A rename is atomic on one filesystem, so an interrupted write leaves the
+    previous artifact intact instead of truncating it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / (path.name + ".tmp")
     with tmp.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["domain", "company", "kind", "source"])
         for d in sorted(merged):
             co, kind, src = merged[d]
             w.writerow([d, co, kind, src])
-    tmp.replace(OUT)
+    tmp.replace(path)
 
+
+def print_build_report(merged: dict, rule_hits: Counter, curated: dict,
+                       show_companies: bool) -> None:
     by_src = Counter(v[2] for v in merged.values())
     say("--- rules applied ---")
-    for k in sorted(drop):
-        say(f"  {k:34s} {drop[k]:>6,}")
+    for k in sorted(rule_hits):
+        say(f"  {k:34s} {rule_hits[k]:>6,}")
     say("--- result by source ---")
     for src in sorted(by_src):
         say(f"  {src:34s} {by_src[src]:>6,}")
@@ -490,12 +497,53 @@ def cmd_build(args: argparse.Namespace) -> int:
     say(f"  {'of which R4 self-references':34s} {tagged:>6,}")
     say(f"wrote {OUT}")
 
-    if args.report:
+    if show_companies:
         say("--- 15 largest imported companies by domain count ---")
         by_co = Counter(v[0] for v in merged.values()
                         if v[2].startswith("cncf-gitdm"))
         for co, n in by_co.most_common(15):
             say(f"  {n:>4}  {co}")
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    global CURATED
+    if args.curated is not None:
+        CURATED = Path(args.curated)
+
+    per_domain = parse_source()
+    if not per_domain:
+        return 1
+
+    curated_present = CURATED is not None and CURATED.exists()
+    if not curated_present and not args.no_curated:
+        # The floor guard below can never fire on a curated map that was
+        # never loaded: an empty `curated` makes `len(merged) < len(curated)`
+        # compare against zero, which is always false. So a missing curated
+        # map is refused here, directly, rather than left to a guard that
+        # cannot see the difference between "absent" and "empty on purpose".
+        if CURATED is None:
+            say("REFUSING to build: no curated map given. Pass --curated "
+                f"PATH, set ${CURATED_ENV_VAR}, or pass --no-curated to "
+                "build without one.")
+        else:
+            say(f"REFUSING to build: curated map not found at {CURATED}. "
+                f"Pass --curated PATH, set ${CURATED_ENV_VAR}, or pass "
+                "--no-curated to build without one.")
+        return 1
+    curated = load_curated() if curated_present else {}
+
+    kept, rule_hits = apply_rules(per_domain, curated, args.min_persons)
+    merged = merge_sources(kept, parse_spinellis_domains(), curated,
+                           load_corrections())
+
+    reason = write_refusal(merged, curated)
+    if reason:
+        say(f"REFUSING to write {OUT}: {reason}")
+        say("the existing artifact is left untouched")
+        return 1
+
+    write_map(merged, OUT)
+    print_build_report(merged, rule_hits, curated, args.report)
     return 0
 
 
@@ -507,6 +555,13 @@ def main() -> int:
     b = sub.add_parser("build")
     b.add_argument("--min-persons", type=int, default=MIN_PERSONS,
                    help="R2: distinct people needed to call a domain a company")
+    b.add_argument("--curated", type=Path,
+                   default=os.environ.get(CURATED_ENV_VAR),
+                   help="path to the curated affiliation map, authoritative "
+                        f"on conflict (or set ${CURATED_ENV_VAR})")
+    b.add_argument("--no-curated", action="store_true",
+                   help="build without a curated map, for a caller who "
+                        "genuinely has none")
     b.add_argument("--report", action="store_true")
     b.set_defaults(fn=cmd_build)
     args = ap.parse_args()          # once: parsing twice can only diverge

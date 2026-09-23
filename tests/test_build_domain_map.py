@@ -88,6 +88,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(bdm, "OUT", e.out)
     monkeypatch.setattr(bdm, "CURATED", e.curated)
     monkeypatch.setattr(bdm, "SPINELLIS_TSV", e.spinellis)
+    # A real CURATED_ENV_VAR in the test-running shell must not leak in and
+    # silently pick a real path for a test that thinks curated is unset.
+    monkeypatch.delenv(bdm.CURATED_ENV_VAR, raising=False)
     # Data safety: a mistake here would read or write the live corpus cache.
     for real, fake in ((REAL_CACHE, bdm.CACHE), (REAL_DATA, bdm.DATA),
                        (REAL_OUT, bdm.OUT), (REAL_CURATED, bdm.CURATED),
@@ -116,8 +119,16 @@ def sp_row(domain: str, company: str, *, fg500: str = "",
     return "\t".join(f)
 
 
-def build(min_persons: int = bdm.MIN_PERSONS, report: bool = False) -> int:
-    return bdm.cmd_build(argparse.Namespace(min_persons=min_persons, report=report))
+def build(min_persons: int = bdm.MIN_PERSONS, report: bool = False, *,
+         curated: Path | None = None, no_curated: bool = True) -> int:
+    """`no_curated` defaults True: most tests here are about the import, not
+    about the curated map, and the `env` fixture gives them no curated file.
+    A test that cares about curated-map behaviour sets one up with
+    `env.curated_rows(...)` (which satisfies cmd_build's presence check
+    regardless of `no_curated`) or passes `no_curated=False` to exercise the
+    refusal."""
+    return bdm.cmd_build(argparse.Namespace(min_persons=min_persons, report=report,
+                                            curated=curated, no_curated=no_curated))
 
 
 def rows_by_domain(env: Env) -> dict[str, dict[str, str]]:
@@ -452,7 +463,7 @@ def test_r1_covers_every_free_provider_domain(env, capsys):
         assert rows[d]["company"] == "(Independent)"
         assert rows[d]["source"] == "builtin"
     out = capsys.readouterr().out
-    assert "R1-free-provider (builtin)" in out          # counted in the summary
+    assert "R1-free-provider" in out                    # counted in the summary
     by_src = [ln for ln in out.splitlines() if ln.split()[1:2] == ["builtin"]]
     assert by_src and by_src[-1].split()[-1] == f"{len(bdm.FREE_PROVIDERS):,}"
 
@@ -547,7 +558,7 @@ def test_r4_tags_a_company_that_only_repeats_its_own_domain(env, capsys):
     assert row["company"] == "systemli.org"
     assert row["source"] == "cncf-gitdm-single-self-reference"
     out = capsys.readouterr().out
-    assert "R4-self-reference (tagged)" in out
+    assert "R4-self-reference" in out
     assert "of which R4 self-references" in out           # report distinguishes
 
 
@@ -652,6 +663,11 @@ def test_a_build_below_the_curated_floor_refuses_to_write(env, monkeypatch,
         def __len__(self):
             return 99
 
+    # A curated file must actually exist here, so cmd_build's separate "no
+    # curated map at all" refusal does not fire first and mask this one; its
+    # content is irrelevant since `load_curated` itself is mocked below.
+    env.curated_rows([{"domain": "placeholder.example", "company": "X",
+                       "kind": "company", "source": "gitdm"}])
     monkeypatch.setattr(bdm, "load_curated", ShrunkenMerge)
     env.data.mkdir()
     env.out.write_text("domain,company,kind,source\nkeep.example,Keep,company,gitdm\n")
@@ -678,10 +694,66 @@ def test_write_refusal_states_the_curated_map_is_the_floor():
     assert "floor" in reason and "1 rows" in reason and "2 curated" in reason
 
 
+# --------------------------------------------------------------------------
+# an absent curated map: refusal by default, --no-curated as the opt-out
+# --------------------------------------------------------------------------
+
+def test_absent_curated_map_refuses_the_build(env, capsys):
+    """The bug this replaces: a missing curated map used to print a warning
+    and build anyway, which let the floor guard go silently inert (it compared
+    against an empty dict and could never fire). Now a missing curated map is
+    a refusal in its own right, unless the caller opts out."""
+    env.gitdm(person("aa", ["aa!igalia.com"], ["Igalia"]))
+    assert not env.curated.exists()
+    assert build(no_curated=False) == 1
+    assert not env.out.exists()
+    out = capsys.readouterr().out
+    assert "REFUSING to build" in out and "curated map" in out
+
+
+def test_no_curated_flag_proceeds_without_a_curated_map(env):
+    """The explicit opt-out for a caller who genuinely has no curated map."""
+    env.gitdm(person("bb", ["bb!igalia.com"], ["Igalia"]))
+    assert not env.curated.exists()
+    assert build(no_curated=True) == 0
+    assert env.out.exists()
+    assert rows_by_domain(env)["igalia.com"]["source"] == "cncf-gitdm-single"
+
+
+def test_a_curated_path_from_the_curated_argument_is_used(env, monkeypatch):
+    """--curated PATH (here passed straight to cmd_build as `args.curated`)
+    overrides whatever CURATED already held."""
+    other = env.root / "elsewhere.csv"
+    with other.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["domain", "company", "kind", "source"])
+        w.writerow(["redhat.com", "Red Hat", "company", "gitdm"])
+    env.gitdm(person("cc", ["cc!redhat.com"], ["Wrong Employer"]))
+    assert bdm.cmd_build(argparse.Namespace(min_persons=2, report=False,
+                                            curated=other, no_curated=False)) == 0
+    row = rows_by_domain(env)["redhat.com"]
+    assert (row["company"], row["source"]) == ("Red Hat", "gitdm")
+
+
+def test_the_environment_variable_supplies_a_curated_path(env, monkeypatch):
+    """main()'s --curated default falls back to $CURATED_ENV_VAR, so a caller
+    who sets it once need not repeat --curated on every invocation."""
+    other = env.root / "from-env.csv"
+    with other.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["domain", "company", "kind", "source"])
+        w.writerow(["redhat.com", "Red Hat", "company", "gitdm"])
+    env.gitdm(person("dd", ["dd!redhat.com"], ["Wrong Employer"]))
+    monkeypatch.setenv(bdm.CURATED_ENV_VAR, str(other))
+    monkeypatch.setattr("sys.argv", ["build_domain_map.py", "build"])
+    assert bdm.main() == 0
+    row = rows_by_domain(env)["redhat.com"]
+    assert (row["company"], row["source"]) == ("Red Hat", "gitdm")
+
+
 def test_the_artifact_is_written_through_a_temporary_file(env):
-    """An interrupted write must not truncate a good artifact, so the rows
-    go to a sibling `.tmp` and are renamed into place, as select_corpus.save_json
-    does. Nothing may be left behind."""
+    """An interrupted write must not truncate a good artifact, so the rows go to
+    a sibling `.tmp` and are renamed into place. Nothing is left behind."""
     env.gitdm(person("s1", ["s1!igalia.com"], ["Igalia"]))
     assert build() == 0
     assert env.out.exists()
@@ -790,19 +862,17 @@ def test_precedence_spinellis_sec_overwrites_a_cncf_row(env, n_people,
     assert row["company"] != "CNCF Firm", f"{cncf_source} must lose to spinellis-sec"
 
 
-def test_the_precedence_comment_states_the_real_rule():
-    """The comment above the merge claimed the ladder
+def test_the_precedence_docstring_states_the_real_rule():
+    """merge_sources's docstring once lived as a comment claiming the ladder
     `cncf-gitdm-single < cncf-gitdm < spinellis < spinellis-sec < curated`,
-    which the condition does not implement: a plain `spinellis` row only fills a
-    gap. A wrong comment is worse than none here, because the next reader
-    changes the code to match it. The comment is the only artifact that can
-    carry this, so the test reads it."""
-    src = Path(bdm.__file__).read_text()
-    comment = src.split("merged = dict(kept)")[0].rsplit("\n\n", 1)[-1]
-    assert "OVERRIDE" in comment
-    assert "FILLS A GAP" in comment
-    assert "cncf-gitdm < spinellis" not in comment      # the false ladder
-    assert "not externally checkable" in comment        # and why
+    which the condition does not implement: a plain `spinellis` row only fills
+    a gap. A wrong description is worse than none here, because the next
+    reader changes the code to match it."""
+    doc = bdm.merge_sources.__doc__ or ""
+    assert "OVERRIDE" in doc
+    assert "FILLS A GAP" in doc
+    assert "cncf-gitdm < spinellis" not in doc          # the false ladder
+    assert "not externally checkable" in doc            # and why
 
 
 def test_precedence_curated_overwrites_spinellis_sec(env):
@@ -815,6 +885,39 @@ def test_precedence_curated_overwrites_spinellis_sec(env):
     assert build() == 0
     row = rows_by_domain(env)["filer.example"]
     assert (row["company"], row["source"]) == ("Curated Firm", "patch")
+
+
+# --------------------------------------------------------------------------
+# merge_sources — the precedence, tested alone, with no cmd_build seam needed
+# --------------------------------------------------------------------------
+
+def test_merge_sources_implements_the_stated_precedence():
+    """The whole ladder in one place: plain `spinellis` only fills a gap;
+    `spinellis-sec` overrides a gitdm row; `curated` overrides that; and
+    `corrections` overrides even `curated`."""
+    gitdm = {"a.example": ("Gitdm Firm", "company", "cncf-gitdm"),
+             "b.example": ("Gitdm Firm", "company", "cncf-gitdm")}
+    spinellis = {
+        "a.example": ("Spinellis Firm", "spinellis"),          # a is held
+        "c.example": ("Spinellis Firm", "spinellis"),          # c fills a gap
+        "b.example": ("Spinellis Sec Firm", "spinellis-sec"),  # sec overrides
+    }
+    curated = {"c.example": ("Curated Firm", "company", "patch")}
+    corrections = {"c.example": ("Corrected Firm", "company", "correction")}
+
+    merged = bdm.merge_sources(gitdm, spinellis, curated, corrections)
+
+    assert merged["a.example"] == ("Gitdm Firm", "company", "cncf-gitdm")
+    assert merged["b.example"] == ("Spinellis Sec Firm", "company",
+                                   "spinellis-sec")
+    assert merged["c.example"] == ("Corrected Firm", "company", "correction")
+
+
+def test_merge_sources_with_nothing_but_gitdm_is_unchanged():
+    """No other source contributes anything: the merge is just the gitdm
+    rows, unchanged."""
+    gitdm = {"a.example": ("Gitdm Firm", "company", "cncf-gitdm")}
+    assert bdm.merge_sources(gitdm, {}, {}, {}) == gitdm
 
 
 # --------------------------------------------------------------------------
@@ -977,12 +1080,18 @@ def test_a_cross_bucket_conflict_is_not_counted_when_a_bucket_is_ambiguous(env,
 # load_curated
 # --------------------------------------------------------------------------
 
-def test_load_curated_missing_file_warns_and_returns_empty(env, capsys):
-    """A missing curated map must be visible in the log, not silent: the whole
-    output would otherwise lose its authoritative rows without a word."""
+def test_load_curated_missing_file_returns_empty(env):
+    """Loading is silent either way: whether an absent curated map is
+    acceptable is cmd_build's decision (see the refusal/--no-curated tests
+    below), not this function's."""
     assert bdm.load_curated() == {}
-    out = capsys.readouterr().out
-    assert "WARNING" in out and "curated map not found" in out
+
+
+def test_load_curated_unset_returns_empty(env, monkeypatch):
+    """No path configured at all behaves the same as a path that does not
+    exist."""
+    monkeypatch.setattr(bdm, "CURATED", None)
+    assert bdm.load_curated() == {}
 
 
 def test_load_curated_reads_kind_and_source(env):
@@ -1074,7 +1183,8 @@ def test_an_empty_source_aborts_without_writing(env):
 
 
 def test_build_writes_even_when_only_the_import_has_rows(env):
-    """The curated map is optional at build time."""
+    """The curated map is optional for a caller who opts out with
+    --no-curated (the `build()` helper's default here)."""
     env.gitdm(person("s1", ["s1!igalia.com"], ["Igalia"]))
     assert build() == 0
     assert list(firm_rows(env)) == ["igalia.com"]
@@ -1165,7 +1275,7 @@ def test_main_build_uses_the_default_threshold(env, monkeypatch):
     """The CLI default must be the documented MIN_PERSONS, so a plain
     `build` and the paper's numbers agree."""
     env.gitdm(person("t1", ["t1!igalia.com"], ["Igalia"]))
-    monkeypatch.setattr("sys.argv", ["build_domain_map.py", "build"])
+    monkeypatch.setattr("sys.argv", ["build_domain_map.py", "build", "--no-curated"])
     assert bdm.main() == 0
     assert rows_by_domain(env)["igalia.com"]["source"] == "cncf-gitdm-single"
 
@@ -1174,7 +1284,8 @@ def test_main_build_accepts_min_persons_and_report(env, monkeypatch):
     """The flags reach cmd_build."""
     env.gitdm(person("t2", ["t2!igalia.com"], ["Igalia"]))
     monkeypatch.setattr("sys.argv", ["build_domain_map.py", "build",
-                                     "--min-persons", "1", "--report"])
+                                     "--min-persons", "1", "--report",
+                                     "--no-curated"])
     assert bdm.main() == 0
     assert rows_by_domain(env)["igalia.com"]["source"] == "cncf-gitdm"
 
@@ -1193,7 +1304,7 @@ def test_main_parses_argv_exactly_once(env, monkeypatch):
     was looked up on. Harmless while parsing is pure, wrong the moment a default
     is computed, a file is read, or a count is kept."""
     env.gitdm(person("t3", ["t3!igalia.com"], ["Igalia"]))
-    monkeypatch.setattr("sys.argv", ["build_domain_map.py", "build"])
+    monkeypatch.setattr("sys.argv", ["build_domain_map.py", "build", "--no-curated"])
     calls: list[int] = []
     real = argparse.ArgumentParser.parse_args
 
