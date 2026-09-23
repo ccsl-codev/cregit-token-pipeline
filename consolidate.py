@@ -46,6 +46,10 @@ view, the project keeps its row in `projects`, and the reason is recorded in
 `excluded_because` and printed. `select name, excluded_because from projects
 where excluded_because is not null` is the audit query.
 
+PUBLICATION_EXCLUSIONS ships empty: this repository's own manifest names no
+project that needs excluding. A deployer running a larger corpus adds entries
+for their own near-duplicate or otherwise unpublishable projects.
+
 One unusable stamp never aborts the rebuild. A stamp whose rows= value is not
 an integer leaves token_rows null, is flagged rows_unreadable = true, is
 reported by name and by value, and makes the exit status non-zero once every
@@ -123,16 +127,11 @@ class ProjectRow:
 
 
 # Projects run and validated, but deliberately not published. Name -> reason.
-# See PUBLICATION EXCLUSIONS in the module docstring, and docs/LIMITATIONS.md
-# for the measurements behind each entry.
-PUBLICATION_EXCLUSIONS = {
-    "tencent__tendbcluster-tendb":
-        "near-duplicate of tencent__tendbcluster-tdbctl: 505,056 shared source "
-        "blobs (99.66% of its own) and 134,715 shared commits (99.91%). tdbctl "
-        "is kept because it holds 4.9x more first-party authorship once "
-        "vendored directories are excluded (202,331 vs 41,571 tokens) and has "
-        "30 unique first-party files at HEAD against 0 for tendb.",
-}
+# See PUBLICATION EXCLUSIONS in the module docstring. Empty by default: this
+# repository's own manifest carries no project that needs excluding. A
+# deployer adds their own entries here, one per project, recording the
+# measurement behind each reason.
+PUBLICATION_EXCLUSIONS: dict[str, str] = {}
 
 
 def lock_held(lockfile: Path) -> bool:

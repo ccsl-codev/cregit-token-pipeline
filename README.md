@@ -1,30 +1,29 @@
 # cregit-token-pipeline
 
 Runs the [cregit](https://github.com/cregit/cregit) per-project pipeline over a
-manifest of FLOSS repositories that you supply, then validates, indexes, prunes
-and pseudonymizes the result for release. It does not select repositories or
-draw a sample — you write the manifest; this tool runs cregit over it.
+manifest of FLOSS repositories that you supply, then validates, indexes and
+prunes the result. It does not select repositories or draw a sample — you
+write the manifest; this tool runs cregit over it. It does not anonymize the
+output or resolve employers either: it only forwards paths you supply to
+cregit, which does that work.
 
 Each project yields one Parquet file with the same 70 columns and **one row per
 token occurrence per file**, carrying the commit and the person that last touched
-that token, and the person's employer where it can be resolved. 29 of the 70
-columns carry per-project provenance — how you found the project, how you
-labelled it, which mask tokenized it — filled from an optional JSON sidecar you
-supply. An absent sidecar leaves those 29 columns empty, not missing.
+that token. 29 of the 70 columns carry per-project provenance — how you found
+the project, how you labelled it, which mask tokenized it — filled from an
+optional JSON sidecar you supply. 3 more carry firm attribution, filled from an
+optional domain-to-firm map and canonical-name table you supply. An absent
+input leaves its columns empty, not missing. `validate_schema.py` is the
+authority on the full column list; read the comment above `EXPECTED_COLUMNS`
+there for what each column means.
 
 Stdlib Python only; DuckDB, srcML, ctags, Java and Perl come from the cregit
 checkout's `devenv shell`.
 
 ## Start here
 
-| If you want to | Read |
-| --- | --- |
-| understand the dataset, its grain and all 70 columns | **[`docs/DATASET-SCHEMA.md`](docs/DATASET-SCHEMA.md)** |
-| know what is wrong with the data before you analyse it | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
-| know why attribution changed, and by how much | **[`docs/REBLAME-C100.md`](docs/REBLAME-C100.md)** |
-| know why the pipeline is built this way | [`docs/DESIGN.md`](docs/DESIGN.md) |
-
-The authority on the schema is `validate_schema.py`, not any document.
+Read [`docs/DESIGN.md`](docs/DESIGN.md) to see why the pipeline is built this
+way. The authority on the schema is `validate_schema.py`, not any document.
 
 ## Quickstart
 
@@ -36,28 +35,37 @@ The authority on the schema is `validate_schema.py`, not any document.
 #    pilot projects (jq, zstd, libuv, tmux). Write your own for a real run.
 M=manifest.tsv
 ./ctp.py run --manifest $M --jobs 3 --skip-html --drop-memo \
-    --firm-map data/affiliation.merged.csv --firm-canonical data/firm_canonical.csv \
     --allow-empty-provenance
 ./ctp.py status --manifest $M                    # one-screen progress view
 ./validate_schema.py <out>/*/*-dataset.parquet   # schema gate over the corpus
 ./ctp.py db                                      # rebuild ctp.duckdb + tokens view
 ```
 
-That command runs on a fresh clone. The firm map ships; the provenance sidecar
-does not, so the 29 provenance columns come out blank and
-`--allow-empty-provenance` is how you say that is what you meant. `ctp.py run`
-refuses to write a Parquet with blank provenance unless you say so, because
-nothing downstream can tell a blank column from provenance that is genuinely
-unknown.
+That command runs on a fresh clone. Neither the provenance sidecar nor the firm
+map ships with this repository, so the 29 provenance columns and the 3 firm
+columns all come out blank, and `--allow-empty-provenance` is how you say that
+is what you meant. `ctp.py run` refuses to write a Parquet with blank
+provenance unless you say so, because nothing downstream can tell a blank
+column from provenance that is genuinely unknown.
 
-To fill those columns, write a JSON sidecar and pass `--project-meta <path>`
-instead of `--allow-empty-provenance`. The format is documented in
-`validate_schema.py`, in the comment block above `EXPECTED_COLUMNS`. The two
-flags are mutually exclusive: `--allow-empty-provenance` is refused when nothing
-would actually be blank.
+### Provenance and firm attribution
 
-Full regeneration, from a manifest to an anonymized release, is the step table
-in [`docs/DATASET-SCHEMA.md` §2](docs/DATASET-SCHEMA.md#2-regenerating-it).
+Two independent, optional inputs. Neither ships with this repository; both are
+paths you supply, forwarded unchanged to cregit.
+
+- `--project-meta <path>`: a JSON sidecar, keyed by project name, that fills
+  the 29 provenance columns — how you found the project, how you labelled it,
+  which mask tokenized it. The format is documented in `validate_schema.py`,
+  in the comment above `EXPECTED_COLUMNS`.
+- `--firm-map <path>` plus `--firm-canonical <path>`: a domain-to-firm CSV and
+  a reviewed canonical-name CSV that together fill the 3 firm columns
+  (`firm_raw`, `firm`, `firm_source`). `--firm-canonical` needs `--firm-map`.
+  Passing `--firm-map` alone does not leave `firm` blank: it fills `firm` with
+  `firm_raw` verbatim, so build both files together.
+
+Pass either or both instead of `--allow-empty-provenance`. The flags are
+mutually exclusive: `--allow-empty-provenance` is refused when nothing would
+actually be blank.
 
 Each project runs cregit's `run_pipeline_process.sh` (clone → tokenize via the
 incremental blob-map engine → blame → per-project Parquet), then a validation
@@ -71,7 +79,7 @@ next pass.
 manifest.*.tsv (you write it: name, url, category, file_filter, size_class)
                                                    │
 project_meta.json (optional sidecar) ──────────────┤
-data/affiliation.merged.csv (domain → firm) ───────┤
+firm-map.csv + firm-canonical.csv (optional) ──────┤
                                                    ▼
                                               ctp.py run
                      (ThreadPool, per-project flock, disk floor, retry passes)
@@ -86,8 +94,6 @@ data/affiliation.merged.csv (domain → firm) ───────┤
 ctp.py db ──► ctp.duckdb ├─ projects       DONE/RUNNING/FAILED/QUEUED per project
                          ├─ phase_metrics  the timing ledger, SQL-queryable
                          └─ tokens (view)  every schema-conforming parquet, unified
-
-anonymize_parquet.py ──► pseudonymized parquets ──► verify_anon.py
 ```
 
 Ground truth is always the files — stamps, manifests, `metrics.tsv`.

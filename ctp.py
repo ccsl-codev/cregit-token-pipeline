@@ -862,8 +862,9 @@ def resolve_provenance_paths(args: argparse.Namespace) -> tuple[str, str, str]:
     firm_map = firm_canonical = ""
     if args.firm_map:
         if not Path(args.firm_map).is_file():
-            sys.exit(f"--firm-map {args.firm_map} is not a file. Build it with "
-                     "build_domain_map.py.")
+            sys.exit(f"--firm-map {args.firm_map} is not a file. Supply a "
+                     "domain-to-firm CSV; this tool only joins it in, it does "
+                     "not build one.")
         missing = [f for f in ("--firm-map", "--firm-canonical")
                    if not script_supports(f)]
         if missing:
@@ -878,7 +879,7 @@ def resolve_provenance_paths(args: argparse.Namespace) -> tuple[str, str, str]:
             firm_canonical = str(Path(args.firm_canonical).resolve())
     elif args.firm_canonical:
         sys.exit("--firm-canonical without --firm-map has no firm_raw to "
-                 "canonicalise. Pass data/affiliation.merged.csv too.")
+                 "canonicalise. Pass a domain-to-firm CSV via --firm-map too.")
 
     return project_meta, firm_map, firm_canonical
 
@@ -939,8 +940,8 @@ def enforce_provenance(gaps: list[tuple[str, str]], args: argparse.Namespace) ->
               "inconsistent with the rest of the corpus.\n"
               "Pass the flags this run is missing:\n"
               "  --project-meta project_meta.json \\\n"
-              "  --firm-map data/affiliation.merged.csv \\\n"
-              "  --firm-canonical data/firm_canonical.csv\n"
+              "  --firm-map <your-firm-map>.csv \\\n"
+              "  --firm-canonical <your-firm-canonical>.csv\n"
               "If blank columns are genuinely what you want — a fixture, a "
               "one-project smoke run, a corpus whose sidecar does not exist yet — "
               "say so with --allow-empty-provenance.")
@@ -1332,8 +1333,8 @@ def main() -> int:
                             "--allow-empty-provenance. --project-key is sent "
                             "for you, from the manifest")
     run_p.add_argument("--firm-map", default="", metavar="PATH",
-                       help="domain->firm CSV (data/affiliation.merged.csv) to "
-                            "join per row against person_domain, filling "
+                       help="domain->firm CSV you supply, joined per row "
+                            "against person_domain, filling "
                             "firm_raw and firm_source. Unlike --project-meta "
                             "this is not a per-project constant: it is a real "
                             "join, so the map stays an external auditable file. "
@@ -1344,9 +1345,9 @@ def main() -> int:
                             "ctp REFUSES a run that reaches step 10 without it, "
                             "unless you pass --allow-empty-provenance")
     run_p.add_argument("--firm-canonical", default="", metavar="PATH",
-                       help="the reviewed canonical-name table "
-                            "(data/firm_canonical.csv) that fills the `firm` "
-                            "column. Needs --firm-map. OMITTING THIS DOES NOT "
+                       help="the reviewed canonical-name CSV you supply, that "
+                            "fills the `firm` column. Needs --firm-map. "
+                            "OMITTING THIS DOES NOT "
                             "EMPTY `firm`, it fills it WRONGLY: `firm` repeats "
                             "`firm_raw` verbatim, so the 48 split spellings stay "
                             "split and every firm's share is understated. ctp "

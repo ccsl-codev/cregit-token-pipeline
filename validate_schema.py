@@ -68,12 +68,12 @@ EXIT_USAGE = 2
 # together — and before repo_tag so the identity block stays contiguous.
 #
 # Unlike the 29 provenance columns they are not per-project constants: they come
-# from a per-row join against data/affiliation.merged.csv, so they are the only
-# columns in this contract whose value can differ between two rows of one
-# project.
+# from a per-row join against a domain-to-firm CSV the caller supplies, so they
+# are the only columns in this contract whose value can differ between two rows
+# of one project. This repository ships no such CSV and does not build one.
 #
 #   firm_raw     the map's `company` string, unaltered
-#   firm         the canonical name, from the reviewed data/firm_canonical.csv
+#   firm         the canonical name, from a reviewed firm-name table
 #   firm_source  the map's `source`, so a reader can tell a hand-curated
 #                attribution (patch, gitdm, rich, correction) from a
 #                single-person inference (cncf-gitdm-single)

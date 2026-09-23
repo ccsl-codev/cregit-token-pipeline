@@ -25,15 +25,9 @@ htmlcov/
 *.egg-info/
 junit-*.xml
 
-# Caches. Rebuilt by `build_domain_map.py fetch`. Large, machine-specific and
-# derived from public APIs, so they are reproducible rather than source.
+# Caches from any helper that fetches public data. Large, machine-specific and
+# reproducible rather than source.
 .corpus-cache/
-
-# Third-party source data, 29 MB. The DOI is stable and sources/README.md
-# records every field, so the repo documents the fetch instead of copying the
-# payload. See sources/README.md for the archive and its layout.
-sources/*.tar.gz
-sources/*.txt
 
 # Inputs a user supplies, and output derived from a run. Not source, and this
 # repository ships no script that produces them: write your own manifest, and
@@ -42,7 +36,3 @@ sources/*.txt
 candidates.csv
 manifest.generated.tsv
 project_meta.json
-
-# TRACKED ON PURPOSE, do not add these here:
-#   data/affiliation.merged.csv   the firm map, with provenance per row
-#   sources/README.md             field definitions for the third-party data

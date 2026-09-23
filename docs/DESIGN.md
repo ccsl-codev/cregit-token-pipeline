@@ -1,7 +1,8 @@
 # Design
 
 Why the pipeline is built the way it is. For what it produces, read
-[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md).
+[`../README.md`](../README.md); the schema itself is authoritative in
+`validate_schema.py`.
 
 **Goal.** Run cregit end-to-end over a stratified corpus of FLOSS projects and
 produce per-project token-authorship datasets that share one schema, on a single
@@ -15,9 +16,9 @@ for forwarded flags (§4).
 
 1. **Per-project layer** — cregit's `run_pipeline_process.sh`, one work directory
    per project, embarrassingly parallel across projects.
-2. **Corpus layer** — selection, provenance, validation, retention and
-   anonymization. Pure functions over committed inputs or finished artefacts, so
-   each is cheap and re-runnable at any time.
+2. **Corpus layer** — selection, provenance, validation and retention. Pure
+   functions over committed inputs or finished artefacts, so each is cheap and
+   re-runnable at any time.
 
 What already existed and is reused rather than rebuilt:
 
@@ -34,7 +35,6 @@ manifest.*.tsv ──► ctp.py run ──► run_pipeline_process.sh ──► 
                         validate.py ──► .validated stamp ◄──────────┤
                         retain.py   ──► delete memo/ and html/  ◄────┤
                         consolidate.py ──► ctp.duckdb (derived index)
-                        anonymize_parquet.py ──► verify_anon.py ──► release
 ```
 
 ## 2. The manifest is a five-field contract
@@ -50,8 +50,9 @@ That rigidity has two consequences:
   They live in `project_meta.json`, a **sidecar keyed by manifest name and joined
   on `clone_url`**, passed to the generator with `--project-meta`.
 - A sixth `pinned_commit` field cannot be added either, so runs are not pinned to
-  a revision. This is a known limitation, not a decision; see
-  `DATASET-SCHEMA.md` §5.
+  a revision. This is a known limitation, not a decision: nothing in this
+  repository records which commit a run cloned, beyond what git itself keeps in
+  the per-project clone.
 
 `file_mask` is the **same universal mask for every project**: the union of every
 extension the tokenizer can parse, derived in `file_mask.py` from one extension
@@ -186,25 +187,12 @@ into the same message.
 
 Built:
 
-1. **`build_domain_map.py`** — the domain→firm map, from public affiliation data
-   plus a curated overlay applied last, so a rebuild keeps the corrections.
-2. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
+1. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
    and a `tokens` view over every Parquet whose schema matches the contract. The
    manifests indexed are selectable and default to `manifest.tsv`; a
    non-conforming file is excluded **by name, counted in the summary**, because a
    silent exclusion is worse than the crash it replaces — the row count then
    looks plausible.
-3. **`anonymize_parquet.py`** / **`verify_anon.py`** — the release path. The
-   e-mail local part becomes `author_NNNN` and names become `Author N`, through a
-   single registry so one person has one pseudonym everywhere, including inside
-   the trailer arrays. **The e-mail domain is preserved on purpose**: firm
-   attribution resolves from the domain, so replacing it would collapse every
-   firm to unknown and destroy the analysis the dataset exists to support. Column
-   handling is fail-closed. There is no salt and no key — ids come from sorting
-   the distinct values, so output is reproducible and two releases diff cleanly,
-   and the protection is simply not publishing the registry. `verify_anon.py`
-   checks the published files alone, needs no secrets, and is therefore the check
-   worth putting in a release script.
 
 Not built. Each is a gap, not a plan:
 
@@ -212,12 +200,18 @@ Not built. Each is a gap, not a plan:
   draws a sample, or assigns a project's stratum or history cluster. Those
   choices, and the 29 provenance columns that record them, are entirely on the
   person who writes the manifest and the optional sidecar.
+- **Building the domain-to-firm map or the canonical-name table.** `ctp.py run`
+  forwards `--firm-map` and `--firm-canonical` to cregit; building those two
+  CSVs is on the person who supplies them.
 - **A corpus-level firm or organisation rollup.** Attribution is per token only.
 - **A per-project metadata table / dataset card** — name, category, URL, pinned
   sha, commit count, token rows, file count, languages, run duration, and the
   cregit and tokenizer versions.
 - **A packaging step** emitting per-stratum trees with checksums and a schema
   document.
+- **Anonymizing or pseudonymizing the output.** Names and e-mail addresses are
+  published as cregit writes them; anonymizing them, if wanted, happens outside
+  this repository.
 - **Provenance pinning.** No `provenance.json` per run, so a published Parquet
   cannot cite the cregit revision, tool versions and pinned commit it was built
   from. This is the single largest reproducibility gap.

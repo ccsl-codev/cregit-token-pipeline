@@ -33,9 +33,9 @@ requires-python = ">=3.12"
 
 dependencies = [
     # The only third-party import in production code. consolidate.py unions the
-    # per-project Parquet files, anonymize_parquet.py rewrites them and
-    # validate_schema.py reads their schema for the 70-column contract — all
-    # through duckdb. It is imported lazily inside the functions that need it, so
+    # per-project Parquet files and validate_schema.py reads their schema for the
+    # 70-column contract, both through duckdb. It is imported lazily inside the
+    # functions that need it, so
     # the pure logic is unit-testable without it, but five tests in
     # tests/test_consolidate.py do write a real Parquet and they SKIP when duckdb
     # is missing. Installing it here is what turns those five skips into runs.
@@ -70,14 +70,10 @@ build-backend = "setuptools.build_meta"
 # root on sys.path for the tests. Listing them keeps `pip install -e .` honest
 # instead of letting setuptools guess at a package layout that does not exist.
 py-modules = [
-    "anonymize_parquet",
-    "build_domain_map",
     "consolidate",
     "ctp",
     "file_mask",
-    "measure_dataset_gaps",
     "retain",
     "validate",
     "validate_schema",
-    "verify_anon",
 ]

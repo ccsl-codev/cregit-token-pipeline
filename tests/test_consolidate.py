@@ -579,15 +579,12 @@ def test_main_names_and_counts_a_publication_exclusion(
     assert "tokens view: 1,234,567 rows across 1 projects" in out
 
 
-def test_the_shipped_exclusion_list_drops_tendb_and_keeps_tdbctl(sandbox):
-    """The fork pair decision, pinned. tendb has 4.3x the files but every extra
-    path is upstream Oracle, Facebook or Percona code; tdbctl holds 4.9x more
-    first-party authorship. Swapping these two silently would publish the wrong
-    half of a near-duplicate pair."""
-    assert "tencent__tendbcluster-tendb" in consolidate.PUBLICATION_EXCLUSIONS
-    assert "tencent__tendbcluster-tdbctl" not in consolidate.PUBLICATION_EXCLUSIONS
-    why = consolidate.PUBLICATION_EXCLUSIONS["tencent__tendbcluster-tendb"]
-    assert "tencent__tendbcluster-tdbctl" in why, "the reason must name the twin"
+def test_the_shipped_exclusion_list_is_empty(sandbox):
+    """This repository's own manifest (jq, zstd, libuv, tmux) has no
+    near-duplicate pair, so nothing ships pre-excluded. A deployer running a
+    larger corpus adds their own entries; this only pins that the default is
+    empty, not silently pre-populated with someone else's decision."""
+    assert consolidate.PUBLICATION_EXCLUSIONS == {}
 
 
 def test_main_says_nothing_about_flags_when_every_project_is_healthy(
