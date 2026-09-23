@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Schema gate: every project parquet must carry the same columns and types.
+
+    ./validate_schema.py <dataset.parquet> [<dataset.parquet> ...]
+    ./validate_schema.py --emit-contract <dataset.parquet>   # print, do not check
+
+Why a separate gate from validate.py: that one asks "did this project produce a
+non-empty parquet". This one asks "do all projects agree". A corpus is unusable
+if one project has 38 columns and another 23, or if `token_index` is BIGINT in
+one and VARCHAR in another. A consumer would union them and get silent nulls.
+
+Exit status is the whole interface:
+
+  0  every file matches the contract
+  1  at least one drifted. Every drift is printed, not just the first
+  2  wrong invocation
+
+duckdb is imported inside read_schema, not at module scope, so the pure
+comparison logic can be unit-tested without duckdb installed. duckdb comes from
+`devenv shell` and is absent from .venv.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from dataclasses import dataclass
+
+USAGE = "usage: validate_schema.py [--emit-contract] <dataset.parquet> ..."
+EXIT_DRIFT = 1
+EXIT_USAGE = 2
+
+# The contract, measured from the cregit-issue61 output, has been widened
+# since.
+#
+# 70 columns. It was 38 (and 23 before that; the 15 footer columns are
+# commit-trailer evidence, which matters to this research because Signed-off-by,
+# Reviewed-by and Co-authored-by carry attribution that authorship alone does
+# not).
+#
+# The 29 after repo_name are per-project provenance: which roster or search
+# found the project, which stratum it was assigned and on what evidence, its
+# shared-history cluster, and the regex mask it was tokenized with. They come
+# from an optional JSON sidecar the user supplies with `ctp.py run
+# --project-meta`. An absent sidecar leaves all 29 columns empty, not missing —
+# the schema never changes shape. They repeat per row by design — a reader can
+# filter without a second join against the sidecar, and a column is cheap to
+# drop at publish time but expensive to add later.
+#
+# The sidecar is a JSON object keyed by project name. Each value is an object
+# whose keys are these 29 field names and whose values are all strings. A key
+# missing from one project's object becomes an empty string for that column,
+# the same as when the sidecar itself is absent.
+#
+# clone_url is among them because repo_name is a lossy slug. provenance_status
+# is a free string the sidecar sets; this repository does not interpret it.
+# file_mask is there because the mask widened once already, from per-language
+# to universal (see file_mask.py), and without this column nobody could tell
+# which rows came from which mask.
+#
+# These 29 names and their order must match PROJECT_META_FIELDS in
+# generate_dataset.py, inside the configured cregit checkout
+# (cregit-issue61/generate_dataset/generate_dataset.py). That file is the
+# single authority for the field list; nothing in this repository generates or
+# owns it.
+#
+# The three after person_domain are the firm attribution. They sit there
+# because they are RESOLVED FROM person_domain — the key and its answer belong
+# together — and before repo_tag so the identity block stays contiguous.
+#
+# Unlike the 29 provenance columns they are not per-project constants: they come
+# from a per-row join against a domain-to-firm CSV the caller supplies, so they
+# are the only columns in this contract whose value can differ between two rows
+# of one project. This repository ships no such CSV and does not build one.
+#
+#   firm_raw     the map's `company` string, unaltered
+#   firm         the canonical name, from a reviewed firm-name table
+#   firm_source  the map's `source`, so a reader can tell a hand-curated
+#                attribution (patch, gitdm, rich, correction) from a
+#                single-person inference (cncf-gitdm-single)
+#
+# All three are '' when person_domain is not in the map, so an empty firm_source
+# means "no attribution" and is the column to filter on.
+#
+# Still absent: person_email is published as it stands. That is a release
+# decision, not a schema defect, and it is not settled here.
+EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("repo_name", "VARCHAR"),
+    ("clone_url", "VARCHAR"),
+    ("provenance_status", "VARCHAR"),
+    ("source", "VARCHAR"),
+    ("stratum", "VARCHAR"),
+    ("fact", "VARCHAR"),
+    ("contested", "VARCHAR"),
+    ("label_date", "VARCHAR"),
+    ("owner", "VARCHAR"),
+    ("repo", "VARCHAR"),
+    ("roster_name", "VARCHAR"),
+    ("roster_lang", "VARCHAR"),
+    ("language", "VARCHAR"),
+    ("commits", "VARCHAR"),
+    ("size_class", "VARCHAR"),
+    ("size_kb", "VARCHAR"),
+    ("stars", "VARCHAR"),
+    ("pushed_at", "VARCHAR"),
+    ("license", "VARCHAR"),
+    ("owner_type", "VARCHAR"),
+    ("archived", "VARCHAR"),
+    ("fork", "VARCHAR"),
+    ("history_cluster", "VARCHAR"),
+    ("history_shared_with", "VARCHAR"),
+    ("history_relation", "VARCHAR"),
+    ("history_includes", "VARCHAR"),
+    ("history_first", "VARCHAR"),
+    ("history_created", "VARCHAR"),
+    ("manifest_category", "VARCHAR"),
+    ("file_mask", "VARCHAR"),
+    ("file_path", "VARCHAR"),
+    ("token_index", "BIGINT"),
+    ("source_line", "BIGINT"),
+    ("source_col", "BIGINT"),
+    ("source_text", "VARCHAR"),
+    ("token_type", "VARCHAR"),
+    ("token_value", "VARCHAR"),
+    ("is_structural", "BIGINT"),
+    ("cregit_commit_sha", "VARCHAR"),
+    ("original_commit_sha", "VARCHAR"),
+    ("author_name", "VARCHAR"),
+    ("author_email", "VARCHAR"),
+    ("author_date", "VARCHAR"),
+    ("committer_name", "VARCHAR"),
+    ("committer_email", "VARCHAR"),
+    ("committer_date", "VARCHAR"),
+    ("commit_summary", "VARCHAR"),
+    ("personid", "VARCHAR"),
+    ("person_name", "VARCHAR"),
+    ("person_email", "VARCHAR"),
+    ("person_domain", "VARCHAR"),
+    ("firm_raw", "VARCHAR"),
+    ("firm", "VARCHAR"),
+    ("firm_source", "VARCHAR"),
+    ("repo_tag", "VARCHAR"),
+    ("footer_signed_off_by", "VARCHAR[]"),
+    ("footer_co_authored_by", "VARCHAR[]"),
+    ("footer_co_developed_by", "VARCHAR[]"),
+    ("footer_reviewed_by", "VARCHAR[]"),
+    ("footer_acked_by", "VARCHAR[]"),
+    ("footer_tested_by", "VARCHAR[]"),
+    ("footer_reported_by", "VARCHAR[]"),
+    ("footer_suggested_by", "VARCHAR[]"),
+    ("footer_based_on_patch_by", "VARCHAR[]"),
+    ("footer_helped_by", "VARCHAR[]"),
+    ("footer_mentored_by", "VARCHAR[]"),
+    ("footer_assisted_by", "VARCHAR[]"),
+    ("footer_thanks_to", "VARCHAR[]"),
+    ("footer_personids", "VARCHAR[]"),
+    ("footer_person_names", "VARCHAR[]"),
+)
+
+
+@dataclass(frozen=True)
+class Drift:
+    """One disagreement between a file and the contract."""
+
+    kind: str      # missing | unexpected | type | order
+    column: str
+    detail: str
+
+    def __str__(self) -> str:
+        return f"{self.kind:<10} {self.column:<26} {self.detail}"
+
+
+def compare_schema(
+    actual: list[tuple[str, str]],
+    expected: tuple[tuple[str, str], ...] = EXPECTED_COLUMNS,
+) -> list[Drift]:
+    """Every way `actual` disagrees with the contract, in a stable order.
+
+    Reports all drifts rather than the first, because a schema change usually
+    moves several columns at once and fixing them one run at a time is slow.
+
+    Column order is checked too. Parquet is read by name, so order does not break
+    a consumer, but a reordering means the generator changed and that is worth a
+    human looking at it.
+    """
+    drifts: list[Drift] = []
+    actual_types = dict(actual)
+    expected_types = dict(expected)
+
+    for name, want in expected:
+        if name not in actual_types:
+            drifts.append(Drift("missing", name, f"contract expects {want}"))
+        elif actual_types[name] != want:
+            drifts.append(
+                Drift("type", name, f"expected {want}, found {actual_types[name]}"))
+
+    for name, found in actual:
+        if name not in expected_types:
+            drifts.append(Drift("unexpected", name, f"found {found}, not in contract"))
+
+    # Order is only meaningful when the two column sets already agree.
+    if not drifts and [n for n, _ in actual] != [n for n, _ in expected]:
+        drifts.append(Drift("order", "-", "same columns, different order"))
+    return drifts
+
+
+def read_schema(path: str) -> list[tuple[str, str]]:
+    """(name, type) per column, in file order. Needs duckdb."""
+    import duckdb                          # devenv-only; see the module docstring
+
+    rows = duckdb.sql("describe select * from read_parquet(?)",
+                      params=[path]).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def emit_contract(path: str) -> None:
+    """Print a file's schema as a paste-ready EXPECTED_COLUMNS block.
+
+    For when the generator legitimately changes: read the new schema, review the
+    diff by eye, then paste. Better than hand-typing 70 rows.
+    """
+    for name, typ in read_schema(path):
+        print(f'    ("{name}", "{typ}"),')
+
+
+def check(paths: list[str]) -> int:
+    """Report every file's drift. Returns the process exit status."""
+    worst = 0
+    for path in paths:
+        try:
+            actual = read_schema(path)
+        except Exception as e:                       # unreadable is a drift too
+            print(f"FAIL {path}\n  unreadable   {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            worst = EXIT_DRIFT
+            continue
+        drifts = compare_schema(actual)
+        if drifts:
+            worst = EXIT_DRIFT
+            print(f"FAIL {path}  ({len(actual)} columns, "
+                  f"{len(drifts)} drift{'s' if len(drifts) > 1 else ''})",
+                  file=sys.stderr)
+            for d in drifts:
+                print(f"  {d}", file=sys.stderr)
+        else:
+            print(f"OK   {path}  ({len(actual)} columns)")
+    return worst
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """No --help: this parser only structures the two invocation shapes below,
+    it does not take on the usage/error text that is the contract in `main`."""
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--emit-contract", action="store_true",
+                    help="print one file's schema as a paste-ready contract block")
+    ap.add_argument("paths", nargs="*", help="parquet files to check")
+    return ap
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    if not args.paths:
+        print(USAGE, file=sys.stderr)
+        sys.exit(EXIT_USAGE)
+    if args.emit_contract:
+        if len(args.paths) != 1:
+            print(USAGE, file=sys.stderr)
+            sys.exit(EXIT_USAGE)
+        emit_contract(args.paths[0])
+        return
+    sys.exit(check(args.paths))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

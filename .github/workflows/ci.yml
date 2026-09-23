@@ -1,0 +1,121 @@
+name: CI
+
+# Plain actions/setup-python + pip, deliberately. The sibling repository
+# (ccsl-codev/cregit) drives its CI through Nix and devenv because it has to build
+# srcML, a Scala toolchain, a Rust tokenizer and a Perl environment. This
+# repository is Python and duckdb only, so Nix would buy nothing here and would
+# cost an outside contributor a toolchain they do not otherwise need. The whole
+# point of pyproject.toml is that `pip install -e '.[dev]'` is enough.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from pyproject.toml's requires-python, and the newest release.
+        # Both were run locally before this workflow was committed.
+        python-version: ["3.12", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Creating .venv rather than installing into the interpreter is not
+      # ceremony: run_tests.sh, the repository's documented entry point, looks for
+      # .venv/bin/coverage and exits 2 without it. CI therefore runs the same
+      # command a reviewer runs, coverage floor included.
+      - name: Install dependencies from pyproject.toml
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -e '.[dev]'
+          .venv/bin/python -c 'import duckdb, pytest; print(duckdb.__version__, pytest.__version__)'
+
+      # run_tests.sh is `coverage run -m pytest -m "not network"` followed by
+      # `coverage report`, under `set -eu`, so a failing test or coverage below
+      # the 80% floor in .coveragerc fails this step and the build.
+      #
+      # Nothing is deselected. Every cross-repository test self-skips when the
+      # configured cregit checkout is absent, which it always is on a runner.
+      - name: Run the test suite
+        run: ./run_tests.sh --junitxml=junit-${{ matrix.python-version }}.xml
+
+      # `devenv shell -- pytest` does not flush its summary line, so the terminal
+      # count is not trustworthy. Read the counts from the JUnit XML instead, and
+      # fail on failures or errors rather than trusting the exit status alone.
+      - name: Report and re-check the JUnit counts
+        if: always()
+        shell: bash
+        run: |
+          f=junit-${{ matrix.python-version }}.xml
+          [ -f "$f" ] || { echo "no $f: the suite did not get far enough to write one"; exit 1; }
+          .venv/bin/python - "$f" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          s = root.find("testsuite") if root.tag == "testsuites" else root
+          a = s.attrib
+          print(f"tests={a['tests']} failures={a['failures']} "
+                f"errors={a['errors']} skipped={a['skipped']}")
+          if int(a["failures"]) or int(a["errors"]):
+              sys.exit("failures or errors in the suite")
+          PY
+
+      - name: Upload the JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.python-version }}
+          path: junit-${{ matrix.python-version }}.xml
+          if-no-files-found: warn
+
+  schema-gate:
+    name: schema gate (validate_schema.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies from pyproject.toml
+        run: python -m pip install -e .
+
+      # The gate asserts the 70-column contract in validate_schema.EXPECTED_COLUMNS
+      # against a real Parquet. No fixture Parquet is committed today, so this step
+      # reports that and passes. It must never be pointed at the corpus tree
+      # (../cregit-workspace/corpus-files): that is ~1 TB of working data and does
+      # not exist on a runner. Commit a small fixture under tests/fixtures/ and this
+      # step starts gating with no change here.
+      - name: Validate any committed fixture Parquet
+        shell: bash
+        run: |
+          shopt -s nullglob
+          fixtures=(tests/fixtures/*.parquet)
+          if [ ${#fixtures[@]} -eq 0 ]; then
+            echo "no committed fixture Parquet under tests/fixtures/; skipping the schema gate"
+            echo "(the contract itself is still covered by tests/test_validate_schema.py)"
+            exit 0
+          fi
+          echo "checking ${#fixtures[@]} fixture(s) against the 70-column contract"
+          python validate_schema.py "${fixtures[@]}"
