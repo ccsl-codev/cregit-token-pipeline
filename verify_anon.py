@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verify anonymized parquets WITHOUT access to the originals.
 
-Adapted from pipeline/anonymize/verify.py in
-cbsoft-vem2026-corporate-truck-factor at commit 3d722c6. Three changes:
+Adapted from pipeline/anonymize/verify.py in corporate-truck-factor at commit
+3d722c6. Three changes:
 
   * parquet, not SQLite: it walks every VARCHAR and VARCHAR[] column of every
     *.parquet in a directory. The original walked SQLite text columns and had no
@@ -13,8 +13,8 @@ cbsoft-vem2026-corporate-truck-factor at commit 3d722c6. Three changes:
     is that every LOCAL PART is a pseudonym: author_NNNN and nothing else.
   * no secrets required. anonymize_parquet.py's own leak scan needs the registry
     of real names to search for, so only whoever ran it can repeat it. This
-    checks the published files alone, which means a reviewer, a co-author or a
-    Zenodo depositor can run it -- and it is the check worth putting in a
+    checks the published files alone, which means anyone who only has the
+    released files can run it -- and it is the check worth putting in a
     release script, because it cannot be passed by forgetting to anonymize.
 
 It is a necessary, not a sufficient, condition: a real name that happens to look
@@ -70,6 +70,10 @@ EXACT_SHAPE = {
 # and shown but do not fail the run. anonymize_parquet.py's docstring discloses
 # this as residual risk; the point of listing it here is that a release cannot
 # pretend it is not there.
+#
+# anonymize_parquet.py's CONTENT_COLUMNS is authoritative; this is a hand-kept
+# mirror and must be edited to match until both move to a shared
+# anon_contract.py.
 CONTENT_COLUMNS = frozenset({"source_text", "token_value", "file_path",
                              "repo_name", "clone_url", "owner", "repo",
                              "roster_name", "fact", "file_mask"})

@@ -163,10 +163,10 @@ def test_commit_summary_is_preserved_by_default():
 
 def test_parses_the_git_trailer_shape():
     shape, name, email = A.parse_footer_element(
-        "Victor Adossi <vadossi@cosmonic.com>")
+        "Nora Quill <nquill@shipwell.example>")
     assert shape == A.SHAPE_NAME_EMAIL
-    assert name == "Victor Adossi"
-    assert email == "vadossi@cosmonic.com"
+    assert name == "Nora Quill"
+    assert email == "nquill@shipwell.example"
 
 
 def test_parses_a_bare_address():
@@ -212,7 +212,7 @@ def build(emails=(), names=(), footers=(), derived=None, domains=()):
 
 
 def test_one_person_gets_one_pseudonym_in_footer_and_in_person_name():
-    """Claim 5: consistency across the scalar and the footer columns."""
+    """One person keeps one pseudonym across the scalar and the footer columns."""
     reg = build(emails=["alice@intel.com"], names=["Alice Smith"],
                 footers=["Alice Smith <alice@intel.com>"])
     assert reg.footer_elements["Alice Smith <alice@intel.com>"] == (
@@ -381,9 +381,9 @@ def test_domain_masker_prefers_the_longest_domain():
 
 def test_footer_collapses_are_reported():
     """Two trailers differing only by a CR render alike. Said out loud, not hidden."""
-    reg = build(emails=["m@maxroos.com"], names=["Maximilian Roos"],
-                footers=["Maximilian Roos <m@maxroos.com>",
-                         "Maximilian Roos <m@maxroos.com>\r"])
+    reg = build(emails=["p@driftwork.example"], names=["Priya Kestrel"],
+                footers=["Priya Kestrel <p@driftwork.example>",
+                         "Priya Kestrel <p@driftwork.example>\r"])
     collapses = A.footer_collapses(reg)
     assert len(collapses) == 1
     assert len(next(iter(collapses.values()))) == 2

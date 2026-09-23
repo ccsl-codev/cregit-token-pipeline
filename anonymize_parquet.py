@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Pseudonymize cregit token-ownership parquets for publication, fail-closed.
 
-Adapted from pipeline/anonymize/anonymize_parquet.py in
-cbsoft-vem2026-corporate-truck-factor at commit 3d722c6 (that repository backs a
-published Zenodo artifact and is not modified here). What is kept from the
-original, what is fixed, and what is new:
+Adapted from pipeline/anonymize/anonymize_parquet.py in corporate-truck-factor
+at commit 3d722c6 (that repository backs a published Zenodo artifact and is
+not modified here). What is kept from the original, what is fixed, and what is
+new:
 
 KEPT -- the two decisions that make the firm analysis survive anonymization.
 
@@ -37,41 +37,39 @@ of what to publish is not made here. Non-conforming footer elements (anything
 that is not 'Name <email>') are never passed through as they stand: they are
 mapped whole through the name registry, and counted and sampled in the report.
 
-  Measured on the three files this was developed against, the derived columns
-  footer_personids / footer_person_names carry values of the form
-  'prql-bot at prql-bot@users.noreply.github.com' -- cregit's own personid
-  convention, a real e-mail inside a name-shaped string. The original's
-  registry was built from four scalar columns only, so those values would have
-  had no mapping. Element-level mapping of the derived columns is therefore not
-  cosmetic; without it the footers leak.
+  The derived columns footer_personids / footer_person_names can carry values
+  of the form 'prql-bot at prql-bot@users.noreply.github.com' -- cregit's own
+  personid convention, a real e-mail inside a name-shaped string. The
+  original's registry was built from four scalar columns only, so those values
+  would have had no mapping. Element-level mapping of the derived columns is
+  therefore not cosmetic; without it the footers leak.
 
 commit_summary: PRESERVED with an e-mail scrub, reversing the original's
 unconditional NULL. The original's reason was that commit_summary carries
 footer-style 'Name <email>' identity text. In this schema the trailers are 15
 separate columns and commit_summary holds the subject line only. Measured over
-1,393 distinct subjects in the three development files: 0 contain an e-mail
-shape, 0 contain an angle-bracketed address and 0 contain any identity name of
-five characters or more. Publishing it costs nothing and a subject line is
-useful. The check is not assumed: any residue makes the run FAIL, and
---null-commit-summary restores the original behaviour.
+1,393 distinct subjects: 0 contain an e-mail shape, 0 contain an
+angle-bracketed address and 0 contain any identity name of five characters or
+more. Publishing it costs nothing and a subject line is useful. The check is
+not assumed: any residue makes the run FAIL, and --null-commit-summary
+restores the original behaviour.
 
-RESIDUAL RISK, to be disclosed in any paper using this output:
+RESIDUAL RISK, to be disclosed by any publication using this output:
 
   * Preserving the e-mail domain leaves a sole contributor at a rare domain
     identifiable. Anyone who knows that exactly one person ever committed from
     smallfirm.example can re-identify author_0042@smallfirm.example without
-    breaking anything. Measured over the three development files: 33 of the 38
-    person_domain groups have exactly ONE distinct contributor. The ratio is
-    inflated by the small sample -- shared corporate domains gain people as the
-    corpus grows -- but vanity domains (gutwin.org, guerra.sh, haamer.ee,
-    lukapeschke.com, push-f.com) stay single-person however large it gets, and
-    the domain plus the repository together name the person.
+    breaking anything. Measured: 33 of 38 person_domain groups have exactly ONE
+    distinct contributor. The ratio is inflated by the small sample -- shared
+    corporate domains gain people as the corpus grows -- but single-person
+    vanity domains stay single-person however large it gets, and the domain
+    plus the repository together name the person.
     This is a deliberate trade of privacy for the firm signal the dataset exists
     to carry, not a defect, and it cannot be fixed while the domain is published.
     k-anonymity over the domain is the mitigation if a release needs one; it is
     not applied here because it would drop exactly the long tail of small firms
-    that the truck-factor question is about. A paper using this output must
-    disclose it.
+    that the truck-factor question is about. Any publication using this output
+    must disclose it.
   * repo_name, clone_url, owner, repo and roster_name carry the GitHub
     namespace, which for a personal repository IS a person's handle
     (owner_type = 'User'). These are not pseudonymized: the repository
@@ -169,11 +167,17 @@ FOOTER_COLUMNS: tuple[str, ...] = FOOTER_TEXT_COLUMNS + tuple(
     FOOTER_DERIVED_COLUMNS)
 
 # Columns whose content is prose or code rather than an identity field. A real
-# name found here is reported, not asserted away; see the docstring.
+# name found here is reported, not asserted away; see the docstring. file_mask
+# holds a regex, not an identity, so it belongs here rather than among the
+# structural pass-through columns that must be clean.
+#
+# This is the authoritative copy: verify_anon.py's CONTENT_COLUMNS mirrors it
+# by hand and must be kept in sync until both move to a shared anon_contract.py.
 CONTENT_COLUMNS: frozenset[str] = frozenset({"source_text", "token_value",
                                              "file_path", "repo_name",
                                              "clone_url", "owner", "repo",
-                                             "roster_name", "fact"})
+                                             "roster_name", "fact",
+                                             "file_mask"})
 
 # Emitted where a value reached the writer with no registry entry. Must never
 # appear in the output; verify_output() asserts that. It exists so that a
@@ -366,9 +370,9 @@ class Registry:
     group-by preservation. That is the right trade for a dataset whose headline
     metric is a count of distinct people.
 
-    Consistency, which is what claim 5 actually needs, holds within each space:
-    one input string always renders to one output string, in every column of
-    every file of one invocation.
+    Consistency, which is what pseudonym consistency across files actually
+    needs, holds within each space: one input string always renders to one
+    output string, in every column of every file of one invocation.
     """
 
     emails: dict[str, int] = field(default_factory=dict)
@@ -463,7 +467,7 @@ def build_registry(email_values: set[str], name_values: set[str],
 
 def render_footer_element(reg: Registry, name: str | None,
                           email: str | None) -> str:
-    """'Author 0007 <author_0003@cosmonic.com>', preserving the domain.
+    """'Author 0007 <author_0003@bigfirm.example>', preserving the domain.
 
     Keeping the trailer shape means a consumer can still parse the column, and
     keeping the domain means a Signed-off-by chain still carries firm signal --
@@ -540,7 +544,7 @@ def registry_macros(reg: Registry) -> list[str]:
         "  list_transform(l, x -> CASE WHEN x IS NULL OR x = '' THEN x "
         "                              ELSE _pid(x) END)",
         # Subject lines: strip any local part, keep the domain, same rule as the
-        # e-mail columns. Nothing in the three development files matches.
+        # e-mail columns.
         "CREATE OR REPLACE MACRO anon_summary(x) AS "
         "  regexp_replace(x, "
         "    '[A-Za-z0-9._%+\\-]+@([A-Za-z0-9.\\-]+\\.[A-Za-z]{2,})', "
@@ -597,7 +601,7 @@ def ordered_columns(plan: Plan) -> list[str]:
 # --------------------------------------------------------------------------
 
 def connect():
-    """A capped connection. 3 GB / 3 threads: this box is running other work."""
+    """A capped connection. 3 GB / 3 threads, leaving room for other work."""
     import duckdb
     con = duckdb.connect()
     con.execute("SET memory_limit='3GB'")
@@ -622,8 +626,8 @@ def read_schema(con, path: str) -> list[tuple[str, str]]:
 def collect_values(con, paths: list[str], plans: dict[str, Plan]):
     """Distinct identity strings over every input file, for one shared registry.
 
-    Shared across files because claim 5 asks for pseudonym consistency ACROSS
-    files, and because a person who commits to two projects must not get two
+    Shared across files because pseudonym consistency across files needs it,
+    and because a person who commits to two projects must not get two
     identities.
     """
     emails: set[str] = set()
@@ -842,8 +846,12 @@ def leak_scan(con, path: str, plan: Plan, reg: Registry) -> dict:
         n_marker = sum(1 for v in vals if MISSING_MARKER in v)
         if n_marker:
             out["missing_marker"][col] = n_marker
-        hits = [(kind, probe, v) for v in vals
-                for kind, probe in [scan.find(v) or (None, None)] if kind]
+        hits = []
+        for v in vals:
+            found = scan.find(v)
+            if found:
+                kind, probe = found
+                hits.append((kind, probe, v))
         if hits:
             bucket = "content" if col in CONTENT_COLUMNS else "identity"
             out[bucket][col] = {"n": len(hits),
@@ -890,8 +898,12 @@ def summary_residue(con, path: str, reg: Registry) -> dict:
         "select distinct commit_summary from read_parquet(?) "
         "where commit_summary is not null and commit_summary <> ''",
         [path]).fetchall() if v]
-    bad = [(kind, v) for v in vals
-           for kind, _ in [scan.find(v) or (None, None)] if kind]
+    bad = []
+    for v in vals:
+        found = scan.find(v)
+        if found:
+            kind, _probe = found
+            bad.append((kind, v))
     return {"n_distinct": len(vals), "residue": bad[:10],
             "n_residue": len(bad)}
 
@@ -900,11 +912,180 @@ def summary_residue(con, path: str, reg: Registry) -> dict:
 # Driver
 # --------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class RunOptions:
+    """The per-run flags process_file() needs. Keeps its signature stable as
+    more flags are added; today that is just null_commit_summary."""
+
+    null_commit_summary: bool = False
+
+
+@dataclass
+class FileOutcome:
+    """Everything computed while anonymizing one file.
+
+    render() and failures_of() both read this and nothing else. Before this
+    dataclass existed, run() built a report dict, printed a human-readable
+    section and rebuilt a failure list from three separate passes over the
+    same local variables, and the three could drift apart. Now there is one
+    set of facts about a file, computed once in process_file().
+    """
+
+    path: str
+    dest: str
+    plan: Plan
+    before: dict
+    after: dict
+    out_cols: list[str]
+    audit: dict
+    leaks: dict
+    resid: dict
+    drift: list[str]
+    mapping: list[str]
+    fe_before: dict[str, int]
+    fe_after: dict[str, int]
+    fe_lost: dict[str, tuple[int, int]]
+
+
+def process_file(con, src: str, dest: str, plan: Plan, reg: Registry,
+                 opts: RunOptions) -> FileOutcome:
+    """Write one anonymized file and run every check this module makes about it.
+
+    The single place that calls write_anonymized(). Everything else here is
+    verification: the invariance proof, the column-mapping proof, the leak
+    scan and the commit_summary residue check all run against the file just
+    written, and their results are handed back as one FileOutcome.
+    """
+    before = aggregate_profile(con, src)
+    audit = audit_passthrough(con, src, plan, reg)
+    write_anonymized(con, src, dest, plan, opts.null_commit_summary)
+    after = aggregate_profile(con, dest)
+    out_cols = read_columns(con, dest)
+    leaks = leak_scan(con, dest, plan, reg)
+    resid = (summary_residue(con, dest, reg) if not opts.null_commit_summary
+             else {"n_distinct": 0, "residue": [], "n_residue": 0})
+    drift = invariance_diff(before, after)
+    mapping = check_column_mapping(con, src, dest, plan)
+    fe_before = footer_element_counts(con, src, plan)
+    fe_after = footer_element_counts(con, dest, plan)
+    fe_lost = {c: (fe_before[c], fe_after[c]) for c in fe_before
+               if fe_before[c] != fe_after[c]}
+    return FileOutcome(path=src, dest=dest, plan=plan, before=before,
+                       after=after, out_cols=out_cols, audit=audit,
+                       leaks=leaks, resid=resid, drift=drift, mapping=mapping,
+                       fe_before=fe_before, fe_after=fe_after, fe_lost=fe_lost)
+
+
+def render(outcome: FileOutcome, out) -> None:
+    """Print one file's section of the human-readable report.
+
+    Reads only the FileOutcome process_file() returned. This report is a
+    release gate a human reads, so its wording is unchanged from before the
+    print statements were pulled out of run().
+    """
+    plan, before, after = outcome.plan, outcome.before, outcome.after
+    drift, mapping = outcome.drift, outcome.mapping
+    audit, leaks, resid = outcome.audit, outcome.leaks, outcome.resid
+    fe_before, fe_after, fe_lost = (outcome.fe_before, outcome.fe_after,
+                                    outcome.fe_lost)
+
+    print(f"\n[{os.path.basename(outcome.path)}]", file=out)
+    print(f"  rows:    in={before['rows']:,} out={after['rows']:,}", file=out)
+    print(f"  columns: in={len(plan.column_order)} out={len(outcome.out_cols)}"
+          f" (expected {plan.n_out})", file=out)
+    print(f"  distinct person_email {before['distinct_person_email']} -> "
+          f"{after['distinct_person_email']}, person_name "
+          f"{before['distinct_person_name']} -> "
+          f"{after['distinct_person_name']}", file=out)
+    print(f"  groups: firm={len(before['firm'])} "
+          f"person_domain={len(before['person_domain'])} "
+          f"repo_name={len(before['repo_name'])} "
+          f"-> invariance {'OK' if not drift else 'DRIFT'}", file=out)
+    for d in drift:
+        print(f"    DRIFT {d}", file=out)
+    print(f"  column mapping: {'OK' if not mapping else 'MISMATCH'} "
+          f"(output identity columns == macro over input)", file=out)
+    for m in mapping:
+        print(f"    MISMATCH {m}", file=out)
+    if fe_before:
+        print(f"  footer elements: {sum(fe_before.values()):,} in, "
+              f"{sum(fe_after.values()):,} out"
+              f"{' -- LOST ' + str(fe_lost) if fe_lost else ''}", file=out)
+    print(f"  pass-through audit: structural columns clean="
+          f"{not audit['email_shape'] and not audit['identity_name']}"
+          f" (29 provenance + 3 firm + person_domain carry no address "
+          f"and no identity name)", file=out)
+    if audit["email_shape"]:
+        print(f"    FAIL e-mail address in structural pass-through "
+              f"column(s): {audit['email_shape']}", file=out)
+    for c, hits in audit["identity_name"].items():
+        print(f"    FAIL structural pass-through {c} contains identity "
+              f"name(s) {hits}", file=out)
+    for c, n in audit["content_email_shape"].items():
+        print(f"    NOTE content column {c}: {n} row(s) contain an e-mail "
+              f"address (source code / repo namespace, not scrubbed)",
+              file=out)
+    for c, hits in audit["content_identity_name"].items():
+        print(f"    NOTE content column {c} contains identity name(s) "
+              f"{hits} (source code / repo namespace, not scrubbed)",
+              file=out)
+    if leaks["identity"]:
+        for c, info in leaks["identity"].items():
+            print(f"    LEAK identity column {c}: {info['n']} "
+                  f"{info['examples']}", file=out)
+    if leaks["content"]:
+        for c, info in leaks["content"].items():
+            print(f"    NOTE content column {c}: {info['n']} value(s) "
+                  f"contain an identity string (source code / repo "
+                  f"namespace, not scrubbed)", file=out)
+    if leaks["missing_marker"]:
+        print(f"    BUG {MISSING_MARKER} present: "
+              f"{leaks['missing_marker']}", file=out)
+    if resid["n_residue"]:
+        print(f"    LEAK commit_summary: {resid['n_residue']} of "
+              f"{resid['n_distinct']} distinct subjects carry identity "
+              f"text; use --null-commit-summary", file=out)
+        for kind, v in resid["residue"][:5]:
+            print(f"      [{kind}] {v!r}", file=out)
+
+
+def failures_of(outcome: FileOutcome) -> list[str]:
+    """Every way one file's outcome fails the release gate.
+
+    Derived from the same FileOutcome render() prints, so the exit status and
+    the printed report cannot disagree about what went wrong.
+    """
+    p, plan = outcome.path, outcome.plan
+    failures: list[str] = []
+    if len(outcome.out_cols) != plan.n_out:
+        failures.append(f"{p}: column count {len(outcome.out_cols)} != "
+                        f"{plan.n_out}")
+    if outcome.before["rows"] != outcome.after["rows"]:
+        failures.append(f"{p}: row count changed")
+    failures += [f"{p}: {d}" for d in outcome.drift]
+    failures += [f"{p}: {m}" for m in outcome.mapping]
+    failures += [f"{p}: footer elements lost in {c}: {a} -> {b}"
+                 for c, (a, b) in outcome.fe_lost.items()]
+    failures += [f"{p}: identity leak in {c}" for c in outcome.leaks["identity"]]
+    failures += [f"{p}: {MISSING_MARKER} in {c}"
+                 for c in outcome.leaks["missing_marker"]]
+    if outcome.audit["email_shape"]:
+        failures.append(f"{p}: e-mail address in structural pass-through "
+                        f"column(s) {sorted(outcome.audit['email_shape'])}")
+    if outcome.audit["identity_name"]:
+        failures.append(f"{p}: identity name in structural pass-through "
+                        f"column(s) {sorted(outcome.audit['identity_name'])}")
+    if outcome.resid["n_residue"]:
+        failures.append(f"{p}: commit_summary identity residue")
+    return failures
+
+
 def run(outdir: str, paths: list[str], drop_footers: bool = False,
         null_commit_summary: bool = False, report_path: str | None = None,
         out=sys.stdout) -> dict:
     con = connect()
     os.makedirs(outdir, exist_ok=True)
+    opts = RunOptions(null_commit_summary=null_commit_summary)
 
     plans: dict[str, Plan] = {}
     for p in paths:
@@ -956,114 +1137,25 @@ def run(outdir: str, paths: list[str], drop_footers: bool = False,
     for p in paths:
         plan = plans[p]
         dest = os.path.join(outdir, os.path.basename(p))
-        before = aggregate_profile(con, p)
-        audit = audit_passthrough(con, p, plan, reg)
-        write_anonymized(con, p, dest, plan, null_commit_summary)
-        after = aggregate_profile(con, dest)
-        out_cols = read_columns(con, dest)
-        leaks = leak_scan(con, dest, plan, reg)
-        resid = (summary_residue(con, dest, reg) if not null_commit_summary
-                 else {"n_distinct": 0, "residue": [], "n_residue": 0})
-        drift = invariance_diff(before, after)
-        mapping = check_column_mapping(con, p, dest, plan)
-        fe_before = footer_element_counts(con, p, plan)
-        fe_after = footer_element_counts(con, dest, plan)
-        fe_lost = {c: (fe_before[c], fe_after[c]) for c in fe_before
-                   if fe_before[c] != fe_after[c]}
+        outcome = process_file(con, p, dest, plan, reg, opts)
 
-        entry = {
-            "out": dest,
-            "columns_in": len(plan.column_order), "columns_out": len(out_cols),
-            "rows_in": before["rows"], "rows_out": after["rows"],
+        report["files"][p] = {
+            "out": outcome.dest,
+            "columns_in": len(plan.column_order),
+            "columns_out": len(outcome.out_cols),
+            "rows_in": outcome.before["rows"], "rows_out": outcome.after["rows"],
             "accounting": {c: plan.rule_of(c) for c in plan.column_order},
-            "invariance": drift,
-            "column_mapping": mapping,
-            "passthrough_audit": audit,
-            "leaks": leaks,
-            "commit_summary": resid,
-            "footer_elements": fe_before,
-            "footer_elements_lost": fe_lost,
+            "invariance": outcome.drift,
+            "column_mapping": outcome.mapping,
+            "passthrough_audit": outcome.audit,
+            "leaks": outcome.leaks,
+            "commit_summary": outcome.resid,
+            "footer_elements": outcome.fe_before,
+            "footer_elements_lost": outcome.fe_lost,
         }
-        report["files"][p] = entry
 
-        print(f"\n[{os.path.basename(p)}]", file=out)
-        print(f"  rows:    in={before['rows']:,} out={after['rows']:,}", file=out)
-        print(f"  columns: in={len(plan.column_order)} out={len(out_cols)}"
-              f" (expected {plan.n_out})", file=out)
-        print(f"  distinct person_email {before['distinct_person_email']} -> "
-              f"{after['distinct_person_email']}, person_name "
-              f"{before['distinct_person_name']} -> "
-              f"{after['distinct_person_name']}", file=out)
-        print(f"  groups: firm={len(before['firm'])} "
-              f"person_domain={len(before['person_domain'])} "
-              f"repo_name={len(before['repo_name'])} "
-              f"-> invariance {'OK' if not drift else 'DRIFT'}", file=out)
-        for d in drift:
-            print(f"    DRIFT {d}", file=out)
-        print(f"  column mapping: {'OK' if not mapping else 'MISMATCH'} "
-              f"(output identity columns == macro over input)", file=out)
-        for m in mapping:
-            print(f"    MISMATCH {m}", file=out)
-        if fe_before:
-            print(f"  footer elements: {sum(fe_before.values()):,} in, "
-                  f"{sum(fe_after.values()):,} out"
-                  f"{' -- LOST ' + str(fe_lost) if fe_lost else ''}", file=out)
-        print(f"  pass-through audit: structural columns clean="
-              f"{not audit['email_shape'] and not audit['identity_name']}"
-              f" (29 provenance + 3 firm + person_domain carry no address "
-              f"and no identity name)", file=out)
-        if audit["email_shape"]:
-            print(f"    FAIL e-mail address in structural pass-through "
-                  f"column(s): {audit['email_shape']}", file=out)
-        for c, hits in audit["identity_name"].items():
-            print(f"    FAIL structural pass-through {c} contains identity "
-                  f"name(s) {hits}", file=out)
-        for c, n in audit["content_email_shape"].items():
-            print(f"    NOTE content column {c}: {n} row(s) contain an e-mail "
-                  f"address (source code / repo namespace, not scrubbed)",
-                  file=out)
-        for c, hits in audit["content_identity_name"].items():
-            print(f"    NOTE content column {c} contains identity name(s) "
-                  f"{hits} (source code / repo namespace, not scrubbed)",
-                  file=out)
-        if leaks["identity"]:
-            for c, info in leaks["identity"].items():
-                print(f"    LEAK identity column {c}: {info['n']} "
-                      f"{info['examples']}", file=out)
-        if leaks["content"]:
-            for c, info in leaks["content"].items():
-                print(f"    NOTE content column {c}: {info['n']} value(s) "
-                      f"contain an identity string (source code / repo "
-                      f"namespace, not scrubbed)", file=out)
-        if leaks["missing_marker"]:
-            print(f"    BUG {MISSING_MARKER} present: "
-                  f"{leaks['missing_marker']}", file=out)
-        if resid["n_residue"]:
-            print(f"    LEAK commit_summary: {resid['n_residue']} of "
-                  f"{resid['n_distinct']} distinct subjects carry identity "
-                  f"text; use --null-commit-summary", file=out)
-            for kind, v in resid["residue"][:5]:
-                print(f"      [{kind}] {v!r}", file=out)
-
-        if len(out_cols) != plan.n_out:
-            failures.append(f"{p}: column count {len(out_cols)} != {plan.n_out}")
-        if before["rows"] != after["rows"]:
-            failures.append(f"{p}: row count changed")
-        failures += [f"{p}: {d}" for d in drift]
-        failures += [f"{p}: {m}" for m in mapping]
-        failures += [f"{p}: footer elements lost in {c}: {a} -> {b}"
-                     for c, (a, b) in fe_lost.items()]
-        failures += [f"{p}: identity leak in {c}" for c in leaks["identity"]]
-        failures += [f"{p}: {MISSING_MARKER} in {c}"
-                     for c in leaks["missing_marker"]]
-        if audit["email_shape"]:
-            failures.append(f"{p}: e-mail address in structural pass-through "
-                            f"column(s) {sorted(audit['email_shape'])}")
-        if audit["identity_name"]:
-            failures.append(f"{p}: identity name in structural pass-through "
-                            f"column(s) {sorted(audit['identity_name'])}")
-        if resid["n_residue"]:
-            failures.append(f"{p}: commit_summary identity residue")
+        render(outcome, out)
+        failures += failures_of(outcome)
 
     consistency = check_consistency(con, paths, plans)
     report["cross_file_consistency"] = consistency
