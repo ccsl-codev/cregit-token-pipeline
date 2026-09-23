@@ -4,8 +4,6 @@
     ./validate_schema.py <dataset.parquet> [<dataset.parquet> ...]
     ./validate_schema.py --emit-contract <dataset.parquet>   # print, do not check
 
-Discharges EXECUTION-STATE.md D20 ("the schema is not validated yet").
-
 Why a separate gate from validate.py: that one asks "did this project produce a
 non-empty parquet". This one asks "do all projects agree". A corpus is unusable
 if one project has 38 columns and another 23, or if `token_index` is BIGINT in

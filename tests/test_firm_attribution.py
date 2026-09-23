@@ -331,7 +331,7 @@ def run_args(**over):
                 shards=0, shard_classes="L", from_step=1, gc=None,
                 blame_jobs=0, memory_limit=None, duckdb_threads=0,
                 project_meta="", mask="", firm_map="", firm_canonical="",
-                allow_empty_provenance=True)
+                allow_empty_provenance=True, reblame=False)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -394,7 +394,7 @@ def test_a_runner_that_cannot_take_the_flag_stops_the_run(sandbox):
 
 def test_both_paths_are_resolved_absolute_for_the_runner(sandbox, monkeypatch):
     """The runner is started with cwd=CREGIT while these paths are typed relative
-    to this repository. Task 7 lost a whole corpus pass to exactly this."""
+    to this repository. A whole corpus pass was lost to exactly this."""
     monkeypatch.chdir(sandbox)
     (sandbox / "map.csv").write_text("domain,company,kind,source\n")
     (sandbox / "canon.csv").write_text("firm_raw,firm\n")

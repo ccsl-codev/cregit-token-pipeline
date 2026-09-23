@@ -1061,7 +1061,7 @@ def run_args(**over):
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
                 firm_map="", firm_canonical="", allow_empty_provenance=True,
-                mask="", mask_widened=False, retokenize="")
+                mask="", mask_widened=False, retokenize="", reblame=False)
     base.update(over)
     return argparse.Namespace(**base)
 
