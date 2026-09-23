@@ -112,7 +112,7 @@ CLONE_TIMEOUT_S = 2_700
 #
 # A human-readable note per cluster, keyed by cluster id. Documentation only: no
 # entry here changes what enters the corpus, and a cluster with no note is still
-# annotated. See EXECUTION-STATE.md D26 and D27.
+# annotated. Nothing is excluded for sharing a history; it is recorded as data.
 CLUSTER_NOTES: dict[str, str] = {
     "1da177e4c3f41524e886b7f1b8a0c1fc7321cac2":
         "Linux kernel trees; 1da177e4 is the 2.6.12-rc2 import",
