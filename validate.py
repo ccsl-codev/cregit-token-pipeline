@@ -10,6 +10,11 @@ Exit status is the whole interface ctp.py sees:
   1  rejected. No stamp, so the next ctp pass retries the project.
   2  wrong invocation. Usage is printed and nothing else is touched.
 
+Two positional arguments, no flags: that is the whole CLI, and it is a
+published contract, not an oversight. sys.argv is parsed by hand on purpose --
+argparse would add a --help and an error-formatting surface this script does
+not need, for two required paths.
+
 The checks are plain `if` statements on purpose. `assert` vanishes under
 `python -O`, and a gate that an interpreter flag can delete is not a gate: any
 parquet would then be stamped DONE.
@@ -29,7 +34,6 @@ MIN_BYTES = 10_000
 EXIT_REJECTED = 1
 EXIT_USAGE = 2
 
-# `?` is a bound parameter, filled in by duckdb, not by string formatting.
 COUNT_SQL = "select count(*) from read_parquet(?)"
 SCHEMA_SQL = "describe select * from read_parquet(?)"
 
@@ -63,4 +67,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

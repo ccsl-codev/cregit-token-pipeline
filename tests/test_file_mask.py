@@ -114,9 +114,9 @@ def test_the_mask_covers_c_cpp_java_and_rust():
 
 
 def test_every_manifest_row_carries_the_universal_mask():
-    """The manifests are the pipeline's input, and project_meta.py reads the same
-    column for the Parquet's file_mask, so a stale row makes the recorded mask a
-    lie about how those tokens were produced."""
+    """The manifests are the pipeline's input, and the runner records the mask it
+    used in the Parquet's file_mask column, so a stale row makes the recorded
+    mask a lie about how those tokens were produced."""
     manifests = sorted(CORPUS.glob("manifest*.tsv"))
     assert manifests, "no manifests found; the glob or the layout changed"
     for path in manifests:

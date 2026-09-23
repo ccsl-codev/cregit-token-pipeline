@@ -1,32 +1,19 @@
 #!/usr/bin/env python3
 """Build ctp.duckdb: project tracking table + unified token view.
 
-    ./consolidate.py                                  # the corpus run set
-    ./consolidate.py --manifest manifest.tsv          # the legacy pilots
+    ./consolidate.py                                    # manifest.tsv (default)
     ./consolidate.py --manifest a.tsv --manifest b.tsv  # repeatable
 
 Derived index, NOT authority — ground truth stays the manifests + validated
 stamps + metrics.tsv. Safe to rerun any time. Run inside devenv (needs duckdb).
 
-WHICH MANIFESTS. The manifest used to be hardcoded to manifest.tsv, which holds
-exactly 4 legacy pilot projects (jq, zstd, libuv, tmux) whose parquets are still
-at the old 23-column schema. ctp.py's `db` command passes no arguments, so
-ctp.duckdb could only ever describe those 4 and no corpus-wide query was
-possible. The default is therefore the corpus RUN set:
-
-    manifest.phase1-sm.tsv  (187 projects)  +  manifest.linux.tsv  (1)
-
-Anyone who wants the legacy pilots asks for them: --manifest manifest.tsv.
-manifest.generated.tsv is never a default: it is a CANDIDATE list of 3,948 rows
-that were never run, so indexing it would stat 3,948 absent workdirs and emit
-thousands of phantom QUEUED rows. A relative --manifest resolves against this
+WHICH MANIFESTS. manifest.tsv is the only manifest this repository carries: 4
+small public pilot projects (jq, zstd, libuv, tmux). It is the default when
+--manifest is not given, so ctp.py's `db` command — which passes no arguments —
+always has something to describe. A relative --manifest resolves against this
 repo, not the caller's cwd, because ctp.py runs this script from the cregit
 directory. A project named by two manifests is indexed once, from the first
 manifest that names it.
-
-When none of the corpus manifests is present — a fixture tree, or a checkout
-without them — the run set falls back to manifest.tsv, which is the only
-manifest every checkout has.
 
 SCHEMA GATE. read_parquet([...]) binds one schema for the whole list, so a
 single file at the old 23 or 38 columns aborts the tokens view for every
@@ -75,6 +62,7 @@ import configparser
 import fcntl
 import sys
 from collections.abc import Sequence
+from dataclasses import astuple, dataclass
 from pathlib import Path
 
 import duckdb
@@ -93,11 +81,8 @@ DB = CORPUS / "ctp.duckdb"
 # would take the lock with it. This must stay in step with ctp.py's state_dir().
 STATE = CORPUS / "state"
 
-# The run set: what was actually run, so what the index can describe.
-CORPUS_MANIFESTS = ("manifest.phase1-sm.tsv", "manifest.linux.tsv")
-# The one manifest every checkout carries. Used only when no corpus manifest is
-# present; it holds the 4 legacy pilots, not the corpus.
-FALLBACK_MANIFEST = "manifest.tsv"
+# The one manifest this repository carries, and therefore the default run set.
+DEFAULT_MANIFEST = "manifest.tsv"
 
 PROJECTS_DDL = (
     "create or replace table projects (name text primary key, url text, "
@@ -105,6 +90,37 @@ PROJECTS_DDL = (
     "parquet_path text, rows_unreadable boolean, parquet_missing boolean, "
     "excluded_because text)")
 PROJECTS_INSERT = "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+
+@dataclass
+class ProjectRow:
+    """One project, shaped like the `projects` table, by name rather than by
+    position — so a reader never has to count columns to know what a field
+    means, and inserting one does not silently shift every other reader.
+
+    as_tuple() exists for the one place that still needs positions:
+    con.executemany(PROJECTS_INSERT, ...) takes a plain sequence per row, in
+    PROJECTS_DDL's column order — the order these fields are declared in.
+    """
+    name: str
+    url: str
+    category: str
+    size_class: str
+    state: str
+    token_rows: int | None
+    parquet_path: str | None
+    rows_unreadable: bool
+    parquet_missing: bool
+    excluded_because: str | None
+
+    def as_tuple(self) -> tuple:
+        return astuple(self)
+
+    def __getitem__(self, index: int):
+        """Positional access, kept only for callers written against the row's
+        pre-dataclass tuple shape."""
+        return self.as_tuple()[index]
+
 
 # Projects run and validated, but deliberately not published. Name -> reason.
 # See PUBLICATION EXCLUSIONS in the module docstring, and docs/LIMITATIONS.md
@@ -128,8 +144,11 @@ def lock_held(lockfile: Path) -> bool:
     because ctp.py also opens the lock "w" and never writes a byte to it, so
     there was nothing to lose. flock works on a read-only descriptor.
 
-    `retain.py` carries the same predicate with the same "r" fix; `ctp.py`'s
-    `_lock_held` still opens "w". Keep the three in step.
+    `retain.py` and `ctp.py`'s `_lock_held` carry the same predicate, opened the
+    same "r" way, so all three now agree. Duplicated on purpose rather than
+    shared: retain.py is stdlib-only so `ctp.py run --drop-memo` can call it
+    without pulling in duckdb, and importing across the three would break that
+    independence to save eight lines.
 
     An unreadable lock file returns True: refusing to guess is the safe answer
     when the question is "is a run in flight".
@@ -169,28 +188,12 @@ def resolve_manifest(value: str) -> Path:
 
 
 def default_manifests() -> list[Path]:
-    """The manifests indexed when --manifest is not given: the corpus run set.
-
-    A corpus manifest that is absent contributes nothing and is named on stderr,
-    so 187 projects silently becoming 1 is visible. When none of them is present
-    the run set falls back to manifest.tsv — see the module docstring.
-    """
-    present = [CORPUS / name for name in CORPUS_MANIFESTS
-               if (CORPUS / name).is_file()]
-    if present:
-        for name in CORPUS_MANIFESTS:
-            if not (CORPUS / name).is_file():
-                print(f"  ! {name} is absent, it contributes no projects",
-                      file=sys.stderr)
-        return present
-    return [CORPUS / FALLBACK_MANIFEST]
+    """The manifest indexed when --manifest is not given: DEFAULT_MANIFEST."""
+    return [CORPUS / DEFAULT_MANIFEST]
 
 
-def project_rows(manifests: Sequence[Path] | None = None) -> list:
-    """One tuple per manifest row, shaped like the projects table:
-
-    (name, url, category, size_class, state, token_rows, parquet_path,
-     rows_unreadable, parquet_missing, excluded_because)
+def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
+    """One ProjectRow per manifest line. See ProjectRow for the fields.
 
     `manifests` is the list to index, so a caller — main(), or a test — decides
     which manifests are ground truth instead of this function deciding for it.
@@ -239,16 +242,19 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list:
                 try:
                     n_rows = int(raw)
                 except ValueError:
-                    # Report and carry on: 1,423 projects must not lose their
-                    # index because one stamp says rows=many.
+                    # Report and carry on: the rest of the corpus must not lose
+                    # its index because one stamp says rows=many.
                     print(f"  ! {name}: stamp rows={raw!r} is not an integer, "
                           "token_rows left null", file=sys.stderr)
                     rows_unreadable = True
             has_parquet = parquet.exists()
-            rows.append((name, url, category, size_class, state, n_rows,
-                         str(parquet) if has_parquet else None,
-                         rows_unreadable, validated and not has_parquet,
-                         PUBLICATION_EXCLUSIONS.get(name)))
+            rows.append(ProjectRow(
+                name=name, url=url, category=category, size_class=size_class,
+                state=state, token_rows=n_rows,
+                parquet_path=str(parquet) if has_parquet else None,
+                rows_unreadable=rows_unreadable,
+                parquet_missing=validated and not has_parquet,
+                excluded_because=PUBLICATION_EXCLUSIONS.get(name)))
     return rows
 
 
@@ -274,7 +280,7 @@ def schema_split(paths: Sequence[str]) -> tuple[list[str], list, list]:
         try:
             actual = read_schema(str(path))
         except Exception as exc:                     # not this gate's defect
-            unread.append((path, f"{type(exc).__name__}"))
+            unread.append((path, f"{type(exc).__name__}: {exc}"))
             usable.append(path)
             continue
         drifts = compare_schema(actual)
@@ -291,9 +297,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--manifest", action="append", metavar="PATH",
         help="manifest to index, repeatable. A relative path is resolved "
-             "against this repo. Default: "
-             f"{' + '.join(CORPUS_MANIFESTS)} (the corpus run set). Pass "
-             f"--manifest {FALLBACK_MANIFEST} for the legacy pilot projects.")
+             f"against this repo. Default: {DEFAULT_MANIFEST}.")
     return parser.parse_args(list(argv))
 
 
@@ -305,15 +309,15 @@ def main(argv: Sequence[str] = ()) -> None:
     con = duckdb.connect(str(DB))
 
     con.execute(PROJECTS_DDL)
-    con.executemany(PROJECTS_INSERT, projects)
+    con.executemany(PROJECTS_INSERT, [p.as_tuple() for p in projects])
 
     con.execute(f"""create or replace table phase_metrics as
         select * from read_csv('{CORPUS / 'metrics.tsv'}', delim='\t', header=true)""")
 
-    # p[9] is excluded_because: a deliberate publication exclusion keeps its
-    # projects row but contributes no tokens.
-    validated = [p[6] for p in projects
-                 if p[4] == "DONE" and p[6] and not p[9]]
+    # A deliberate publication exclusion keeps its projects row but
+    # contributes no tokens.
+    validated = [p.parquet_path for p in projects
+                 if p.state == "DONE" and p.parquet_path and not p.excluded_because]
     usable, drifted, unread = schema_split(validated)
     if usable:
         files = ", ".join(sql_literal(f) for f in usable)
@@ -328,7 +332,7 @@ def main(argv: Sequence[str] = ()) -> None:
     print(f"ctp.duckdb rebuilt: {DB}")
     print(f"  manifests: {', '.join(Path(m).name for m in manifests)}")
     for state in ("DONE", "RUNNING", "FAILED", "QUEUED"):
-        n = sum(1 for p in projects if p[4] == state)
+        n = sum(1 for p in projects if p.state == state)
         if n:
             print(f"  {state}: {n}")
     print(f"  tokens view: {total:,} rows across {len(usable)} projects")
@@ -345,19 +349,19 @@ def main(argv: Sequence[str] = ()) -> None:
               f"parquet(s) ({named}): left in the tokens view, "
               "run validate_schema.py on them", file=sys.stderr)
 
-    excluded = [(p[0], p[9]) for p in projects if p[9]]
+    excluded = [(p.name, p.excluded_because) for p in projects if p.excluded_because]
     if excluded:
         print(f"  publication exclusions: {len(excluded)} "
               "(row kept in projects, left out of the tokens view)")
         for name, why in excluded:
             print(f"    - {name}: {why}")
 
-    no_parquet = [p[0] for p in projects if p[8]]
+    no_parquet = [p.name for p in projects if p.parquet_missing]
     if no_parquet:
         print(f"  DONE but parquet missing: {len(no_parquet)} "
               f"({', '.join(no_parquet)}): flagged parquet_missing, "
               "left out of the tokens view")
-    unreadable = [p[0] for p in projects if p[7]]
+    unreadable = [p.name for p in projects if p.rows_unreadable]
     if unreadable:
         print(f"  unreadable rows= in stamp: {len(unreadable)} "
               f"({', '.join(unreadable)}): flagged rows_unreadable, "

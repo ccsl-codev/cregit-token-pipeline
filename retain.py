@@ -5,20 +5,11 @@
     ./retain.py jq zstd              # dry run over the named projects
     ./retain.py --apply              # actually delete (dry run is the default)
 
-Why. The corpus grows to 1,423 projects on a 2.0 TB disk with ~1.2 TB free.
-Measured pilot workdirs (4 projects, `du -sh`):
-
-    project  workdir   memo/           html/
-    jq        274 MB    123 MB (45%)    94 MB
-    libuv     907 MB    643 MB (71%)   164 MB
-    tmux      2.6 GB    2.3 GB (88%)   255 MB
-    zstd      2.3 GB    1.9 GB (83%)   234 MB
-
-memo/ plus html/ is 68-96% of a workdir. Keeping both for 1,423 projects needs
-1.4-3.5 TB, so the corpus does not fit. Dropping both leaves roughly 155 GB.
-The research needs only <name>-dataset.parquet (2.4-6.7 MB per project) and the
-project's metrics.tsv row. docs/DESIGN.md section 6 already classes memo/ and
-html/ as disposable; this script is that policy, executable.
+Why. memo/ plus html/ is 68-96% of a workdir, so a large corpus does not fit
+on disk if both are kept for every project. The research needs only
+<name>-dataset.parquet (2.4-6.7 MB per project) and the project's metrics.tsv
+row. docs/DESIGN.md section 6 already classes memo/ and html/ as disposable;
+this script is that policy, executable.
 
 Cost of dropping memo/: blobExec loses its blob-to-token cache, so a later
 incremental re-run of that project re-tokenizes from scratch. Accepted for a
@@ -30,21 +21,14 @@ never means "idle".
 
 Safety. Dry run is the default; --apply is required before anything is removed.
 Every guard lives in prune(), because prune() is where the deletes happen and
-both entry points reach it:
+both entry points reach it. Each guard is documented in full where it runs:
 
-  * output_dir must not be /, ~, or a path of fewer than three parts
-  * the project name must be one plain directory name — no /, no .., not
-    absolute, not empty — so that OUT / name cannot escape OUT
-  * the project must be finished: <name>-dataset.parquet must exist and be
-    non-empty, and ctp.py's <name>.validated stamp must be present and
-    non-empty. finished() is the only definition of finished, and
-    finished_projects() uses it too
-  * the project must be IDLE: no pipeline run other than the caller may hold
-    ctp.py's per-project lock, state/<name>/.lock. live() is that test
-  * only <output_dir>/<project>/{memo,html} is ever removed, checked against
-    the resolved path
-  * the walk refuses a subtree that holds a protected name or that it cannot
-    read, and skips one that is not a directory
+  * output_dir sanity — output_dir_refusal()
+  * one plain project name — check_name()
+  * the project is finished — finished()
+  * the project is idle — live()
+  * only <output_dir>/<project>/{memo,html} is ever removed — check_target()
+  * protected/unreadable entries refused, non-directories skipped — scan()
 
 Finished is NOT idle, and conflating them is how this script would destroy a
 running job. The <name>.validated stamp means "this project finished
@@ -72,18 +56,15 @@ That is a scheduling cost, not a data-safety one — run the sweep under nice an
 ionice — and the LIVE line in the summary is the loud signal.
 
 A refusal, a skip and a live project all make the exit status non-zero, but they
-differ in blast radius. A refusal means the walk did not understand this project,
-so under --apply nothing at all is deleted for it. A live project is not touched
-or even measured, and its siblings are still pruned. A skip means only that this
-one subtree is not a directory to remove, which says nothing about its siblings,
-so the others are still pruned. The output directory comes from pipeline.cfg,
-read the same way ctp.py reads it.
+differ in blast radius. A refusal means the walk did not understand this
+project, so under --apply nothing at all is deleted for it. A skip means only
+that this one subtree is not a directory to remove, which says nothing about its
+siblings, so the others are still pruned — and a live project, per above, is
+left alone entirely. The output directory comes from pipeline.cfg, read the same
+way ctp.py reads it.
 
-Dry run and --apply differ on purpose. A dry run measures every subtree even
-after a refusal, so the reclaimable total is complete and a capacity plan built
-over a partly blocked corpus does not read low. An --apply run deletes nothing
-for a project that had any refusal at all: a refusal means the walk did not
-understand that project, so no subtree of it is safe to remove.
+How dry run and --apply differ is documented on prune() itself, where the two
+modes are implemented.
 
 Shared entry point: prune() is also called by `ctp.py run --drop-memo`, so the
 post-run cleanup and this script delete through exactly one code path.
@@ -223,8 +204,8 @@ def output_dir_refusal() -> str | None:
 
     Both entry points call this — main() for the command line, prune() for
     ctp.py run --drop-memo. The check used to sit in main() alone, so the
-    --drop-memo path, the one that runs 1,423 times, never enforced it. A stated
-    safety rule must hold where the deletes actually happen.
+    --drop-memo path, the one that runs once per project, never enforced it. A
+    stated safety rule must hold where the deletes actually happen.
     """
     if OUT in (Path("/"), Path.home()):
         return "that is the filesystem root or the home directory"
@@ -342,12 +323,9 @@ def lock_held(lockfile: Path) -> bool:
 def live(name: str) -> bool:
     """True when a pipeline run other than this caller is working on name.
 
-    This is the "nothing is using it" test, and the <name>.validated stamp is not.
-    The stamp says the project finished once; a `--from-step 2` re-run of a
-    validated project carries that stamp through the whole re-run while blobExec
-    uses memo/ as its live blob-to-token cache. Deleting memo/ there does not
-    reclaim a leftover, it destroys a cache mid-run and the run re-tokenizes from
-    scratch.
+    This is the "is anything using it" test, and the <name>.validated stamp is
+    not — see the module docstring on why finished and idle are different
+    questions.
     """
     lockfile = lock_path(name)
     if _held_by_this_process(lockfile):
@@ -390,8 +368,8 @@ def remove_tree(target: Path) -> list[str]:
     """Delete target. Return the per-entry errors, empty when it all went.
 
     shutil.rmtree raises out of the middle of a tree. Unwrapped, one permission
-    error part-way through project 200 raised out of prune() and out of main(),
-    so the remaining 1,223 projects were abandoned with a traceback instead of a
+    error part-way through a project would raise out of prune() and out of
+    main(), abandoning every project after it with a traceback instead of a
     per-project SKIP and a non-zero exit. onexc collects each failure instead of
     raising, so the caller can report this project and carry on with the next.
     """
@@ -434,9 +412,8 @@ def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
       * DRY RUN keeps going after a refusal. It measures every subtree, reports
         each refusal, and returns a complete reclaimable total. A refused memo/
         used to hide html/ from the total, so a capacity plan built over a partly
-        blocked corpus read low — and that plan decides whether 1,423 projects
-        fit on disk. ok is still False, because the project is not fully
-        prunable.
+        blocked corpus read low — and that plan decides whether the corpus fits
+        on disk. ok is still False, because the project is not fully prunable.
       * APPLY fails closed. One refusal anywhere in the project deletes nothing
         for that project, not even a subtree that passed.
     """
@@ -451,13 +428,12 @@ def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
         say(f"SKIP: {exc}")
         return 0, False
 
-    # Before finished(), and before any stat of the workdir. A live project is
-    # skipped whatever its stamp says, so the reason reported is the one that
-    # matters and the live run is not asked for I/O it did not want. The guard is
-    # here, not in main(), because ctp.py calls prune() directly: a check in
-    # main() alone would leave the --drop-memo path — the one that runs 1,423
-    # times — unguarded, which is exactly the mistake output_dir_refusal() was
-    # moved down here to fix.
+    # Before finished(), and before any stat of the workdir, so the reason
+    # reported is the one that matters and the live run is not asked for I/O it
+    # did not want. The guard is here, not in main(), because ctp.py calls
+    # prune() directly: a check in main() alone would leave the --drop-memo path
+    # — the one that runs on every project in the corpus — unguarded, which is
+    # exactly the mistake output_dir_refusal() was moved down here to fix.
     if live(name):
         say(f"{name} — SKIP: LIVE, another run holds {lock_path(name)}. memo/ is "
             f"blobExec's cache while it runs, so nothing was measured or deleted")

@@ -21,6 +21,7 @@ comparison logic can be unit-tested without duckdb installed. duckdb comes from
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from dataclasses import dataclass
 
@@ -28,35 +29,43 @@ USAGE = "usage: validate_schema.py [--emit-contract] <dataset.parquet> ..."
 EXIT_DRIFT = 1
 EXIT_USAGE = 2
 
-# The contract, measured from the updated cregit-issue61 output on 2026-09-13,
-# widened 2026-09-19 and again 2026-09-20.
+# The contract, measured from the cregit-issue61 output, has been widened
+# since.
 #
 # 70 columns. It was 38 (and 23 before that; the 15 footer columns are
 # commit-trailer evidence, which matters to this research because Signed-off-by,
 # Reviewed-by and Co-authored-by carry attribution that authorship alone does
 # not).
 #
-# The 29 after repo_name are per-project provenance, injected from
-# project_meta.json: which roster or search found the project, which stratum it
-# was assigned and on what evidence, its shared-history cluster, and the regex
-# mask it was tokenized with. They repeat per row by design — a reader can filter
-# without a second join against candidates.csv, and a column is cheap to drop at
-# publish time but expensive to add later.
+# The 29 after repo_name are per-project provenance: which roster or search
+# found the project, which stratum it was assigned and on what evidence, its
+# shared-history cluster, and the regex mask it was tokenized with. They come
+# from an optional JSON sidecar the user supplies with `ctp.py run
+# --project-meta`. An absent sidecar leaves all 29 columns empty, not missing —
+# the schema never changes shape. They repeat per row by design — a reader can
+# filter without a second join against the sidecar, and a column is cheap to
+# drop at publish time but expensive to add later.
+#
+# The sidecar is a JSON object keyed by project name. Each value is an object
+# whose keys are these 29 field names and whose values are all strings. A key
+# missing from one project's object becomes an empty string for that column,
+# the same as when the sidecar itself is absent.
 #
 # clone_url is among them because repo_name is a lossy slug. provenance_status
-# separates the 200 corpus projects from the 10 development fixtures that share
-# the output directory: select the corpus with
-#   where provenance_status = 'candidates.csv'
-# file_mask is there because a mask widening is planned, and without it nobody
-# can tell which rows came from which mask.
+# is a free string the sidecar sets; this repository does not interpret it.
+# file_mask is there because the mask widened once already, from per-language
+# to universal (see file_mask.py), and without this column nobody could tell
+# which rows came from which mask.
 #
-# These 29 names and their order must match META_FIELDS in project_meta.py and
-# PROJECT_META_FIELDS in cregit-issue61/generate_dataset/generate_dataset.py.
-# tests/test_meta_field_drift.py checks all three against each other.
+# These 29 names and their order must match PROJECT_META_FIELDS in
+# generate_dataset.py, inside the configured cregit checkout
+# (cregit-issue61/generate_dataset/generate_dataset.py). That file is the
+# single authority for the field list; nothing in this repository generates or
+# owns it.
 #
-# The three after person_domain are the firm attribution, added 2026-09-20. They
-# sit there because they are RESOLVED FROM person_domain — the key and its answer
-# belong together — and before repo_tag so the identity block stays contiguous.
+# The three after person_domain are the firm attribution. They sit there
+# because they are RESOLVED FROM person_domain — the key and its answer belong
+# together — and before repo_tag so the identity block stays contiguous.
 #
 # Unlike the 29 provenance columns they are not per-project constants: they come
 # from a per-row join against data/affiliation.merged.csv, so they are the only
@@ -67,7 +76,7 @@ EXIT_USAGE = 2
 #   firm         the canonical name, from the reviewed data/firm_canonical.csv
 #   firm_source  the map's `source`, so a reader can tell a hand-curated
 #                attribution (patch, gitdm, rich, correction) from a
-#                single-person inference (cncf-gitdm-single, 2,771 of 4,049 rows)
+#                single-person inference (cncf-gitdm-single)
 #
 # All three are '' when person_domain is not in the map, so an empty firm_source
 # means "no attribution" and is the column to filter on.
@@ -237,19 +246,29 @@ def check(paths: list[str]) -> int:
     return worst
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """No --help: this parser only structures the two invocation shapes below,
+    it does not take on the usage/error text that is the contract in `main`."""
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--emit-contract", action="store_true",
+                    help="print one file's schema as a paste-ready contract block")
+    ap.add_argument("paths", nargs="*", help="parquet files to check")
+    return ap
+
+
 def main() -> None:
-    args = sys.argv[1:]
-    if not args:
+    args = build_parser().parse_args()
+    if not args.paths:
         print(USAGE, file=sys.stderr)
         sys.exit(EXIT_USAGE)
-    if args[0] == "--emit-contract":
-        if len(args) != 2:
+    if args.emit_contract:
+        if len(args.paths) != 1:
             print(USAGE, file=sys.stderr)
             sys.exit(EXIT_USAGE)
-        emit_contract(args[1])
+        emit_contract(args.paths[0])
         return
-    sys.exit(check(args))
+    sys.exit(check(args.paths))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

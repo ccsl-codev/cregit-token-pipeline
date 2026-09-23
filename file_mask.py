@@ -15,20 +15,18 @@ The mask used to be per-language, from GitHub's primary-language field:
     Java  \\.java$
     Rust  \\.rs$
 
-Measured over 188 bare clones, that selected 545,957 files where a universal mask
-selects 570,201 — 63 projects gain files, 125 gain nothing, and none lose a file.
-`data/mask-impact.csv` is the authority on this split; it carries one row per
-project, so the counts above are derived from it rather than maintained by hand. The dataset is a tokenized set of projects, not a set of language
-exemplars, so a polyglot project's C++ must not be dropped because GitHub calls
-it a Java project. A union mask selects nothing a project does not have, so there
-is nothing left for a per-project mask to do.
+The mask used to be chosen per language. A universal mask is a provable
+superset: it selects every file a per-language mask selected, and never fewer.
+The dataset is a tokenized set of projects, not a set of language exemplars, so
+a polyglot project's C++ must not be dropped because GitHub calls it a Java
+project. A union mask selects nothing a project does not have, so there is
+nothing left for a per-project mask to do.
 
 THE OTHER COPY OF THIS LIST lives in the tokenizer's own repository, at
 cregit-issue61/tokenize/CregitLanguages.pm, which is the authority: it is what
 routes an extension to a parser, and this list only has to agree with it.
 tests/test_mask_drift.py compares the two by running `perl tokenize/fileMask.pl`
-in the configured checkout, the same way tests/test_meta_field_drift.py compares
-the metadata field lists. Two repositories cannot share one file; they can be
+in the configured checkout. Two repositories cannot share one file; they can be
 held equal by a test.
 
 Not here, deliberately:
@@ -36,17 +34,17 @@ Not here, deliberately:
   .am .ac   routed to m4Tokenizer/m4.py, which is not fit for real autotools
             input: its lexer's end_quote is a backtick rather than an apostrophe,
             so `x' swallows text to the next backtick, and 2 of 38 real
-            configure.ac/Makefile.am files on this machine die outright. (It was
-            also Python 2 and did not run at all until 2026-09-19.) 1.4 MB in 22
-            projects, deferred until the lexer is fixed.
+            configure.ac/Makefile.am files die outright. (It was also Python 2
+            and did not run at all.) 1.4 MB in 22 projects, deferred until the
+            lexer is fixed.
   .go .md   cregit-issue61's tokenBySha.pl used to map these to Go/Markdown/Yaml
   .yaml     while tokenize.pl had no parser for any of them, so such a blob
             passed the first gate and died at the second. The entries are gone.
   .ixx .inl srcML 1.1.0 does not know these extensions and then ignores
   .cppm     `-l C++`: it emits an XML declaration with no <unit> and exits 0, so
   .cxxm     the chain writes an EMPTY token file and reports success. Probed one
-  .ipp      by one on 2026-09-19; .hxx and .tcc passed and are in, these five
-            failed and are out.
+  .ipp      by one; .hxx and .tcc passed and are in, these five failed and are
+            out.
 """
 from __future__ import annotations
 
@@ -66,10 +64,10 @@ TOKENIZABLE_EXTENSIONS: tuple[str, ...] = (
     "h++",      # C++
     "hh",
     "hpp",
-    "hxx",      # verified against srcML 1.1.0, 2026-09-19
+    "hxx",      # verified against srcML 1.1.0
     "java",
     "rs",       # Rust
-    "tcc",      # verified against srcML 1.1.0, 2026-09-19
+    "tcc",      # verified against srcML 1.1.0
 )
 
 # The languages those extensions belong to. Provenance for a reader of this file;
