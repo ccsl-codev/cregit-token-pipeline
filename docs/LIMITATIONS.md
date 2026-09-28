@@ -103,7 +103,7 @@ schema were identical in every case, so the difference is attribution alone:
 | project | tokens | author changed | firm changed | top-1 author |
 | --- | ---: | ---: | ---: | --- |
 | `citusdata__citus` | 947,699 | **25.011%** | 14.942% | unchanged |
-| `dpdk__dpdk` | 15,200,540 | **16.576%** | 6.253% | **changed** |
+| `dpdk__dpdk` | 15,200,540 | **16.576%** | 6.253% | unchanged |
 | `open-mpi__ompi` | 2,580,411 | 12.981% | 8.039% | unchanged |
 | `kamailio__kamailio` | 5,276,523 | 12.809% | 7.641% | unchanged |
 | `dolphin-emu__dolphin` | 5,758,507 | 10.877% | 3.080% | unchanged |
@@ -115,10 +115,10 @@ So between **0% and 25%** of a project's tokens change author, and a project's
 single largest author can change. `buchen__portfolio` moved from Alexander Ott to
 Andreas Buchen.
 
-**The correction introduces a new defect: a corporate address can win an author
-ranking.** `dpdk__dpdk`'s top-1 author became **`intel at intel.com`**, which is not
-a person. Copy detection promoted it. Any per-author result over the corrected data
-needs an identity-hygiene pass first. Related: the vendoring artefact above.
+**A corporate address can win an author ranking.** `dpdk__dpdk`'s top-1 author is
+**`intel at intel.com`** before and after the re-blame (494k, then 691k tokens). It is
+not a person. The re-blame did not cause this; the defect was already in the data. Any
+per-author result needs an identity-hygiene pass first. Related: the vendoring artefact above.
 
 **Earlier line-level exposure figures in this file were wrong and are withdrawn.**
 They were measured with `git blame -C -C`, not the `-C100` the pipeline runs. Under

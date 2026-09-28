@@ -214,14 +214,14 @@ old against new on `(file_path, token_index)`:
 
 * **0% to 25% of a project's tokens change author.** Row counts and schema are
   identical in every case measured, so the difference is attribution alone.
-* **A project's single largest author can change.** It did for `dpdk__dpdk` and for
-  `buchen__portfolio`.
+* **A project's single largest author can change.** It did for `buchen__portfolio`.
+  It did not for `dpdk__dpdk`.
 * **Firm attribution moves less than author attribution**, 0% to 15%, because many
   moves stay inside one organisation.
 
-**The correction introduces one new defect.** `dpdk__dpdk`'s top-1 author became
-`intel at intel.com`, a corporate address rather than a person. An identity-hygiene
-pass is needed before any per-author result is published from the corrected data.
+**An existing defect stays.** `dpdk__dpdk`'s top-1 author is `intel at intel.com`
+before and after the re-blame. It is a corporate address, not a person. An
+identity-hygiene pass is needed before any per-author result is published.
 
 ## 8. How to run it
 
