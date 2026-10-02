@@ -272,6 +272,86 @@ reading, rather than un-shifting a field.
   re-run of the Rust-bearing projects produces a comparable file.
 * Anyone grouping on `token_type` or filtering on `is_structural` without this
   gets silently wrong answers for all of Rust.
+* **Corpus-wide magnitude, measured 2026-10-02:** **42,147,426** tokens (4.2% of
+  1,003,142,740) in **46** projects hold the `line:col<TAB>` prefix in
+  `token_type`. The published Parquets still carry it: `backfill_rust_tokens.py`
+  has not run on them. Example: `ankitects__anki`, 528,676 of 529,083 `.rs` rows.
+  Per-project counts: `ellians-master/.../mojibake-census/data/token_type_prefixed.tsv`.
+
+**Every file that starts with a byte-order mark has wrong positions after the first
+token.** `generate_dataset.py:302` opens the source with `encoding="utf-8"`, not
+`"utf-8-sig"`. So the byte-order mark (BOM, U+FEFF) stays in the text as one
+character, but the tokenizer drops it. The source cursor therefore runs one
+character ahead, from the first token to the end of the file.
+
+| | files | tokens | projects |
+| --- | ---: | ---: | ---: |
+| files that start with a BOM, measured 2026-10-02 | 579 | 811,391 | 25 |
+
+`zlmediakit__zlmediakit` holds most of it: 419 of its 444 files start with a BOM,
+460,325 tokens. In those files, **0.0%** of name and literal rows have a
+`source_text` that starts with the token itself, against 16.2% in the project's
+other files. Example, `3rdpart/assert.h`: the `#` of `#ifndef` is stored at line 9,
+column 3, with `source_text` `'/\n\n'`.
+
+* **Detect**: a file whose first content row has `source_text` that starts with
+  `chr(65279)`.
+* **Affected columns**: `source_line`, `source_col`, `source_text`. `token_value`,
+  `token_type` and the attribution columns are correct.
+* **Work around**: none in the Parquet. Re-run step 10 with the source opened as
+  `utf-8-sig`. That needs no re-tokenization and no re-blame.
+* Per-project counts: `ellians-master/.../mojibake-census/data/bom_per_project.tsv`.
+
+**Non-ASCII text in C, C++ and Java tokens is double-encoded (mojibake).** The
+prebuilt srcML 1.1.0 binary that tokenized the corpus reads UTF-8 bytes as
+Latin-1. So the source text `Högskolan` becomes the token text `HÃ¶gskolan`. This
+is not the parser warning only: the stored text is wrong. Rust files are not
+affected, because their tokenizer writes correct UTF-8.
+
+| | all 197 projects | the 139 re-blamed projects |
+| --- | ---: | ---: |
+| projects with at least one bad token | 144 | 116 |
+| tokens with wrong text | 424,866 (0.042%) | 91,084 (0.012%) |
+| files with at least one bad token | 22,613 (4.36%) | 13,852 (3.71%) |
+| tokens with **wrong positions** | **61,720,850 (6.15%)** | **33,210,328 (4.40%)** |
+
+The wrong text is rare, but each bad character also moves the source cursor one to
+three characters ahead. So every later token in the file gets a wrong
+`source_line`, `source_col` and `source_text`, up to the end of the file. That is
+why the position count is 145 times the text count. One project,
+`oceanbase__oceanbase`, holds 300,362 of the 424,866 tokens with wrong text (71%).
+The bad tokens are string literals (75.2%) and comments (24.7%). Only 400 are
+identifiers (0.09%).
+
+The rule is exact. On `jq`, the regular expression `[\x{C2}-\x{F4}][\x{80}-\x{BF}]`
+matches exactly the 41 tokenized blobs with a non-ASCII byte, with no miss and no
+extra. Over the corpus, 29 matches are false positives: the repository itself holds
+mojibake there (22 in `fastled__fastled` files with a BOM, 7 in Rust files).
+
+* **Detect**: `regexp_matches(token_value, '[\x{C2}-\x{F4}][\x{80}-\x{BF}]')` for
+  the text. For the positions, every row after the first such token in the same
+  `file_path`.
+* **Affected columns**: `token_value` on the matched rows. `source_line`,
+  `source_col` and `source_text` on every later row of the file. Attribution
+  should not change, because the repair maps each line one to one. This is not
+  tested: copy detection weighs bytes, so a score near its threshold can move.
+* **Work around, text only**: `token_value.encode("latin-1").decode("utf-8")`
+  repairs 424,845 of the 424,866 tokens. The 21 failures are 12 tokens with
+  characters above U+00FF and 9 from sources that are not UTF-8. This does not fix
+  the positions.
+* **Work around, text and positions**: repair the token text inside step 10,
+  before the source walk, and skip `.rs` files, files with a BOM, and files that
+  are not strict UTF-8. A replay of the step 10 reader on 80 files from 69 projects
+  gave correct text and positions for every token outside `.rs` files, and 290,969
+  mismatch warnings fell to 0. Over the corpus, 424,821 tokens pass the skip rule and all repair
+  cleanly. `ctp.py run --from-step 10` re-uses the blame on disk, so it needs no
+  re-blame. This repair is measured, but not yet run on a published Parquet.
+* **The cause is gone on `master`.** cregit PR #93 builds srcML from source
+  (revision `8a3a629d`), and that build writes correct UTF-8. So a run from
+  `master` does not reproduce the published tokens, and it changes every file with a
+  non-ASCII byte.
+* Method, scripts and per-project counts:
+  `ellians-master/.../sep-25-presentation/mojibake-census/`.
 
 **Publishing the Parquet as it stands publishes contributors' e-mail addresses.**
 `person_email` (column 50) is a real address. `anonymize_parquet.py` is the
