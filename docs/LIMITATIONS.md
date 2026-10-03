@@ -213,6 +213,14 @@ more masked symlinks and gitlinks and one real gap.
 
 ---
 
+**Status, 2026-10-03: fixed in the Parquets, except the attribution (next entry).**
+cregit PR #97 (`759f8be`) removes the prefix in step 10, before the source walk, and
+`ctp.py run --from-step 10` rebuilt the 45 corpus projects with Rust files on
+2026-10-03. It removed **42,132,664** prefixes; that count also holds the `-:-`
+unit-marker rows. The text below describes the Parquets before that rerun.
+`backfill_rust_tokens.py` is no longer needed for them. The pilot `rustlings`,
+outside the corpus, was not rebuilt.
+
 **On every `.rs` row, four columns are wrong.** Two faults in the Rust tokenizer
 combine. First, it separates a token's position from its type with a **tab**, while
 `generate_dataset.py:243` splits on a **pipe**. Second, it discarded the
@@ -274,9 +282,38 @@ reading, rather than un-shifting a field.
   gets silently wrong answers for all of Rust.
 * **Corpus-wide magnitude, measured 2026-10-02:** **42,147,426** tokens (4.2% of
   1,003,142,740) in **46** projects hold the `line:col<TAB>` prefix in
-  `token_type`. The published Parquets still carry it: `backfill_rust_tokens.py`
-  has not run on them. Example: `ankitects__anki`, 528,676 of 529,083 `.rs` rows.
-  Per-project counts: `ellians-master/.../mojibake-census/data/token_type_prefixed.tsv`.
+  `token_type` in the Parquets before the 2026-10-03 rerun. Example:
+  `ankitects__anki`, 528,676 of 529,083 `.rs` rows. Per-project counts:
+  `ellians-master/.../mojibake-census/data/token_type_prefixed.tsv`.
+
+**The author of a `.rs` token is often the commit that moved it, not the commit that
+wrote it.** This is open, and the step-10 rerun does not fix it. The 45 corpus
+projects with Rust files were tokenized before cregit `729643e` (2026-09-20), which
+removed the prefix from the tokenizer. So the tokenized file that `git blame` reads
+holds the `line:col` of every token. An edit above a token changes its line number,
+so its token line changes, and blame credits the commit that made the edit. The
+current tokenizer binary writes no prefix.
+
+| commit in `intel__tsffs` `simics-fuzz/src/fuzzer/mod.rs` | source lines | token lines |
+| --- | ---: | ---: |
+| `0477d35` | +13 / -3 | +3,420 / -3,336 |
+| `0d618e6` | +5 / -4 | +3,408 / -3,394 |
+| `b5badd4` | +39 / -10 | +5,058 / -4,901 |
+
+* **Affected columns**: the commit, person and firm columns of the `.rs` rows in the
+  45 projects (42.1 M tokens). Rows of other files in those projects are correct.
+* **Detect**: `file_path LIKE '%.rs'` in a project with a row in
+  `token_type_prefixed.tsv`. For one commit, compare the numstat of the tokenized
+  repository with the numstat of the original (`commitmap` in `<name>-cregit.db`).
+* **Work around**: none in the Parquet. Re-tokenize the `.rs` files with the current
+  binary: `ctp.py run --from-step 2 --retokenize rs`. That refolds the project and
+  blames it again. None of the 45 projects has the copy-detection re-blame yet, so
+  this run also gives them `-C100`.
+
+**Status, 2026-10-03: fixed.** cregit PR #97 reads the source as `utf-8-sig`, and
+the step-10 rerun of 2026-10-03 rebuilt the 25 projects: **587** files with a BOM.
+The census below counted 579. The text below describes the Parquets before that
+rerun.
 
 **Every file that starts with a byte-order mark has wrong positions after the first
 token.** `generate_dataset.py:302` opens the source with `encoding="utf-8"`, not
@@ -298,9 +335,17 @@ column 3, with `source_text` `'/\n\n'`.
   `chr(65279)`.
 * **Affected columns**: `source_line`, `source_col`, `source_text`. `token_value`,
   `token_type` and the attribution columns are correct.
-* **Work around**: none in the Parquet. Re-run step 10 with the source opened as
-  `utf-8-sig`. That needs no re-tokenization and no re-blame.
+* **Work around**: none in a Parquet from before 2026-10-03. Re-run step 10 with
+  cregit PR #97. That needs no re-tokenization and no re-blame.
 * Per-project counts: `ellians-master/.../mojibake-census/data/bom_per_project.tsv`.
+
+**Status, 2026-10-03: fixed in the 165 corpus projects.** cregit PR #97 repairs the
+token text in step 10, before the source walk, with the skip rule below, and the
+step-10 rerun of 2026-10-03 rebuilt the 136 affected projects of the 165. It
+repaired **422,789** tokens. The census below counts 422,806 tokens that pass the
+skip rule in those 165 projects. The census also covers 9 pilot and backup folders
+outside the corpus, which were not rebuilt. The text below describes the Parquets
+before that rerun.
 
 **Non-ASCII text in C, C++ and Java tokens is double-encoded (mojibake).** The
 prebuilt srcML 1.1.0 binary that tokenized the corpus reads UTF-8 bytes as
@@ -345,7 +390,8 @@ mojibake there (22 in `fastled__fastled` files with a BOM, 7 in Rust files).
   gave correct text and positions for every token outside `.rs` files, and 290,969
   mismatch warnings fell to 0. Over the corpus, 424,821 tokens pass the skip rule and all repair
   cleanly. `ctp.py run --from-step 10` re-uses the blame on disk, so it needs no
-  re-blame. This repair is measured, but not yet run on a published Parquet.
+  re-blame. cregit PR #97 implements this repair, and it ran on 2026-10-03 (see the
+  status above).
 * **The cause is gone on `master`.** cregit PR #93 builds srcML from source
   (revision `8a3a629d`), and that build writes correct UTF-8. So a run from
   `master` does not reproduce the published tokens, and it changes every file with a
