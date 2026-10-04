@@ -1,62 +1,7 @@
 #!/usr/bin/env python3
-"""Build ctp.duckdb: project tracking table + unified token view.
-
-    ./consolidate.py                                    # manifest.tsv (default)
-    ./consolidate.py --manifest a.tsv --manifest b.tsv  # repeatable
-
-Derived index, NOT authority — ground truth stays the manifests + validated
-stamps + metrics.tsv. Safe to rerun any time. Run inside devenv (needs duckdb).
-
-WHICH MANIFESTS. manifest.tsv is the only manifest this repository carries: 4
-small public pilot projects (jq, zstd, libuv, tmux). It is the default when
---manifest is not given, so ctp.py's `db` command — which passes no arguments —
-always has something to describe. A relative --manifest resolves against this
-repo, not the caller's cwd, because ctp.py runs this script from the cregit
-directory. A project named by two manifests is indexed once, from the first
-manifest that names it.
-
-SCHEMA GATE. read_parquet([...]) binds one schema for the whole list, so a
-single file at the old 23 or 38 columns aborts the tokens view for every
-project. The view is therefore built only from parquets whose schema matches the
-current dataset contract, and the contract is validate_schema.EXPECTED_COLUMNS
-rather than a column count repeated here. Every file left out is named and
-counted in the printed summary: a silent exclusion is worse than the crash it
-replaces, because the row count then looks plausible.
-
-A parquet whose schema cannot be read at all is a different defect — that is
-validate.py's gate, not this one — and it cannot be shown to disagree with the
-contract, so it is reported on stderr and left in the list. Dropping it would be
-exactly the silent exclusion above.
-
-state = 'DONE' means the pipeline finished for that project. It does NOT mean
-the data is present. A DONE project whose parquet is gone keeps a null
-parquet_path and stays out of the tokens view, which is right for a data view
-but leaves the index disagreeing with itself. Such a project is therefore
-flagged parquet_missing = true, counted, and named in the printed summary, so
-`select name from projects where parquet_missing` finds it.
-
-PUBLICATION EXCLUSIONS. A project can be validly drawn, run, and validated, and
-still not belong in the published dataset: two near-duplicate forks would count
-the same authorship twice. Deleting the manifest row would hide the decision and break the sampling record,
-so the row stays and the project is named in PUBLICATION_EXCLUSIONS with its
-reason. The effect is the schema gate's: the parquet is left out of the tokens
-view, the project keeps its row in `projects`, and the reason is recorded in
-`excluded_because` and printed. `select name, excluded_because from projects
-where excluded_because is not null` is the audit query.
-
-PUBLICATION_EXCLUSIONS ships empty: this repository's own manifest names no
-project that needs excluding. A deployer running a larger corpus adds entries
-for their own near-duplicate or otherwise unpublishable projects.
-
-One unusable stamp never aborts the rebuild. A stamp whose rows= value is not
-an integer leaves token_rows null, is flagged rows_unreadable = true, is
-reported by name and by value, and makes the exit status non-zero once every
-other project is indexed.
-
-Exit status:
-  0  index rebuilt, every stamp readable
-  1  index rebuilt, but at least one stamp was malformed (see the summary)
-"""
+"""Build ctp.duckdb, a derived index over the manifests, stamps and metrics.tsv; rerunnable.
+Usage: consolidate.py [--manifest PATH]... (default manifest.tsv). The tokens view takes
+only parquets that match EXPECTED_COLUMNS. Exit 1 when a stamp's rows= is unreadable."""
 from __future__ import annotations
 
 import argparse
@@ -78,7 +23,6 @@ OUT = (CORPUS / Path(_cfg.get("paths", "output_dir",
        fallback="../cregit-workspace/corpus-files")).expanduser()).resolve()
 DB = CORPUS / "ctp.duckdb"
 
-# The one manifest this repository carries, and therefore the default run set.
 DEFAULT_MANIFEST = "manifest.tsv"
 
 PROJECTS_DDL = (
@@ -91,14 +35,8 @@ PROJECTS_INSERT = "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 @dataclass
 class ProjectRow:
-    """One project, shaped like the `projects` table, by name rather than by
-    position — so a reader never has to count columns to know what a field
-    means, and inserting one does not silently shift every other reader.
-
-    as_tuple() exists for the one place that still needs positions:
-    con.executemany(PROJECTS_INSERT, ...) takes a plain sequence per row, in
-    PROJECTS_DDL's column order — the order these fields are declared in.
-    """
+    """One `projects` row by name. Fields are declared in PROJECTS_DDL column order,
+    which as_tuple() relies on for executemany."""
     name: str
     url: str
     category: str
@@ -114,58 +52,35 @@ class ProjectRow:
         return astuple(self)
 
     def __getitem__(self, index: int):
-        """Positional access, kept only for callers written against the row's
-        pre-dataclass tuple shape."""
+        """Positional access, for callers written against the old tuple shape."""
         return self.as_tuple()[index]
 
 
-# Projects run and validated, but deliberately not published. Name -> reason.
-# See PUBLICATION EXCLUSIONS in the module docstring. Empty by default: this
-# repository's own manifest carries no project that needs excluding. A
-# deployer adds their own entries here, one per project, recording the
-# measurement behind each reason.
+# Validated but deliberately not published (e.g. a near-duplicate fork): name -> reason.
+# The row stays in `projects` with excluded_because; the parquet stays out of the view.
+# Ships empty; a deployer adds their own entries.
 PUBLICATION_EXCLUSIONS: dict[str, str] = {}
 
 
 def sql_literal(path: str) -> str:
-    """Quote `path` as a DuckDB string literal, doubling embedded quotes.
-
-    A view definition cannot take bound parameters, so the tokens view has to
-    interpolate its file list. Doubling the quotes keeps the literal balanced,
-    so a project name holding a quote can neither break the SQL nor inject it.
-    """
+    """A view cannot take bound parameters, so the file list is interpolated; doubling
+    quotes keeps a project name holding a quote from breaking or injecting SQL."""
     return "'" + str(path).replace("'", "''") + "'"
 
 
 def resolve_manifest(value: str) -> Path:
-    """One --manifest value as a path.
-
-    A relative value is resolved against this repo, never against the cwd,
-    because ctp.py runs this script with cwd set to the cregit directory.
-    """
+    """Relative to this repo, not the cwd: ctp.py runs this script from the cregit dir."""
     path = Path(value).expanduser()
     return path if path.is_absolute() else CORPUS / path
 
 
 def default_manifests() -> list[Path]:
-    """The manifest indexed when --manifest is not given: DEFAULT_MANIFEST."""
     return [CORPUS / DEFAULT_MANIFEST]
 
 
 def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
-    """One ProjectRow per manifest line. See ProjectRow for the fields.
-
-    `manifests` is the list to index, so a caller — main(), or a test — decides
-    which manifests are ground truth instead of this function deciding for it.
-    None means default_manifests().
-
-    A project named by two manifests is indexed once, from the first manifest
-    that names it, and the repeat is named on stderr.
-
-    The two flags carry the two ways a project can disagree with itself. Both
-    are reported rather than raised, because one broken project must not cost
-    the index for all the others.
-    """
+    """None means default_manifests(). A project named twice is indexed once, from the
+    first manifest. Broken projects are flagged, not raised, so the rest stay indexed."""
     if manifests is None:
         manifests = default_manifests()
     rows = []
@@ -195,8 +110,6 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
                 try:
                     n_rows = int(raw)
                 except ValueError:
-                    # Report and carry on: the rest of the corpus must not lose
-                    # its index because one stamp says rows=many.
                     print(f"  ! {name}: stamp rows={raw!r} is not an integer, "
                           "token_rows left null", file=sys.stderr)
                     rows_unreadable = True
@@ -212,22 +125,9 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
 
 
 def schema_split(paths: Sequence[str]) -> tuple[list[str], list, list]:
-    """Split validated parquets by whether they match the dataset contract.
-
-    Returns (usable, drifted, unread):
-
-      usable   goes into read_parquet([...])
-      drifted  (path, n_columns, drifts) — schema disagrees with the contract,
-               so the file is left out. One of these in the list would abort the
-               whole view, which is how 4 legacy 23-column files used to poison
-               it.
-      unread   (path, reason) — the schema could not be read at all. Such a file
-               cannot be shown to disagree, so it stays in `usable` and is
-               reported instead of dropped.
-
-    The contract is validate_schema.EXPECTED_COLUMNS, so this gate follows a
-    schema widening automatically instead of pinning a column count.
-    """
+    """(usable, drifted, unread). read_parquet([...]) binds one schema, so one drifted
+    file would abort the whole view: it is left out. An unreadable file cannot be shown
+    to drift, so it stays usable and is reported."""
     usable, drifted, unread = [], [], []
     for path in paths:
         try:
@@ -267,8 +167,6 @@ def main(argv: Sequence[str] = ()) -> None:
     con.execute(f"""create or replace table phase_metrics as
         select * from read_csv('{CORPUS / 'metrics.tsv'}', delim='\t', header=true)""")
 
-    # A deliberate publication exclusion keeps its projects row but
-    # contributes no tokens.
     validated = [p.parquet_path for p in projects
                  if p.state == "DONE" and p.parquet_path and not p.excluded_because]
     usable, drifted, unread = schema_split(validated)
