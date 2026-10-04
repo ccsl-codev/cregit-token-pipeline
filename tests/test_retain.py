@@ -1410,20 +1410,6 @@ def test_a_whole_corpus_sweep_skips_the_live_project_and_prunes_the_rest(
     assert "left untouched: linux" in capsys.readouterr().out
 
 
-def test_lock_path_agrees_with_ctp(out):
-    """One spelling of the lock, in two files. retain.py cannot import ctp.py --
-    ctp.py imports retain -- so the path is duplicated, and a silent drift would
-    make retain look for locks where there are none and call every project idle.
-    Imported here, where a cycle does not matter, to pin the two together."""
-    import ctp  # noqa: PLC0415 - deliberately local, see the docstring
-
-    assert REAL_STATE == ctp.STATE
-    # retain.STATE is patched to tmp_path by the fixture; compare the shapes.
-    assert (retain.lock_path("jq").relative_to(retain.STATE)
-            == ctp.lock_path("jq").relative_to(ctp.STATE))
-    assert retain.lock_path("jq").relative_to(retain.STATE) == Path("jq/.lock")
-
-
 def test_live_is_not_fooled_by_a_lock_for_another_project(out):
     """The lock is per project. linux running says nothing about jq."""
     workdir = make_project(out, "jq")

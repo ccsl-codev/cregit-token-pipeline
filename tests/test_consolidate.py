@@ -43,6 +43,7 @@ if "duckdb" not in sys.modules:  # pragma: no cover - import plumbing
         sys.modules["duckdb"] = _stub
 
 import consolidate  # noqa: E402
+import retain  # noqa: E402
 
 DUCKDB_IS_STUBBED = getattr(sys.modules["duckdb"], "__doc__", "").startswith("Test stub")
 
@@ -131,10 +132,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(consolidate, "CORPUS", tmp_path)
     monkeypatch.setattr(consolidate, "OUT", out)
     monkeypatch.setattr(consolidate, "DB", tmp_path / "ctp.duckdb")
-    # STATE is derived from CORPUS at import, so patching CORPUS alone leaves it
-    # pointing at the real repo's state/ directory. A test that probes or creates
-    # a lock there would touch a live run's bookkeeping.
-    monkeypatch.setattr(consolidate, "STATE", tmp_path / "state")
+    monkeypatch.setattr(retain, "STATE", tmp_path / "state")
     return SimpleNamespace(root=tmp_path, out=out)
 
 
@@ -145,29 +143,6 @@ def con(monkeypatch):
     monkeypatch.setattr(consolidate.duckdb, "connect",
                         lambda path: fake, raising=False)
     return fake
-
-
-# --------------------------------------------------------------------------- #
-# lock_held
-# --------------------------------------------------------------------------- #
-
-def test_lock_held_is_false_without_a_lockfile(sandbox):
-    """A project that never started must read QUEUED, not RUNNING."""
-    assert consolidate.lock_held(sandbox.out / "jq" / ".lock") is False
-
-
-def test_lock_held_is_false_for_a_stale_lockfile(sandbox):
-    """A lockfile left behind by a killed run holds no flock."""
-    lockfile = make_project(sandbox.out, "jq") / ".lock"
-    lockfile.touch()
-    assert consolidate.lock_held(lockfile) is False
-
-
-def test_lock_held_is_true_while_another_process_holds_it(sandbox):
-    """The index must show a live tokenizer as RUNNING, never as FAILED."""
-    lockfile = make_project(sandbox.out, "jq") / ".lock"
-    with held_lock(lockfile):
-        assert consolidate.lock_held(lockfile) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -198,51 +173,20 @@ def test_project_rows_classifies_all_four_states(sandbox):
         "done\thttps://d.git\tcommunity\t\\.[ch]$\tS",
         "running\thttps://r.git\tcommunity\t\\.[ch]$\tM",
         "failed\thttps://f.git\tenterprise\t\\.[ch]$\tL",
+        "wiped\thttps://w.git\tenterprise\t\\.[ch]$\tL",
         "queued\thttps://q.git\tcommunity\t\\.[ch]$\tS")
     make_project(sandbox.out, "done", stamp="rows=7\nbytes=8\n", parquet=True)
     make_project(sandbox.out, "failed")
     make_project(sandbox.out, "running")
-    # The lock lives in ctp.py's state directory, NOT in the work directory.
-    # This test used to create it inside the workdir, which made it agree with
-    # the bug it was supposed to catch: consolidate.py probed the same wrong
-    # path, so RUNNING never fired against a real run.
-    lockdir = consolidate.STATE / "running"
-    lockdir.mkdir(parents=True, exist_ok=True)
+    # The runner deleted this workdir on failure; only ctp's state dir is left.
+    retain.state_dir("wiped").mkdir(parents=True)
+    retain.state_dir("running").mkdir(parents=True)
 
-    with held_lock(lockdir / ".lock"):
+    with held_lock(retain.lock_path("running")):
         states = {r[0]: r[4] for r in consolidate.project_rows()}
 
-    assert states == dict(done="DONE", running="RUNNING",
-                          failed="FAILED", queued="QUEUED")
-
-
-def test_the_liveness_probe_never_writes_to_the_lock_file(sandbox):
-    """A probe must not modify what it observes.
-
-    `lock_held` used to open the lock "w", which truncates. Rebuilding the index
-    therefore truncated the lock file of a RUNNING job. It was harmless only
-    because nothing writes content to that file — a latent bug, not a safe design.
-    """
-    lockdir = consolidate.STATE / "proj"
-    lockdir.mkdir(parents=True, exist_ok=True)
-    lockfile = lockdir / ".lock"
-    lockfile.write_text("sentinel content\n")
-
-    assert consolidate.lock_held(lockfile) is False, "nobody holds it"
-    assert lockfile.read_text() == "sentinel content\n", "the probe truncated it"
-
-
-def test_an_unreadable_lock_file_counts_as_held(sandbox):
-    """Refusing to guess is the safe answer to 'is a run in flight'."""
-    lockdir = consolidate.STATE / "proj"
-    lockdir.mkdir(parents=True, exist_ok=True)
-    lockfile = lockdir / ".lock"
-    lockfile.write_text("")
-    lockfile.chmod(0o000)
-    try:
-        assert consolidate.lock_held(lockfile) is True
-    finally:
-        lockfile.chmod(0o600)
+    assert states == dict(done="DONE", running="RUNNING", failed="FAILED",
+                          wiped="FAILED", queued="QUEUED")
 
 
 def test_project_rows_ignores_a_stale_lock_left_in_the_work_directory(sandbox):

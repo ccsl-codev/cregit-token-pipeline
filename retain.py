@@ -97,17 +97,8 @@ def _cfg_path(key: str, default: str) -> Path:
 
 OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
 
-# ctp.py's state directory, mirrored here. ctp.py defines STATE = CORPUS /
-# "state" and the per-project lock as state_dir(name) / ".lock"; both scripts
-# compute CORPUS as Path(__file__).resolve().parent from this same directory, so
-# the two agree. Spelled out rather than imported: ctp.py already imports retain,
-# and importing it back would be a cycle that drags the whole orchestrator in to
-# read one constant.
-#
-# Not configurable, because ctp.py does not make it configurable. If STATE ever
-# moves into pipeline.cfg, it must move in both files at once — a stale copy here
-# would silently look for locks where there are none and report every project
-# idle, which is the failure this guard exists to prevent.
+# ctp.py's per-project logs and lock. Outside OUT, because the runner deletes
+# OUT/<name> at FROM_STEP=1 and on failure. ctp.py and consolidate.py import these.
 STATE = CORPUS / "state"
 
 # The only subtrees this script may remove, relative to a project workdir.
@@ -231,19 +222,13 @@ def check_name(name: str) -> None:
         raise ValueError(f"{name!r} is not one plain project name")
 
 
+def state_dir(name: str) -> Path:
+    return STATE / name
+
+
 def lock_path(name: str) -> Path:
-    """ctp.py's single-instance lock for one project.
-
-    Spelled exactly as ctp.py spells it — state_dir(name) / ".lock", where
-    state_dir is STATE / name. Deliberately outside the workdir: the runner
-    deletes the workdir at FROM_STEP=1 and again from its EXIT trap, so a lock
-    kept inside it would vanish with it and every run would look idle.
-
-    Call this only with a name check_name() has passed. STATE / "../x" escapes
-    STATE exactly the way OUT / "../x" escapes OUT, and a lookup outside STATE
-    would answer the wrong question.
-    """
-    return STATE / name / ".lock"
+    """Call only with a name check_name() has passed: STATE / "../x" escapes STATE."""
+    return state_dir(name) / ".lock"
 
 
 def _held_by_this_process(lockfile: Path) -> bool:
@@ -283,34 +268,15 @@ def _held_by_this_process(lockfile: Path) -> bool:
 
 
 def lock_held(lockfile: Path) -> bool:
-    """True when an flock on lockfile cannot be taken, i.e. someone holds it.
-
-    This is the third copy of this predicate in the repo: ctp.py's _lock_held and
-    consolidate.py's lock_held are the other two. Duplicated deliberately.
-    consolidate.py imports duckdb at module scope and duckdb comes from the devenv
-    shell, not from .venv, so `import consolidate` would make retain.py
-    unimportable outside devenv — and retain.py is stdlib-only on purpose, because
-    it is what `ctp.py run --drop-memo` calls on every project. Eight lines of
-    stdlib are the cheaper of the two dependencies. Keep the three in step.
-
-    Two deliberate differences from those two copies:
-
-      * opened "r", not "w". flock ignores the open mode on Linux, while "w"
-        truncates the very file it is inspecting; this script never writes
-        anything under state/.
-      * a lock file that exists but cannot be opened counts as HELD. The question
-        being asked is "is it safe to delete this", and the safe answer to "I
-        cannot tell" is no.
-
-    The probe takes the lock for the microseconds before it releases it, so a run
-    starting in that window sees BlockingIOError and defers the project — one
-    deferred project, no data lost. Both other copies have the same window.
-    """
+    """True when an flock on lockfile cannot be taken. Opened "r", because "w"
+    truncates the file it probes. An unreadable lock counts as held: the safe
+    answer to "is it safe to delete this" when we cannot tell is no."""
     if not lockfile.exists():
         return False
     try:
         with lockfile.open("r") as f:
             try:
+                # A run starting in this instant defers once; no data is lost.
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return True
@@ -318,6 +284,18 @@ def lock_held(lockfile: Path) -> bool:
             return False
     except OSError:
         return True
+
+
+def project_state(name: str, workdir: Path) -> str:
+    """DONE, RUNNING, FAILED or QUEUED. state_dir is checked as well as workdir,
+    because the runner deletes the workdir when the pipeline fails."""
+    if (workdir / f"{name}.validated").exists():
+        return "DONE"
+    if lock_held(lock_path(name)):
+        return "RUNNING"
+    if state_dir(name).exists() or workdir.exists():
+        return "FAILED"
+    return "QUEUED"
 
 
 def live(name: str) -> bool:

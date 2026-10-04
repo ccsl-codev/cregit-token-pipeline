@@ -28,7 +28,7 @@ Benchmarking/visibility contract (shared with the previous shell runner):
   - logs are never overwritten: state/<name>/logs/<phase>-<ts>.log
     (<phase>-latest.log symlink points at the newest attempt). They live beside
     metrics.tsv, NOT in the project workdir, because run_pipeline_process.sh
-    deletes that workdir on a clean restart. See STATE below.
+    deletes that workdir on a clean restart. See retain.STATE.
   - live progress: event lines on phase start/end + heartbeat summary every
     30s (RUNNING projects with elapsed time, done/failed counts, disk free)
 """
@@ -53,7 +53,8 @@ from pathlib import Path
 
 import configparser
 
-import retain  # shared prune code path for --drop-memo
+import retain
+from retain import lock_path, state_dir
 from file_mask import UNIVERSAL_MASK
 
 # .resolve() canonicalizes to /local/home form — blobExec's meta table refuses
@@ -77,19 +78,6 @@ OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
 METRICS = CORPUS / "metrics.tsv"
 RUNS_LOG = CORPUS / "runs.log"
 
-# run_pipeline_process.sh owns OUT/<name>: at FROM_STEP=1 it runs `rm -rf "$WORK"`
-# for a clean restart, and its EXIT trap repeats that on failure. So the
-# orchestrator must keep its own files somewhere else. Two things used to live in
-# the wiped directory and both broke silently:
-#   * logs/ — deleted while the pipeline was still writing into it, so the log of
-#     the failure went to an unlinked inode and the evidence was lost.
-#   * .lock — the open handle survived, so THIS process kept its flock, but a
-#     second ctp.py created a new file and took its own lock. The
-#     single-instance guard passed while guarding nothing.
-# STATE sits beside metrics.tsv and runs.log, the other orchestrator artefacts.
-# Keeping it out of OUT also preserves retain.py's invariant that every child of
-# OUT is a project workdir (retain.check_target relies on that depth).
-STATE = CORPUS / "state"
 
 DEVENV = Path.home() / ".nix-profile/bin/devenv"
 # devenv needs the nix daemon env; a bare PATH prepend fails in non-login
@@ -423,23 +411,6 @@ class ResourceSampler:
         return busy, total
 
 
-def state_dir(name: str) -> Path:
-    """The orchestrator's own directory for one project: logs and the lock.
-
-    Never inside the project workdir. run_pipeline_process.sh deletes the workdir
-    at FROM_STEP=1 and again from its EXIT trap on failure. Its existence also
-    means "this project was attempted", which is how cmd_status tells FAILED from
-    QUEUED after such a wipe.
-    """
-    return STATE / name
-
-
-def lock_path(name: str) -> Path:
-    """The project's single-instance lock. run_project and cmd_status must build
-    this the same way, so neither may spell it out on its own."""
-    return state_dir(name) / ".lock"
-
-
 def shard_class(project: dict) -> bool:
     """True when this project should be tokenized in shards.
 
@@ -651,8 +622,6 @@ def run_project(project: dict) -> RunOutcome:
     workdir.mkdir(parents=True, exist_ok=True)
     state_dir(name).mkdir(parents=True, exist_ok=True)
 
-    # Single-instance guard per project (held for the whole job). Lives in STATE,
-    # not in workdir, because the runner deletes workdir out from under it.
     with lock_path(name).open("w") as lockfile:
         try:
             fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1092,20 +1061,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     return rc
 
 
-def project_state(name: str) -> str:
-    """DONE, RUNNING, FAILED or QUEUED for one project, from the filesystem."""
-    workdir = OUT / name
-    if (workdir / f"{name}.validated").exists():
-        return "DONE"
-    if _lock_held(lock_path(name)):
-        return "RUNNING"
-    # state_dir first: the runner deletes the workdir when the pipeline fails, so
-    # a workdir-only test would report a failed project QUEUED.
-    if state_dir(name).exists() or workdir.exists():
-        return "FAILED"
-    return "QUEUED"
-
-
 def cmd_status(args: argparse.Namespace) -> int:
     projects = read_manifest(CORPUS / args.manifest, None)
     last: dict = {}
@@ -1117,7 +1072,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"{'PROJECT':<16} {'CLASS':<6} {'STATE':<9} LAST_ACTIVITY")
     done = 0
     for p in projects:
-        state = project_state(p["name"])
+        state = retain.project_state(p["name"], OUT / p["name"])
         if state == "DONE":
             done += 1
         print(f"{p['name']:<16} {p['size_class']:<6} {state:<9} {last.get(p['name'], '—')}")
@@ -1125,31 +1080,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     free_gb = shutil.disk_usage(OUT).free // 2**30
     print(f"\nprogress: {done}/{len(projects)} validated | disk {free_gb}G free")
     return 0
-
-
-def _lock_held(lockfile: Path) -> bool:
-    """True when another process holds this project's flock.
-
-    Opened "r": a probe must not write to the thing it observes, and "w"
-    truncates on open, which would wipe a RUNNING job's lock file on every
-    `ctp.py status`. consolidate.py's lock_held carries the same predicate;
-    keep the two in step.
-
-    An unreadable lock file returns True: refusing to guess is the safe
-    answer when the question is "is a run in flight".
-    """
-    if not lockfile.exists():
-        return False
-    try:
-        f = lockfile.open("r")
-    except OSError:
-        return True
-    with f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return False
-        except BlockingIOError:
-            return True
 
 
 BAR_WIDTH = 30
@@ -1216,7 +1146,7 @@ def measured_rate(commits: dict) -> tuple[float, int] | None:
 def cmd_progress(args: argparse.Namespace) -> int:
     """A one-screen progress bar, the last finished projects, and an ETA."""
     projects = read_manifest(CORPUS / args.manifest, None)
-    states = {p["name"]: project_state(p["name"]) for p in projects}
+    states = {p["name"]: retain.project_state(p["name"], OUT / p["name"]) for p in projects}
     done = [p for p in projects if states[p["name"]] == "DONE"]
     running = [p for p in projects if states[p["name"]] == "RUNNING"]
     failed = [p for p in projects if states[p["name"]] == "FAILED"]

@@ -23,6 +23,7 @@ from types import SimpleNamespace
 import pytest
 
 import ctp
+import retain
 from file_mask import UNIVERSAL_MASK
 
 
@@ -184,10 +185,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(ctp, "METRICS", tmp_path / "metrics.tsv")
     monkeypatch.setattr(ctp, "RUNS_LOG", tmp_path / "runs.log")
     monkeypatch.setattr(ctp, "RESOURCES", tmp_path / "resources.tsv")
-    # STATE holds the logs and the per-project lock. Without this patch the tests
-    # would write both into the real repository. That is the stray-file class the
-    # absolute-stamp assertion in FakeRunner already closed once.
-    monkeypatch.setattr(ctp, "STATE", tmp_path / "state")
+    monkeypatch.setattr(retain, "STATE", tmp_path / "state")
     # A real disk_usage call stays, but the floor can never trip by accident.
     monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 0)
     monkeypatch.setattr(ctp.time, "sleep", lambda *a, **k: None)
@@ -924,8 +922,6 @@ def test_latest_symlink_is_created_on_the_first_attempt(
         sandbox, monkeypatch, clock, jq):
     """No prior symlink exists on a fresh project; the swap must still work."""
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
-    # run_project creates the workdir; run_phase no longer does it by accident,
-    # because the log directory moved out of the workdir. See STATE in ctp.py.
     (sandbox.out / "jq").mkdir()
     stamp = sandbox.out / "jq" / "jq.validated"
     ctp.run_phase(jq, "validate",
@@ -1143,7 +1139,7 @@ def test_heartbeat_returns_immediately_when_already_stopped():
 
 
 # --------------------------------------------------------------------------- #
-# cmd_status and _lock_held
+# cmd_status
 # --------------------------------------------------------------------------- #
 
 def test_cmd_status_classifies_every_project_state(sandbox, capsys):
@@ -1177,21 +1173,6 @@ def test_cmd_status_works_without_a_metrics_file(sandbox, capsys):
     write_manifest(sandbox.root, VALID_ROW)
     assert ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
     assert "—" in capsys.readouterr().out
-
-
-def test_lock_held_is_false_when_the_lockfile_is_absent(sandbox):
-    """A project that never started has no lock and must read QUEUED."""
-    assert ctp._lock_held(ctp.lock_path("nope")) is False
-
-
-def test_lock_held_distinguishes_a_free_lock_from_a_held_one(sandbox):
-    """A stale lockfile left by a killed run must not read as RUNNING."""
-    lockfile = ctp.lock_path("jq")
-    lockfile.parent.mkdir(parents=True)
-    lockfile.touch()
-    assert ctp._lock_held(lockfile) is False
-    with held_lock(lockfile):
-        assert ctp._lock_held(lockfile) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -2359,25 +2340,6 @@ def test_progress_survives_an_empty_manifest(sandbox, capsys):
     assert "0/0" in out
     assert "0.0%" in out
 
-
-def test_project_state_reports_each_of_the_four_states(sandbox):
-    """cmd_status and cmd_progress share this, so it is worth pinning directly."""
-    assert ctp.project_state("nothing") == "QUEUED"
-
-    (sandbox.out / "failed").mkdir()
-    assert ctp.project_state("failed") == "FAILED"
-
-    (sandbox.out / "done").mkdir()
-    (sandbox.out / "done" / "done.validated").write_text("rows=1\n")
-    assert ctp.project_state("done") == "DONE"
-
-    with held_lock(ctp.lock_path("busy")):
-        assert ctp.project_state("busy") == "RUNNING"
-
-
-# --------------------------------------------------------------------------- #
-# the universal mask, and the one-project override
-# --------------------------------------------------------------------------- #
 
 def test_a_blank_file_filter_column_falls_back_to_the_universal_mask(tmp_path):
     """An empty mask is not "no filter": blobExec rejects it, and anything that

@@ -63,7 +63,6 @@ from __future__ import annotations
 
 import argparse
 import configparser
-import fcntl
 import sys
 from collections.abc import Sequence
 from dataclasses import astuple, dataclass
@@ -71,6 +70,7 @@ from pathlib import Path
 
 import duckdb
 
+from retain import project_state
 from validate_schema import EXPECTED_COLUMNS, compare_schema, read_schema
 
 CORPUS = Path(__file__).resolve().parent
@@ -79,11 +79,6 @@ _cfg.read(CORPUS / "pipeline.cfg")
 OUT = (CORPUS / Path(_cfg.get("paths", "output_dir",
        fallback="../cregit-workspace/corpus-files")).expanduser()).resolve()
 DB = CORPUS / "ctp.duckdb"
-# ctp.py's own directory per project, holding the lock and the logs. It is
-# deliberately NOT inside the work directory, because run_pipeline_process.sh
-# deletes the work directory at FROM_STEP=1 and again from its EXIT trap, which
-# would take the lock with it. This must stay in step with ctp.py's state_dir().
-STATE = CORPUS / "state"
 
 # The one manifest this repository carries, and therefore the default run set.
 DEFAULT_MANIFEST = "manifest.tsv"
@@ -132,38 +127,6 @@ class ProjectRow:
 # deployer adds their own entries here, one per project, recording the
 # measurement behind each reason.
 PUBLICATION_EXCLUSIONS: dict[str, str] = {}
-
-
-def lock_held(lockfile: Path) -> bool:
-    """True when another process holds this project's flock.
-
-    Opened "r", not "w". A probe must not write to the thing it observes, and
-    "w" truncates on open — so this function used to truncate the lock file of a
-    RUNNING job every time the index was rebuilt. Harmless in practice only
-    because ctp.py also opens the lock "w" and never writes a byte to it, so
-    there was nothing to lose. flock works on a read-only descriptor.
-
-    `retain.py` and `ctp.py`'s `_lock_held` carry the same predicate, opened the
-    same "r" way, so all three now agree. Duplicated on purpose rather than
-    shared: retain.py is stdlib-only so `ctp.py run --drop-memo` can call it
-    without pulling in duckdb, and importing across the three would break that
-    independence to save eight lines.
-
-    An unreadable lock file returns True: refusing to guess is the safe answer
-    when the question is "is a run in flight".
-    """
-    if not lockfile.exists():
-        return False
-    try:
-        f = lockfile.open("r")
-    except OSError:
-        return True
-    with f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return False
-        except BlockingIOError:
-            return True
 
 
 def sql_literal(path: str) -> str:
@@ -224,14 +187,7 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
             stamp = workdir / f"{name}.validated"
             parquet = workdir / f"{name}-dataset.parquet"
             validated = stamp.exists()
-            if validated:
-                state = "DONE"
-            elif lock_held(STATE / name / ".lock"):
-                state = "RUNNING"
-            elif workdir.exists():
-                state = "FAILED"
-            else:
-                state = "QUEUED"
+            state = project_state(name, workdir)
             n_rows = None
             rows_unreadable = False
             if validated:
