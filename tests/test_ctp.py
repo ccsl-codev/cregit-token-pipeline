@@ -1168,6 +1168,13 @@ def test_cmd_status_classifies_every_project_state(sandbox, capsys):
     assert "validate(3s,rc=0)" in out
 
 
+def test_cmd_status_works_before_the_output_dir_exists(sandbox, monkeypatch, capsys):
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "OUT", sandbox.out / "not-yet")
+    assert ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
+    assert "G free" in capsys.readouterr().out
+
+
 def test_cmd_status_works_without_a_metrics_file(sandbox, capsys):
     """A fresh checkout has no ledger yet; status must not crash."""
     write_manifest(sandbox.root, VALID_ROW)

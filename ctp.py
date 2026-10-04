@@ -1077,7 +1077,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             done += 1
         print(f"{p['name']:<16} {p['size_class']:<6} {state:<9} {last.get(p['name'], '—')}")
 
-    free_gb = shutil.disk_usage(OUT).free // 2**30
+    # Before the first run OUT may not exist; measure the file system it will be on.
+    free_gb = shutil.disk_usage(next(p for p in (OUT, *OUT.parents) if p.exists())).free // 2**30
     print(f"\nprogress: {done}/{len(projects)} validated | disk {free_gb}G free")
     return 0
 
