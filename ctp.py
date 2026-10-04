@@ -914,36 +914,45 @@ def finished_runs() -> list[tuple]:
     return runs
 
 
-def cmd_progress(args: argparse.Namespace) -> int:
-    """A one-screen progress bar and the last finished projects."""
-    projects = read_manifest(CORPUS / args.manifest, None)
-    states = {p["name"]: retain.project_state(p["name"], OUT / p["name"]) for p in projects}
-    done = [p for p in projects if states[p["name"]] == "DONE"]
-    running = [p for p in projects if states[p["name"]] == "RUNNING"]
-    failed = [p for p in projects if states[p["name"]] == "FAILED"]
-    total = len(projects)
-    pct = 100 * len(done) / total if total else 0.0
-
-    print(f"corpus  [{bar(len(done), total)}]  {len(done)}/{total}  {pct:.1f}%")
+def class_breakdown(projects: list[dict], states: dict) -> str:
+    """"S 3/10  M 1/4": validated over total, for each size class present."""
     per_class = []
     for cls in SIZE_CLASSES:
         members = [p for p in projects if p["size_class"] == cls]
         if members:
             hits = sum(1 for p in members if states[p["name"]] == "DONE")
             per_class.append(f"{cls} {hits}/{len(members)}")
-    print(f"        {'  '.join(per_class)}"
-          f"{'  |  FAILED ' + str(len(failed)) if failed else ''}")
+    return "  ".join(per_class)
 
-    if running:
-        print("\nrunning")
-        for p in running:
-            print(f"  {p['name']:<34} {p['size_class']}")
+
+def cmd_progress(args: argparse.Namespace) -> int:
+    """A one-screen progress bar and the last finished projects."""
+    projects = read_manifest(CORPUS / args.manifest, None)
+    states = {p["name"]: retain.project_state(p["name"], OUT / p["name"]) for p in projects}
+    by_state: dict[str, list[dict]] = {}
+    for p in projects:
+        by_state.setdefault(states[p["name"]], []).append(p)
+    done, failed = len(by_state.get("DONE", [])), len(by_state.get("FAILED", []))
+    total = len(projects)
+    pct = 100 * done / total if total else 0.0
+
+    print(f"corpus  [{bar(done, total)}]  {done}/{total}  {pct:.1f}%")
+    print(f"        {class_breakdown(projects, states)}"
+          f"{'  |  FAILED ' + str(failed) if failed else ''}")
+    print_listing("running", [f"{p['name']:<34} {p['size_class']}"
+                              for p in by_state.get("RUNNING", [])])
     recent = finished_runs()[-args.last:]
-    if recent:
-        print(f"\nlast {len(recent)} finished")
-        for name, cls, dur in reversed(recent):
-            print(f"  {name:<34} {cls}  {dur / 60:6.1f} min")
+    print_listing(f"last {len(recent)} finished",
+                  [f"{name:<34} {cls}  {dur / 60:6.1f} min" for name, cls, dur in reversed(recent)])
     return 0
+
+
+def print_listing(title: str, rows: list[str]) -> None:
+    """A blank line, the title and the indented rows; nothing when rows is empty."""
+    if rows:
+        print(f"\n{title}")
+        for row in rows:
+            print(f"  {row}")
 
 
 def cmd_db(args: argparse.Namespace) -> int:
