@@ -10,7 +10,6 @@ import os
 import shutil
 import threading
 import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,18 +106,6 @@ class Clock:
 def forbidden(*args, **kwargs):
     raise AssertionError(
         "the test tried to start a real process; monkeypatch subprocess first")
-
-
-@contextmanager
-def held_lock(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fh = path.open("w")
-    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    try:
-        yield
-    finally:
-        fcntl.flock(fh, fcntl.LOCK_UN)
-        fh.close()
 
 
 def lock_is_free(path: Path) -> bool:
@@ -331,7 +318,7 @@ def test_validated_project_is_skipped_and_starts_no_subprocess(sandbox, runner, 
     assert runner.calls == []
 
 
-def test_second_concurrent_run_of_the_same_project_is_deferred(sandbox, runner, jq):
+def test_second_concurrent_run_of_the_same_project_is_deferred(sandbox, runner, jq, held_lock):
     """Locking contract: one project, one worker. Two tokenizers in the same
     workdir corrupt blobExec's incremental state."""
     (sandbox.out / "jq").mkdir()
@@ -1020,7 +1007,7 @@ def test_heartbeat_returns_immediately_when_already_stopped():
 # cmd_status
 # --------------------------------------------------------------------------- #
 
-def test_cmd_status_classifies_every_project_state(sandbox, capsys):
+def test_cmd_status_classifies_every_project_state(sandbox, capsys, held_lock):
     """One screen, four states. A wrong state sends an operator to re-run a
     project that is already running."""
     write_manifest(
@@ -1535,7 +1522,7 @@ def test_progress_prints_a_bar_and_the_class_breakdown(sandbox, capsys):
     assert "M 0/1" in out
 
 
-def test_progress_lists_the_running_and_counts_the_failed(sandbox, capsys):
+def test_progress_lists_the_running_and_counts_the_failed(sandbox, capsys, held_lock):
     write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
                    "b\thttps://x/b.git\tcommunity\t\\.c$\tS")
     ctp.state_dir("b").mkdir(parents=True)
