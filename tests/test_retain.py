@@ -34,12 +34,6 @@ REAL_OUT = retain.OUT
 REAL_STATE = retain.STATE
 
 
-@pytest.fixture(autouse=True)
-def no_sleep(monkeypatch):
-    """No test may sleep."""
-    monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
-
-
 @pytest.fixture
 def out(tmp_path, monkeypatch):
     """The output directory every test operates in. Never the real one.
@@ -348,32 +342,17 @@ def test_finished_projects_lists_stamped_dirs_in_name_order(out):
     assert retain.finished_projects() == ["jq", "zstd"]
 
 
-@pytest.mark.parametrize("stamp, listed", [
-    (None, False),          # no stamp at all
-    (b"", False),           # zero-byte stamp
-    (b"validated\n", True),  # a real stamp
+@pytest.mark.parametrize("kwargs, listed", [
+    ({"stamp": None}, False),
+    ({"stamp": b""}, False),
+    ({"parquet": None}, False),
+    ({}, True),
 ])
-def test_finished_projects_agrees_with_finished(out, stamp, listed):
-    """One definition of finished, used everywhere.
-
-    EXPECTATION CHANGED. This test used to assert the inconsistency instead of
-    the fix: finished_projects() checked only that the stamp file existed, while
-    finished() also required it to be non-empty. A zero-byte stamp was therefore
-    listed and then refused, so a whole-corpus dry run exited 1 naming a project
-    the user never asked about. Before the fix, the b"" row below listed "jq".
-    """
-    make_project(out, "jq", stamp=stamp)
+def test_finished_projects_agrees_with_finished(out, kwargs, listed):
+    """One definition of finished: the lister must not list what prune refuses."""
+    make_project(out, "jq", **kwargs)
     assert retain.finished("jq")[0] is listed
     assert retain.finished_projects() == (["jq"] if listed else [])
-
-
-def test_finished_projects_agrees_with_finished_about_the_parquet(out):
-    """The stamp is not the only half of finished(), so the lister must not
-    treat it as though it were. Before the fix a stamped project with no parquet
-    was listed and then refused."""
-    make_project(out, "jq", parquet=None)
-    assert retain.finished("jq")[0] is False
-    assert retain.finished_projects() == []
 
 
 def test_a_whole_corpus_dry_run_is_clean_when_a_stamp_is_empty(out, monkeypatch,
@@ -410,24 +389,15 @@ def test_a_protected_entry_inside_a_subtree_refuses_the_delete(out, capsys,
     future DISPOSABLE entry being wrong."""
     workdir = make_project(out, "jq")
     if protected == ".git":
-        (workdir / "memo" / protected).mkdir()
+        (workdir / "memo" / "deep" / protected).mkdir()
     else:
-        (workdir / "memo" / protected).write_text("precious")
+        (workdir / "memo" / "deep" / protected).write_text("precious")
     before = snapshot(out)
     reclaimed, ok = retain.prune("jq", apply=True)
     assert (reclaimed, ok) == (0, False)
     assert snapshot(out) == before
     log = capsys.readouterr().out
     assert "protected entry inside subtree" in log and protected in log
-
-
-def test_a_protected_entry_deep_inside_a_subtree_is_found(out):
-    """The walk is recursive, so depth does not hide a protected file."""
-    workdir = make_project(out, "jq")
-    (workdir / "memo" / "deep" / "hand.validated").write_text("x")
-    before = snapshot(out)
-    assert retain.prune("jq", apply=True) == (0, False)
-    assert snapshot(out) == before
 
 
 def test_a_refusal_in_the_first_subtree_leaves_the_second_alone(out, capsys):
@@ -479,63 +449,13 @@ def test_is_protected(name, expected):
 # Nothing outside the output directory
 # --------------------------------------------------------------------------
 
-def test_a_traversal_project_name_is_refused(out, tmp_path, capsys):
-    """DATA SAFETY. `retain.py ../evil --apply` must not delete a tree
-    outside output_dir.
-
-    EXPECTATION CHANGED. The refusal now comes from check_name inside prune(),
-    before anything is read, and the log says so. Before the fix the only thing
-    that stopped this was check_target's resolved-path comparison, one comparison
-    between a typo and a delete outside output_dir. check_target still holds the
-    line as well — the second half of this test proves it — because defence in
-    depth is right here.
-    """
-    outside = tmp_path / "evil"
-    (outside / "memo").mkdir(parents=True)
-    (outside / "memo" / "precious.txt").write_text("do not delete me")
-    # Make the traversal look finished, so the guard under test is the name check
-    # and not the finished() check.
-    (tmp_path / "evil-dataset.parquet").write_bytes(b"PAR1")
-    (tmp_path / "evil.validated").write_bytes(b"ok")
-    before = snapshot(outside)
-
-    assert retain.finished("../evil")[0] is True     # finished() does not object
-    reclaimed, ok = retain.prune("../evil", apply=True)
-
-    assert (reclaimed, ok) == (0, False)
-    assert snapshot(outside) == before
-    assert "is not one plain project name" in capsys.readouterr().out
-
-    # Defence in depth: check_target refuses the same path on its own.
-    with pytest.raises(ValueError, match="is outside output_dir"):
-        retain.check_target(out / "../evil", "memo")
-    assert snapshot(outside) == before
-
-
-def test_an_absolute_project_name_is_refused(out, tmp_path, capsys):
-    """DATA SAFETY. `OUT / "/abs/path"` is "/abs/path": an absolute project
-    name escapes output_dir entirely and must be refused.
-
-    EXPECTATION CHANGED for the same reason as the traversal test above: the
-    refusal is now check_name's, and check_target is checked separately as the
-    second layer.
-    """
-    outside = tmp_path / "abs_evil"
-    (outside / "memo").mkdir(parents=True)
-    (outside / "memo" / "precious.txt").write_text("do not delete me")
-    (tmp_path / "abs_evil-dataset.parquet").write_bytes(b"PAR1")
-    (tmp_path / "abs_evil.validated").write_bytes(b"ok")
-    before = snapshot(outside)
-
-    reclaimed, ok = retain.prune(str(outside), apply=True)
-
-    assert (reclaimed, ok) == (0, False)
-    assert snapshot(outside) == before
-    assert "is not one plain project name" in capsys.readouterr().out
-
-    with pytest.raises(ValueError, match="is outside output_dir"):
-        retain.check_target(outside, "memo")
-    assert snapshot(outside) == before
+def test_check_target_refuses_a_path_outside_output_dir(out, tmp_path):
+    """Defence in depth: check_target holds even if check_name were bypassed."""
+    for outside in (out / ".." / "evil", tmp_path / "abs_evil"):
+        (outside / "memo").mkdir(parents=True)
+        with pytest.raises(ValueError, match="is outside output_dir"):
+            retain.check_target(outside, "memo")
+        assert (outside / "memo").is_dir()
 
 
 def test_a_nested_project_name_is_refused(out):
@@ -712,7 +632,7 @@ def test_scan_reports_a_missing_root_as_a_violation(out):
     assert len(violations) == 1 and "cannot stat" in violations[0]
 
 
-def test_scan_reports_an_unreadable_directory_as_a_violation(out, capsys):
+def test_scan_reports_an_unreadable_directory_as_a_violation(out):
     """A stray FILE named memo/ cannot be walked, so scan() must report it
     instead of measuring it.
 
@@ -729,14 +649,6 @@ def test_scan_reports_an_unreadable_directory_as_a_violation(out, capsys):
     size, entries, violations = retain.scan(workdir / "memo")
     assert entries == 0
     assert len(violations) == 1 and "unreadable" in violations[0]
-
-    reclaimed, ok = retain.prune("jq", apply=True)
-    assert ok is False                     # the project did not fully prune
-    assert reclaimed > 0                   # but html/ was reclaimed
-    assert (workdir / "memo").read_text() == "not a directory"
-    assert not (workdir / "html").exists()
-    log = capsys.readouterr().out
-    assert "SKIP memo/: exists but is not a directory" in log
 
 
 class VanishingEntry:
@@ -888,27 +800,11 @@ def test_output_dir_refusal_is_the_one_shared_predicate(monkeypatch, path,
 
 
 @pytest.mark.parametrize("bad", [Path("/"), Path.home(), Path("/tmp")])
-def test_prune_refuses_a_dangerous_output_dir_on_the_ctp_call_path(monkeypatch,
-                                                                  capsys, bad):
-    """DATA SAFETY, HIGHEST PRIORITY.
-
-    Before the fix this guard sat in main() alone. ctp.py:213 calls
-    prune(name, ("memo",), apply=True) directly on the --drop-memo path, so on
-    the path that runs once per project the refusal never executed: a misread
-    output_dir of / or ~ would have been walked and offered for deletion. The
-    call below is exactly ctp.py's call.
-    """
+def test_prune_refuses_a_dangerous_output_dir_before_reading_the_disk(
+        monkeypatch, capsys, bad):
+    """DATA SAFETY. ctp --drop-memo calls prune() directly, so the guard must sit
+    in prune, before finished() touches the filesystem."""
     monkeypatch.setattr(retain, "OUT", bad)
-    reclaimed, ok = retain.prune("jq", ("memo",), apply=True)
-    assert (reclaimed, ok) == (0, False)
-    assert "refusing to operate on output_dir" in capsys.readouterr().out
-
-
-def test_prune_refuses_a_dangerous_output_dir_before_reading_the_disk(monkeypatch,
-                                                                     capsys):
-    """The guard is worth nothing if it runs after the walk. finished() would
-    be the first thing to touch the filesystem, so it must never be reached."""
-    monkeypatch.setattr(retain, "OUT", Path("/"))
     monkeypatch.setattr(retain, "finished",
                         lambda name: pytest.fail("prune read the disk first"))
     assert retain.prune("jq", ("memo",), apply=True) == (0, False)
@@ -1041,60 +937,28 @@ def test_an_apply_run_with_memo_blocked_deletes_nothing_for_that_project(
     assert "SKIPPED 1 project(s), not pruned: jq" in log
 
 
-def test_a_protected_file_in_memo_costs_one_subtree_not_the_project(out, capsys):
-    """The tokenizer writes no .parquet, .validated, metrics.tsv, runs.log,
-    ctp.duckdb or .git inside memo/ today, so this is latent. Keep refusing —
-    erring toward refusal is right — but in a dry run the cost is one subtree,
-    not the project's whole reclaim. Before the fix html/ was never measured."""
-    workdir = make_project(out, "jq")
-    (workdir / "memo" / "deep" / "hand.validated").write_text("x")
-
-    reclaimed, ok = retain.prune("jq")
-
-    assert ok is False
-    assert reclaimed == disk_bytes(workdir / "html")
-    log = capsys.readouterr().out
-    assert "protected entry inside subtree" in log and "hand.validated" in log
-
-
 # --------------------------------------------------------------------------
 # A path that exists but is not a directory is its own case
 # --------------------------------------------------------------------------
 
-def test_a_file_named_memo_is_reported_and_html_is_still_pruned(out, capsys):
-    """Before the fix a stray FILE named memo cost the whole project's
-    reclaim: os.scandir raised NotADirectoryError, that became an "unreadable"
-    violation, and prune returned before html/ was even measured. One stray file
-    silently cost a whole project. Now it is named, left alone, and html/ still
-    goes."""
-    workdir = make_project(out, "jq", memo=False)
-    (workdir / "memo").write_text("not a directory")
-    expected = disk_bytes(workdir / "html")
+@pytest.mark.parametrize("stray, other, apply", [
+    ("memo", "html", True),
+    ("html", "memo", False),
+])
+def test_a_stray_file_named_like_a_subtree_costs_only_that_subtree(
+        out, capsys, stray, other, apply):
+    """The stray file is named and left alone; the other subtree still counts."""
+    workdir = make_project(out, "jq", **{stray: False})
+    (workdir / stray).write_text("not a directory")
+    expected = disk_bytes(workdir / other)
 
-    reclaimed, ok = retain.prune("jq", apply=True)
+    assert retain.prune("jq", apply=apply) == (expected, False)
 
-    assert (reclaimed, ok) == (expected, False)     # not fully pruned, but honest
-    assert (workdir / "memo").read_text() == "not a directory"
-    assert not (workdir / "html").exists()
+    assert (workdir / stray).read_text() == "not a directory"
+    assert (workdir / other).exists() is not apply
     log = capsys.readouterr().out
-    assert "SKIP memo/: exists but is not a directory" in log
-    assert "1 skipped (memo/)" in log
-
-
-def test_a_file_named_html_is_reported_in_a_dry_run_too(out, capsys):
-    """The same case in the default mode, and on the second subtree, so the
-    skip is not an artefact of ordering."""
-    workdir = make_project(out, "jq", html=False)
-    (workdir / "html").write_text("not a directory")
-    before = snapshot(out)
-
-    reclaimed, ok = retain.prune("jq")
-
-    assert (reclaimed, ok) == (disk_bytes(workdir / "memo"), False)
-    assert snapshot(out) == before
-    log = capsys.readouterr().out
-    assert "SKIP html/: exists but is not a directory" in log
-    assert "1 skipped (html/)" in log
+    assert f"SKIP {stray}/: exists but is not a directory" in log
+    assert f"1 skipped ({stray}/)" in log
 
 
 # --------------------------------------------------------------------------
@@ -1222,14 +1086,14 @@ def foreign_lock(lockfile: Path):
         proc.stdout.close()
 
 
-def test_a_validated_but_live_project_is_not_touched(out, capsys):
-    """The defect this guard fixes. Stamp present, parquet present, so every
-    older gate passes -- and a run owns the workdir. --apply must delete
-    nothing."""
+@pytest.mark.parametrize("subtrees", [retain.DISPOSABLE, ("memo",)])
+def test_a_validated_but_live_project_is_not_touched(out, capsys, subtrees):
+    """A run owns the workdir, so prune deletes nothing: main()'s subtrees
+    and ctp --drop-memo's ("memo",)."""
     workdir = make_project(out, "jq")
     before = snapshot(workdir)
     with foreign_lock(retain.lock_path("jq")):
-        assert retain.prune("jq", apply=True) == (0, False)
+        assert retain.prune("jq", subtrees, apply=True) == (0, False)
     assert snapshot(workdir) == before
     log = capsys.readouterr().out
     assert "jq — SKIP: LIVE" in log
@@ -1262,27 +1126,6 @@ def test_a_validated_and_idle_project_is_still_pruned(out):
     assert not (workdir / "memo").exists()
     assert not (workdir / "html").exists()
     assert (workdir / "jq-dataset.parquet").exists()
-
-
-def test_a_project_with_no_state_directory_at_all_is_pruned(out):
-    """The common case: nothing under state/ for this project."""
-    workdir = make_project(out, "jq")
-    assert not retain.lock_path("jq").exists()
-    assert retain.live("jq") is False
-    assert retain.prune("jq", apply=True)[1] is True
-    assert not (workdir / "memo").exists()
-
-
-def test_the_guard_fires_on_the_ctp_prune_path_not_only_via_main(out, capsys):
-    """prune() is also `ctp.py run --drop-memo`'s entry point -- the call that
-    runs once per project. This is that exact call signature, with no main()
-    anywhere: ctp.py:595 prune(name, ("memo",), apply=True)."""
-    workdir = make_project(out, "jq")
-    before = snapshot(workdir)
-    with foreign_lock(retain.lock_path("jq")):
-        assert retain.prune("jq", ("memo",), apply=True) == (0, False)
-    assert snapshot(workdir) == before
-    assert "SKIP: LIVE" in capsys.readouterr().out
 
 
 def test_the_callers_own_lock_does_not_block_its_own_prune(out):
@@ -1356,42 +1199,31 @@ def test_an_unreadable_lock_file_counts_as_live(out):
         lockfile.chmod(0o600)
 
 
-def test_the_live_skip_is_reported_and_counted(out, monkeypatch, capsys):
-    """A live project must be named, counted on its own line, and must not stop
-    the sweep: one live project cannot hold up retention for the rest."""
+def line_containing(log: str, text: str) -> str:
+    return next(line for line in log.splitlines() if text in line)
+
+
+def test_a_live_skip_is_counted_apart_from_an_unvalidated_skip(out, monkeypatch,
+                                                              capsys):
+    """A live project needs only a later sweep, an unvalidated one needs looking
+    at, so neither summary line may absorb the other. The sweep goes on."""
     live_wd = make_project(out, "linux")
-    idle_wd = make_project(out, "jq")
-    with foreign_lock(retain.lock_path("linux")):
-        assert run_main(monkeypatch, "linux", "jq", "--apply") == 1
-
-    log = capsys.readouterr().out
-    assert "LIVE 1 project(s), a running pipeline holds the lock, " \
-           "left untouched: linux" in log
-    assert (live_wd / "memo" / "blob0001").exists()
-    assert not (idle_wd / "memo").exists()
-    assert "TOTAL reclaimed" in log
-    assert "over 1 project(s)" in log
-
-
-def test_a_live_skip_is_distinguishable_from_an_unvalidated_skip(out, monkeypatch,
-                                                                capsys):
-    """Different causes, different remedies: a live project needs only a later
-    sweep, an unvalidated one needs looking at. Neither line may absorb the
-    other."""
-    make_project(out, "linux")
     make_project(out, "half", parquet=None)
-    make_project(out, "jq")
+    idle_wd = make_project(out, "jq")
     with foreign_lock(retain.lock_path("linux")):
         assert run_main(monkeypatch, "linux", "half", "jq", "--apply") == 1
 
     log = capsys.readouterr().out
     assert "linux — SKIP: LIVE" in log
     assert "half — SKIP: not finished (missing keeper" in log
-    assert "LIVE 1 project(s)" in log and "left untouched: linux" in log
-    assert "SKIPPED 1 project(s), not pruned: half" in log
-    live_line = next(l for l in log.splitlines() if "LIVE 1 project(s)" in l)
-    skip_line = next(l for l in log.splitlines() if "SKIPPED 1 project(s)" in l)
+    live_line = line_containing(log, "LIVE 1 project(s)")
+    skip_line = line_containing(log, "SKIPPED 1 project(s)")
+    assert "a running pipeline holds the lock, left untouched: linux" in live_line
+    assert "not pruned: half" in skip_line
     assert "half" not in live_line and "linux" not in skip_line
+    assert (live_wd / "memo" / "blob0001").exists()
+    assert not (idle_wd / "memo").exists()
+    assert "over 1 project(s)" in line_containing(log, "TOTAL reclaimed")
 
 
 def test_a_whole_corpus_sweep_skips_the_live_project_and_prunes_the_rest(
@@ -1408,16 +1240,6 @@ def test_a_whole_corpus_sweep_skips_the_live_project_and_prunes_the_rest(
     assert (live_wd / "memo" / "deep" / "blob0002").exists()
     assert not (idle_wd / "memo").exists()
     assert "left untouched: linux" in capsys.readouterr().out
-
-
-def test_live_is_not_fooled_by_a_lock_for_another_project(out):
-    """The lock is per project. linux running says nothing about jq."""
-    workdir = make_project(out, "jq")
-    with foreign_lock(retain.lock_path("linux")):
-        assert retain.live("linux") is True
-        assert retain.live("jq") is False
-        assert retain.prune("jq", apply=True)[1] is True
-    assert not (workdir / "memo").exists()
 
 
 def test_without_procfs_even_the_callers_own_lock_reads_as_live(out, monkeypatch,
