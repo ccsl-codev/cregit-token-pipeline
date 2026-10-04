@@ -407,6 +407,19 @@ def check_memo_dir(name: str, opts: dict, workdir: Path) -> bool:
     return True
 
 
+_SWITCH_FLAGS = (("skip_html", "--skip-html"), ("reblame", "--reblame"),
+                 ("mask_widened", "--mask-widened"))
+# The runner calls blame_jobs --jobs; ctp's own --jobs means concurrent projects.
+_VALUE_FLAGS = (("gc", "--gc"), ("blame_jobs", "--jobs"),
+                ("memory_limit", "--memory-limit"), ("duckdb_threads", "--duckdb-threads"))
+_FIRM_FLAGS = (("firm_map", "--firm-map"), ("firm_canonical", "--firm-canonical"))
+
+
+def value_args(opts: dict, table: tuple) -> list[str]:
+    """[flag, value] for every (option, flag) in table whose option is set."""
+    return [arg for opt, flag in table if opts.get(opt) for arg in (flag, str(opts[opt]))]
+
+
 def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     """The run_pipeline_process.sh argv for one project. Assumes check_memo_dir
     has already refused an unsafe --memo-dir."""
@@ -418,38 +431,20 @@ def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
         "--work", str(workdir),
         "--mask", opts.get("mask") or project["file_filter"],
     ]
-    if opts.get("skip_html"):
-        pipeline_args.append("--skip-html")
-    if opts.get("reblame"):
-        pipeline_args.append("--reblame")
-    if opts.get("mask_widened"):
-        pipeline_args.append("--mask-widened")
-    if opts.get("retokenize"):
-        pipeline_args += ["--retokenize", opts["retokenize"]]
+    pipeline_args += [flag for opt, flag in _SWITCH_FLAGS if opts.get(opt)]
+    pipeline_args += value_args(opts, (("retokenize", "--retokenize"),))
     # One subdirectory per project: tokenBySha.pl keys the memo on the content
     # sha1 alone, so projects sharing one would serve each other's tokens.
     if opts.get("memo_dir"):
-        memo_dir = Path(opts["memo_dir"]).resolve() / name
-        pipeline_args += ["--memo-dir", str(memo_dir)]
+        pipeline_args += ["--memo-dir", str(Path(opts["memo_dir"]).resolve() / name)]
     if shard_class(project):
         pipeline_args += ["--mode", "sharded", "--shards", str(opts["shards"])]
-    if opts.get("gc"):
-        pipeline_args += ["--gc", opts["gc"]]
-    # The runner calls it --jobs; ctp's own --jobs means concurrent projects.
-    if opts.get("blame_jobs"):
-        pipeline_args += ["--jobs", str(opts["blame_jobs"])]
-    if opts.get("memory_limit"):
-        pipeline_args += ["--memory-limit", opts["memory_limit"]]
-    if opts.get("duckdb_threads"):
-        pipeline_args += ["--duckdb-threads", str(opts["duckdb_threads"])]
+    pipeline_args += value_args(opts, _VALUE_FLAGS)
     # The sidecar is keyed by manifest name; the generator refuses a key it cannot find.
     if opts.get("project_meta"):
-        pipeline_args += ["--project-meta", str(opts["project_meta"]),
-                          "--project-key", name]
+        pipeline_args += ["--project-meta", str(opts["project_meta"]), "--project-key", name]
     if opts.get("firm_map"):
-        pipeline_args += ["--firm-map", str(opts["firm_map"])]
-        if opts.get("firm_canonical"):
-            pipeline_args += ["--firm-canonical", str(opts["firm_canonical"])]
+        pipeline_args += value_args(opts, _FIRM_FLAGS)
     # FROM_STEP is positional and must come last.
     from_step = opts.get("from_step", 1)
     if from_step > 1:
