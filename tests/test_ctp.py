@@ -1,11 +1,6 @@
-"""Unit tests for ctp.py, the corpus orchestrator.
-
-No test starts a real process. The autouse `sandbox` fixture replaces
-subprocess.run and subprocess.Popen with a guard that raises, and moves every
-path constant (CORPUS, OUT, CREGIT, STATE, METRICS, RUNS_LOG) into tmp_path. A test
-that needs a subprocess installs its own recording fake. Nothing here touches
-the real corpus-files tree, metrics.tsv, runs.log or ctp.duckdb.
-"""
+"""Unit tests for ctp.py. The autouse `sandbox` fixture moves every path constant
+into tmp_path and makes subprocess.run and Popen raise, so no test touches the
+real corpus or starts a process; a test that needs one installs a fake."""
 
 from __future__ import annotations
 
@@ -33,15 +28,8 @@ from file_mask import UNIVERSAL_MASK
 
 VALID_ROW = "jq\thttps://github.com/jqlang/jq.git\tcommunity\t\\.[ch]$\tS"
 
-# The flags the configured runner (cregit-issue61/run_pipeline_process.sh)
-# actually advertises. Used to build a stand-in script in tmp_path so no test
-# reads the real checkout.
-#
-# Keep this in step with the real runner's usage() text. It drifted once and the
-# drift was invisible: cregit-issue61 7a70a92 renamed --blame-jobs to --jobs on
-# 2026-09-18, mid-run, and because script_supports() only greps the script while
-# these tests grep this copy, the suite stayed green while every real invocation
-# exited at the preflight. Re-read the runner's usage() when a flag changes.
+# The real runner's usage() text. Keep it in step by hand: script_supports()
+# greps the real script, but these tests grep this copy, so drift stays green.
 REAL_RUNNER_USAGE = """\
 #!/bin/sh
 # usage: run_pipeline_process.sh --repo-url URL [options] [FROM_STEP]
@@ -69,12 +57,8 @@ REAL_RUNNER_USAGE = """\
 
 
 class FakeRunner:
-    """Recording stand-in for subprocess.run. Starts no process.
-
-    Recognises the two phases ctp drives, returns a scripted return code for
-    each, and writes the completion stamp when the validate phase succeeds —
-    which is what the real validate.py does.
-    """
+    """Recording stand-in for subprocess.Popen. Returns a scripted rc per phase
+    and writes the stamp when validate succeeds, as validate.py does."""
 
     def __init__(self, *, pipeline_rc=0, validate_rc=0, raise_on=None, payload=b""):
         self.calls: list[SimpleNamespace] = []
@@ -98,16 +82,12 @@ class FakeRunner:
         rc = self.pipeline_rc if phase == "pipeline" else self.validate_rc
         if phase == "validate" and rc == 0:
             stamp = Path(args[3])
-            # A relative stamp path lands in the repository root, outside
-            # tmp_path. One test did exactly that and left a stray file named `s`
-            # in the working tree. Refuse it here, so the whole class is closed.
+            # A relative stamp path would escape tmp_path into the repository.
             assert stamp.is_absolute(), (
                 f"stamp path must be absolute, got {stamp!r}. A relative path "
                 f"escapes tmp_path and writes into the repository.")
             stamp.write_text("rows=42\nbytes=123456\n")
-        # Serves both call shapes. run_phase uses Popen, so it needs .pid and
-        # .wait(); older assertions read .returncode. The pid is our own, so the
-        # resource sampler walks a real process tree without starting anything.
+        # Our own pid, so the resource sampler walks a real process tree.
         return SimpleNamespace(returncode=rc, pid=os.getpid(), wait=lambda: rc)
 
     def argv(self, phase: str) -> list[str]:
@@ -131,7 +111,6 @@ def forbidden(*args, **kwargs):
 
 @contextmanager
 def held_lock(path: Path):
-    """Hold an exclusive flock on `path` for the duration of the block."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = path.open("w")
     fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -164,19 +143,12 @@ def write_manifest(tmp_path: Path, *lines: str, name: str = "manifest.tsv") -> P
 
 @pytest.fixture(autouse=True)
 def sandbox(tmp_path, monkeypatch):
-    """Redirect every path and side effect of ctp into tmp_path.
-
-    Locks in nothing about behaviour; it exists so a failing test can never
-    write to the live corpus or launch run_pipeline_process.sh.
-    """
+    """Redirect every path and side effect of ctp into tmp_path."""
     out = tmp_path / "corpus-files"
     out.mkdir()
     cregit = tmp_path / "cregit"
     cregit.mkdir()
-    # The sandbox stands for a REAL configured checkout, so it advertises the
-    # flags the real runner advertises. An empty CREGIT is what let ctp send
-    # --work-dir/--file-filter unnoticed: cmd_run's preflight had nothing to read.
-    # A test that needs another runner calls the runner_script fixture.
+    # An empty CREGIT would give cmd_run's flag preflight nothing to read.
     (cregit / "run_pipeline_process.sh").write_text(REAL_RUNNER_USAGE)
 
     monkeypatch.setattr(ctp, "CORPUS", tmp_path)
@@ -271,7 +243,6 @@ def must_not_start(sandbox, monkeypatch, runner_script):
 # --------------------------------------------------------------------------- #
 
 def test_manifest_parses_a_valid_row(tmp_path):
-    """Every manifest field must reach the project dict under its own key."""
     projects = ctp.read_manifest(write_manifest(tmp_path, VALID_ROW), None)
     assert projects == [dict(name="jq", url="https://github.com/jqlang/jq.git",
                              category="community", file_filter=r"\.[ch]$",
@@ -279,13 +250,11 @@ def test_manifest_parses_a_valid_row(tmp_path):
 
 
 def test_manifest_skips_comment_lines(tmp_path):
-    """A '#' line is documentation. Parsing it would break every run."""
     path = write_manifest(tmp_path, "# name  url  category  filter  class", VALID_ROW)
     assert [p["name"] for p in ctp.read_manifest(path, None)] == ["jq"]
 
 
 def test_manifest_skips_blank_and_whitespace_only_lines(tmp_path):
-    """Blank separators are allowed; a blank line must not become a project."""
     path = write_manifest(tmp_path, "", "   ", VALID_ROW, "\t", "")
     assert len(ctp.read_manifest(path, None)) == 1
 
@@ -295,14 +264,12 @@ def test_manifest_skips_blank_and_whitespace_only_lines(tmp_path):
     pytest.param("jq\thttps://x.git\tcommunity\t\\.[ch]$\tS\textra", 6, id="six-fields"),
 ])
 def test_manifest_rejects_a_row_without_exactly_five_fields(tmp_path, row, fields):
-    """Five tab-separated fields are the contract. A short or long row is a
-    corrupt manifest, and running the corpus off it would mislabel projects."""
+    """A short or long row is a corrupt manifest that would mislabel projects."""
     with pytest.raises(ValueError):
         ctp.read_manifest(write_manifest(tmp_path, row), None)
 
 
 def test_manifest_error_names_the_offending_line(tmp_path):
-    """A parse error must point at the row that caused it."""
     path = write_manifest(tmp_path, VALID_ROW, "zstd\thttps://z.git\tenterprise\t\\.[ch]$")
     with pytest.raises(ValueError) as exc:
         ctp.read_manifest(path, None)
@@ -310,19 +277,16 @@ def test_manifest_error_names_the_offending_line(tmp_path):
 
 
 def test_manifest_rejects_a_bad_size_class(tmp_path):
-    """size_class must be one of S, M, L."""
     row = "jq\thttps://x.git\tcommunity\t\\.[ch]$\tXL"
     with pytest.raises(ValueError):
         ctp.read_manifest(write_manifest(tmp_path, row), None)
 
 
 def test_manifest_empty_returns_no_projects(tmp_path):
-    """An empty manifest is not an error; cmd_run reports 'nothing to run'."""
     assert ctp.read_manifest(write_manifest(tmp_path), None) == []
 
 
 def test_manifest_only_filter_keeps_just_the_named_projects(tmp_path):
-    """--only must not silently widen to the whole corpus."""
     path = write_manifest(
         tmp_path, VALID_ROW,
         "zstd\thttps://github.com/facebook/zstd.git\tenterprise\t\\.[ch]$\tS",
@@ -535,24 +499,12 @@ def test_drop_memo_reports_when_retain_refuses(monkeypatch, capsys, runner, jq):
 
 
 # --------------------------------------------------------------------------- #
-# --memo-dir: the memo has to survive the wipe.
-#
-# run_pipeline_process.sh deletes the whole work directory at FROM_STEP=1, and
-# the memo used to live inside it. That was affordable while a re-run could
-# resume; it is not any more. The mask changed corpus-wide on 2026-09-19 and
-# Mapping.open refuses to resume against a different stored mask, so all 64
-# re-run projects rebuild from step 1. torvalds__linux holds ~2.6 million memo
-# entries against 3,228,137 blobs, and tokenizeByBlobId/tokenBySha.pl serves a
-# memo hit without invoking srcml at all — so those entries are the difference
-# between a commit walk and a cold tokenize of the largest repository here.
+# --memo-dir
 # --------------------------------------------------------------------------- #
 
 def test_memo_dir_is_forwarded_as_one_subdirectory_per_project(sandbox, runner, jq):
-    """One directory per project, never one shared one: tokenBySha.pl keys the
-    memo on sha1 of the file CONTENTS, with neither the repository nor the
-    extension in the key, so a shared directory would serve one project's tokens
-    to another and identical bytes under a different extension are a different
-    language."""
+    """tokenBySha.pl keys the memo on the sha1 of the file contents alone, so a
+    shared directory would serve one project's tokens to another."""
     memo_root = sandbox.root / "memos"
     memo_root.mkdir()
     ctp._OPTS.update(skip_html=False, drop_memo=False, memo_dir=str(memo_root))
@@ -575,12 +527,7 @@ def test_a_memo_dir_inside_the_work_directory_is_refused(sandbox, runner, jq):
 # --------------------------------------------------------------------------- #
 
 def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
-    """Locks in the argv ctp builds.
-
-    The flag names are the runner's: run_pipeline_process.sh takes --work and
-    --mask. ctp used to send --work-dir and --file-filter, which the runner
-    rejects with exit 2, so every project failed before doing any work. A defect.
-    """
+    """The runner takes --work and --mask; --work-dir or --file-filter exit 2."""
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
 
@@ -629,8 +576,6 @@ def test_status_reports_failed_after_the_runner_wiped_the_workdir(sandbox, monke
 
 
 def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
-    """The gate must run the repo's own validate.py on the project parquet and
-    write the stamp the idempotence check looks for."""
     ctp.run_project(jq)
     assert runner.argv("validate") == [
         "python3", str(sandbox.root / "validate.py"),
@@ -644,8 +589,7 @@ def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
 # --------------------------------------------------------------------------- #
 
 def test_metrics_is_append_only_with_seven_fields_per_row(sandbox):
-    """Visibility contract: metrics.tsv is an append-only ledger, one row per
-    phase attempt. Rewriting it destroys the benchmark history."""
+    """Rewriting metrics.tsv destroys the benchmark history."""
     log = ctp.state_dir("jq") / "logs" / "pipeline-1.log"
     ctp.record_metric("jq", "S", "pipeline", 34, 139, log)
     first = (sandbox.root / "metrics.tsv").read_text().splitlines()[1]
@@ -661,8 +605,6 @@ def test_metrics_is_append_only_with_seven_fields_per_row(sandbox):
 
 
 def test_metrics_row_carries_the_return_code_and_log_path(sandbox, runner, clock, jq):
-    """The ledger is how a failed phase is diagnosed later, so rc and the log
-    path must both land in the row."""
     monkey_rc = FakeRunner(pipeline_rc=2)
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(ctp.subprocess, "Popen", monkey_rc)
@@ -684,8 +626,7 @@ def logs_of(sandbox, name="jq", phase="pipeline"):
 
 def test_a_second_attempt_does_not_overwrite_the_first_log(
         sandbox, monkeypatch, clock, jq):
-    """Visibility contract: logs are never overwritten. Losing the first log
-    loses the evidence of why the first attempt failed."""
+    """The first log is the evidence of why the first attempt failed."""
     runner = FakeRunner(payload=b"first attempt\n")
     monkeypatch.setattr(ctp.subprocess, "Popen", runner)
 
@@ -702,7 +643,6 @@ def test_a_second_attempt_does_not_overwrite_the_first_log(
 
 def test_two_attempts_in_the_same_second_keep_both_logs(
         sandbox, monkeypatch, clock, jq):
-    """The 'never overwritten' promise must hold even for a fast retry."""
     runner = FakeRunner(payload=b"first attempt\n")
     monkeypatch.setattr(ctp.subprocess, "Popen", runner)
 
@@ -815,17 +755,9 @@ def test_capture_devenv_env_exits_when_devenv_fails(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def run_args(**over):
-    """A complete `ctp run` Namespace. Every cmd_run option belongs here, so
-    adding one is a single edit rather than one per test.
-
-    allow_empty_provenance defaults to True here and ONLY here. On the real CLI it
-    defaults to False, and cmd_run then refuses any step-10 run that leaves
-    --project-meta, --firm-map or --firm-canonical out. Every test in this file
-    except the provenance-guard section leaves all three empty because it is
-    testing something else entirely, so without the hatch each one would exit on a
-    refusal it never asked about. The guard's own default — False — is exercised
-    explicitly by the tests below, which pass allow_empty_provenance=False.
-    """
+    """A complete `ctp run` Namespace. allow_empty_provenance is True here, unlike
+    the CLI, so tests of other flags do not hit the provenance refusal; the
+    guard's own tests pass False."""
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
                 skip_html=False, drop_memo=False, memo_dir="",
                 shards=0, shard_classes="L",
@@ -1063,7 +995,6 @@ def beat_once(results: dict) -> str:
 
 
 def test_heartbeat_reports_running_projects_done_failed_and_disk():
-    """Without it a 35-minute phase looks like a hang."""
     ctp._live["jq"] = ("pipeline", time.time())
     line = beat_once({"jq": ctp.RunOutcome.DONE, "zstd": ctp.RunOutcome.FAILED,
                       "tmux": ctp.RunOutcome.SKIPPED})
@@ -1337,9 +1268,7 @@ def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
 
 
 # --------------------------------------------------------------------------- #
-# Step 10 memory budget. Added after the 2026-09-15 corpus run was killed for
-# low memory: the generator's own 8GB default, times two concurrent projects,
-# needed ~22 GB on a 30 GB box that already gave ~17 GB to other software.
+# step 10 memory budget
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("text,want", [
@@ -1367,8 +1296,7 @@ def test_size_to_bytes_reads_every_unit_duckdb_accepts(text, want):
 
 
 def test_size_to_bytes_refuses_a_percentage():
-    """A percentage measures TOTAL RAM. Only the free part is usable, and on
-    this box 17 of 30 GB belongs to other software."""
+    """A percentage measures total RAM; only the free part is usable."""
     with pytest.raises(ValueError) as exc:
         ctp.size_to_bytes("80%")
     assert "not a percentage" in str(exc.value)
@@ -1401,7 +1329,7 @@ def test_available_bytes_reads_mem_available_or_says_none(tmp_path, monkeypatch,
 
 
 def test_memory_budget_warning_names_the_shortfall(monkeypatch):
-    """This is the exact case that killed the run: 2 x 8GB against 6 GB free."""
+    """2 x 8GB at the 1.4 settle ratio against 6 GiB free."""
     monkeypatch.setattr(ctp, "available_bytes", lambda: 6 * 1024 ** 3)
     warning = ctp.memory_budget_warning("8GB", 2)
     assert warning is not None
@@ -1422,16 +1350,13 @@ def test_memory_budget_warning_multiplies_by_jobs(monkeypatch, free, limit, jobs
 
 
 # --------------------------------------------------------------------------- #
-# --project-meta: the per-project provenance sidecar. Every Parquet carries 29
-# metadata columns, and the sidecar is what fills them. Getting this wrong is
-# quiet: the run succeeds and the columns are blank.
+# --project-meta
 # --------------------------------------------------------------------------- #
 
 def test_a_relative_sidecar_path_is_made_absolute(
         sandbox, monkeypatch, runner_script):
-    """The runner is started with cwd=CREGIT, but the path is typed relative to
-    this repository. Unresolved, the runner rejected its own sidecar with rc=2 —
-    which is exactly what happened on the first real run."""
+    """The runner starts with cwd=CREGIT, but the path is typed relative to
+    this repository."""
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
     meta = sandbox.root / "project_meta.json"
@@ -1447,30 +1372,10 @@ def test_a_relative_sidecar_path_is_made_absolute(
 
 # --------------------------------------------------------------------------- #
 # the provenance guard
-#
-# The defect these tests exist for: `ctp.py run` used to accept --project-meta,
-# --firm-map and --firm-canonical as optional, and when they were absent it simply
-# did not forward them. generate_dataset.py treats an absent sidecar and an absent
-# firm map as supported backwards-compatible modes, so the run SUCCEEDED and
-# published a 70-column, schema-conforming Parquet whose 29 provenance columns and
-# 3 firm columns were empty strings. validate.py passed it, because the schema was
-# right.
-#
-# It is not hypothetical. On 2026-09-21 a torvalds__linux run ran 6h48m and died
-# inside step 10 for an unrelated reason; had it finished it would have published
-# the largest project in the corpus silently inconsistent with the other 185.
-#
-# The argument for an exit rather than a louder note: omitting --project-meta, the
-# 29-column half, printed NOTHING at any layer. Only the 3 firm columns had a
-# note, and a note is line 1 of a log whose other 105 lines are 30-second
-# heartbeats. The tests below therefore pin the refusal, the itemised warning the
-# escape hatch prints, and the fact that the hatch cannot arrive by default.
 # --------------------------------------------------------------------------- #
 
 def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
-    """The canonical corpus invocation — all three provenance flags supplied —
-    must pass the guard with allow_empty_provenance at its real CLI default
-    of False."""
+    """The full invocation passes the guard at the CLI default, False."""
     args = run_args(allow_empty_provenance=False,
                     **provenance_kwargs(ready.root))
     assert ctp.cmd_run(args) == 0
@@ -1481,9 +1386,7 @@ def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
 
 @pytest.mark.parametrize("absent, expected", [
     pytest.param({"project_meta": ""}, "--project-meta", id="no-sidecar"),
-    # --firm-canonical goes with it: without a map there is no firm_raw to
-    # canonicalise, and cmd_run already refuses that pair on its own grounds, so
-    # keeping it here would test the older check instead of this one.
+    # --firm-canonical without --firm-map has a refusal of its own.
     pytest.param({"firm_map": "", "firm_canonical": ""}, "--firm-map",
                  id="no-firm-map"),
     pytest.param({"firm_canonical": ""}, "--firm-canonical",
@@ -1491,9 +1394,7 @@ def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
 ])
 def test_each_provenance_flag_missing_on_its_own_is_refused(
         must_not_start, absent, expected):
-    """One flag left out is enough. Each one owns a different slice of the
-    columns, so any single omission publishes a project that disagrees with the
-    rest of the corpus."""
+    """Each flag owns a different slice of the columns, so one omission is enough."""
     kwargs = provenance_kwargs(must_not_start.root, **absent)
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(allow_empty_provenance=False, **kwargs))
@@ -1508,10 +1409,8 @@ def test_each_provenance_flag_missing_on_its_own_is_refused(
 
 def test_the_refusal_names_every_missing_flag_and_the_columns_at_stake(
         must_not_start):
-    """All three absent is the 2026-09-21 invocation exactly. The message must
-    list all three in one pass — reporting them one per re-run would cost three
-    round trips — and must name columns, because "provenance" alone does not tell
-    an operator what a consumer will see."""
+    """All missing flags and the columns at stake in one message: one per re-run
+    would cost round trips, and "provenance" alone does not say what is blank."""
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(allow_empty_provenance=False))
     message = str(exc.value)
@@ -1520,14 +1419,11 @@ def test_the_refusal_names_every_missing_flag_and_the_columns_at_stake(
     for column in ("stratum", "history_cluster", "firm_raw", "firm_source"):
         assert column in message, f"{column} is blanked but is not named"
     assert "29" in message and "3 firm columns" in message
-    # Without this sentence the reader has no reason to believe the run would not
-    # simply have failed, which is the misconception that let it happen.
     assert "validate.py passes it" in message
 
 
 def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
-    """It must never arrive by default. This is the difference between the guard
-    and the note it replaces."""
+    """It must never arrive by default."""
     seen: dict = {}
     monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
 
@@ -1543,9 +1439,8 @@ def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
 
 
 def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start):
-    """Left in a launcher script the hatch would silence the guard on the next run
-    that does omit a flag, which is how the warning it replaces became useless.
-    So it is only ever valid in the same breath as an omission."""
+    """Left in a launcher script, the hatch would silence the guard on the next
+    run that does omit a flag."""
     kwargs = provenance_kwargs(must_not_start.root)
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(allow_empty_provenance=True, **kwargs))
@@ -1559,17 +1454,8 @@ def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start)
 ])
 def test_a_provenance_path_that_is_not_a_file_is_refused_by_its_own_check(
         must_not_start, absent, expected):
-    """The guard deliberately does NOT re-check that the paths exist. Three layers
-    already do, and every one of them fails hard: cmd_run's own per-flag checks
-    (exercised further in tests/test_firm_attribution.py), then
-    run_pipeline_process.sh's argument validation (exit 2, before the clone), then
-    generate_dataset.py at the top of step 10. A path typo therefore cannot reach
-    the Parquet, so a fourth copy of the check would only be a fourth thing to
-    keep in step.
-
-    What these two assertions pin is the ORDERING: the sharper "is not a file"
-    message must win, because the guard's general one would send an operator
-    looking for a missing flag they did in fact pass."""
+    """The sharper per-flag "is not a file" message must win over the guard's,
+    which would send the operator looking for a flag they did pass."""
     kwargs = provenance_kwargs(must_not_start.root,
                                **{absent: str(must_not_start.root / "typo")})
     with pytest.raises(SystemExit) as exc:
@@ -1581,11 +1467,8 @@ def test_a_provenance_path_that_is_not_a_file_is_refused_by_its_own_check(
 
 
 def test_project_key_is_not_an_operator_flag(monkeypatch, capsys):
-    """The brief for this guard listed --project-key as a fourth defaultable flag.
-    It is not one: ctp has no such option. run_project derives the key from the
-    manifest name and sends it with the sidecar unconditionally, so it cannot be
-    forgotten or mistyped and needs no guard. Pinned here because the next reader
-    will make the same assumption."""
+    """ctp has no --project-key: run_project derives the key from the manifest
+    name and always sends it with the sidecar, so it needs no guard."""
     monkeypatch.setattr(ctp.sys, "argv",
                         ["ctp.py", "run", "--project-key", "jq"])
     monkeypatch.setattr(ctp, "cmd_run", forbidden)
@@ -1600,7 +1483,6 @@ def test_project_key_is_not_an_operator_flag(monkeypatch, capsys):
 # --------------------------------------------------------------------------- #
 
 def progress_args(**over):
-    """A complete `ctp progress` Namespace."""
     base = dict(manifest="manifest.tsv", last=5)
     base.update(over)
     return argparse.Namespace(**base)
@@ -1639,7 +1521,6 @@ def test_finished_runs_keeps_only_successful_pipeline_rows(sandbox):
 
 
 def test_progress_prints_a_bar_and_the_class_breakdown(sandbox, capsys):
-    """The headline numbers: how many of how many, and per size class."""
     write_manifest(sandbox.root,
                    "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
                    "b\thttps://x/b.git\tcommunity\t\\.c$\tM")
@@ -1688,18 +1569,19 @@ def test_progress_survives_an_empty_manifest(sandbox, capsys):
     assert "0.0%" in out
 
 
+# --------------------------------------------------------------------------- #
+# the universal mask and --mask
+# --------------------------------------------------------------------------- #
+
 def test_a_blank_file_filter_column_falls_back_to_the_universal_mask(tmp_path):
-    """An empty mask is not "no filter": blobExec rejects it, and anything that
-    accepted it would select every file in the repository. A hand-written manifest
-    that leaves the column blank means "whatever the tokenizer can parse"."""
+    """blobExec rejects an empty mask, so a blank column means the universal one."""
     row = "jq\thttps://github.com/jqlang/jq.git\tcommunity\t\tS"
     projects = ctp.read_manifest(write_manifest(tmp_path, row), None)
     assert projects[0]["file_filter"] == UNIVERSAL_MASK
 
 
 def test_the_manifests_mask_is_what_reaches_the_runner(sandbox, runner, jq):
-    """No override: the manifest column is the mask that reaches the runner, and
-    the Parquet's file_mask provenance column must describe that same run."""
+    """The Parquet's file_mask column must describe the mask that actually ran."""
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
     argv = runner.argv("pipeline")
@@ -1712,25 +1594,3 @@ def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq)
     ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
     argv = runner.argv("pipeline")
     assert argv[argv.index("--mask") + 1] == r"\.java$"
-
-
-# --------------------------------------------------------------------------- #
-# --mask-widened: reuse the tokenizations across a mask change
-#
-# The corpus holds 198 blob maps and every one of them records an OLD per-language
-# mask, so without this flag the re-run tokenizes 13.6 million (blob, path) pairs
-# from cold to reach the 5.6% that are genuinely new. The flag is off by default
-# and the refusal it steps around is correct for every other case, so the tests
-# here are as much about what it refuses as about what it forwards.
-# --------------------------------------------------------------------------- #
-
-# ---------------------------------------------------------------------------
-# --retokenize: discard ONE extension's cached tokenizations after the
-# tokenizer that produced them was corrected.
-#
-# This is not --mask-widened's problem and must not be confused with it. The
-# mask decides WHICH files are tokenized; this decides HOW. The blob map keys
-# reuse on the command string and the mask, and rebuilding a tokenizer binary
-# changes neither — which is exactly how a 16-day-stale rust_tokenizer shipped
-# shifted token columns and the run exited 0.
-# ---------------------------------------------------------------------------
