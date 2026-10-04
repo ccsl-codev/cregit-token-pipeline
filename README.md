@@ -37,7 +37,7 @@ M=manifest.tsv
 ./ctp.py run --manifest $M --jobs 3 --skip-html --drop-memo \
     --allow-empty-provenance
 ./ctp.py status --manifest $M                    # one-screen progress view
-./validate_schema.py <out>/*/*-dataset.parquet   # schema gate over the corpus
+./validate_schema.py <out>/*/*-dataset.parquet   # re-check the schema over the corpus
 ./ctp.py db                                      # rebuild ctp.duckdb + tokens view
 ```
 
@@ -86,8 +86,8 @@ firm-map.csv + firm-canonical.csv (optional) ──────┤
                                                    │
                         <out>/<name>/<name>-dataset.parquet   (70 columns)
                                                    │
-                     ├──► validate.py        rows/size gate → .validated stamp
-                     ├──► validate_schema.py column/type/order gate
+                     ├──► validate.py        rows/size/70-column gate → .validated stamp
+                     ├──► validate_schema.py the same column gate over many files
                      ├──► retain.py          delete memo/ and html/
                      └──► metrics.tsv        append-only, one row per phase attempt
 

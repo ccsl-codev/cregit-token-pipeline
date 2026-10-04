@@ -4,9 +4,8 @@ Why the pipeline is built the way it is. For what it produces, read
 [`../README.md`](../README.md); the schema itself is authoritative in
 `validate_schema.py`.
 
-**Goal.** Run cregit end-to-end over a stratified corpus of FLOSS projects and
-produce per-project token-authorship datasets that share one schema, on a single
-workstation (16 cores, 30 GB RAM, one NVMe).
+**Goal.** Run cregit end-to-end over a corpus of FLOSS projects and produce
+per-project token-authorship datasets that share one schema, on one machine.
 
 ## 1. Two layers
 
@@ -16,7 +15,7 @@ for forwarded flags (§4).
 
 1. **Per-project layer** — cregit's `run_pipeline_process.sh`, one work directory
    per project, embarrassingly parallel across projects.
-2. **Corpus layer** — selection, provenance, validation and retention. Pure
+2. **Corpus layer** — the provenance guard, validation, retention and the index. Pure
    functions over committed inputs or finished artefacts, so each is cheap and
    re-runnable at any time.
 
@@ -43,8 +42,8 @@ manifest.*.tsv ──► ctp.py run ──► run_pipeline_process.sh ──► 
 name	url	category	file_filter	size_class
 ```
 
-Three parsers unpack exactly those five positions and four tests assert them.
-That rigidity has two consequences:
+`ctp.py` refuses a row without exactly those five fields, naming its line, and
+requires `size_class` to be S, M or L. That rigidity has two consequences:
 
 - The 29 per-project provenance fields could not be added as manifest columns.
   They live in `project_meta.json`, a **sidecar keyed by manifest name and joined
@@ -57,10 +56,7 @@ That rigidity has two consequences:
 `file_mask` is the **same universal mask for every project**: the union of every
 extension the tokenizer can parse, derived in `file_mask.py` from one extension
 list rather than typed out, because a mask and an extension list maintained
-separately drift in both directions and both directions are silent. It used to
-come from a per-language matrix keyed on GitHub's primary language, which dropped
-a polyglot project's other languages; widening it to the union of every
-parseable extension is provably a superset, so no project loses a file. The
+separately drift in both directions and both directions are silent. The
 column stays because it records which mask a Parquet was built with. A project
 whose language has no tokenizer still fails to produce useful rows; nothing in
 this repository screens for that before a run.
@@ -75,7 +71,7 @@ Three flags forwarded to `run_pipeline_process.sh`:
 
 | Flag | What it really does |
 | --- | --- |
-| `--skip-html` | **Prevention.** The HTML view step is guarded, so `html/` (94–255 MB per project) is never created. Nothing downstream reads it. |
+| `--skip-html` | **Prevention.** The HTML view step is guarded, so `html/` is never created. Nothing downstream reads it. |
 | `--drop-memo` | **Cleanup, not prevention.** The tokenizer dies without a memo directory, so `memo/` is always written, then deleted once the project validates. `--no-memo` is an alias and warns about this. |
 | `--mask-widened` | Lets a resume accept a wider mask instead of rebuilding. Needs `--from-step 2`, because a step-1 run deletes the work directory first. |
 
@@ -83,9 +79,7 @@ Blame **cannot** be skipped: the generator consumes `--blame-dir`.
 
 ## 4. Runner: files are the ground truth
 
-Stdlib Python, no SQLite state authority. Snakemake was evaluated and rejected as
-not a tool this research community reads; GNU Parallel was built, validated, then
-superseded by Python for transparency.
+Stdlib Python, no SQLite state authority.
 
 State lives in files:
 
@@ -117,9 +111,8 @@ project work directory, which a from-scratch run deletes.
 
 ## 5. Disk lifecycle
 
-`memo/` plus `html/` is 68–96% of a work directory. Measured on four pilots,
-`memo/` alone was 45–88%. Keeping both across a large corpus does not fit on the
-disk; dropping both is what makes the corpus feasible.
+`memo/` plus `html/` is most of a work directory. Keeping both across a large
+corpus does not fit on the disk; dropping both is what makes the corpus feasible.
 
 | Artefact | Keep? | Why |
 | --- | --- | --- |
@@ -140,19 +133,18 @@ validated project is not re-run.
 
 ## 6. Validation
 
-Two gates, deliberately separate:
+- `validate.py` is the per-project gate the run invokes: file size, row count,
+  and every column name, type and position against `EXPECTED_COLUMNS`. It writes
+  the `.validated` stamp only when all of them pass, so `--drop-memo` never
+  deletes the `memo/` of a drifted file.
+- `validate_schema.py` runs the same contract check over many files at once and
+  reports every drift rather than the first. A corpus is unusable if one project
+  has 38 columns and another 70, or if `token_index` is BIGINT in one file and
+  VARCHAR in another: a consumer would union them and get silent nulls.
+  `consolidate.py` applies it again when it builds the `tokens` view.
 
-- `validate.py` asks *did this project produce data* — file size and row count.
-  It writes the `.validated` stamp, and it does **not** check columns.
-- `validate_schema.py` asks *do all projects agree* — every column name, type and
-  position against `EXPECTED_COLUMNS`, reporting every drift rather than the
-  first. A corpus is unusable if one project has 38 columns and another 70, or if
-  `token_index` is BIGINT in one file and VARCHAR in another: a consumer would
-  union them and get silent nulls.
-
-The run invokes only the first, so the schema gate has to be run over the corpus
-explicitly. Both keep the parquet path as a bound query parameter rather than
-pasting it into SQL, because project names come from a manifest.
+Both keep the parquet path as a bound query parameter rather than pasting it
+into SQL, because project names come from a manifest.
 
 The checks are plain `if` statements rather than `assert`, because `assert`
 vanishes under `python -O` and a gate an interpreter flag can delete is not a
@@ -178,8 +170,7 @@ silence a real gap on a later run that does have one.
 `--firm-canonical` is checked separately from `--firm-map` because the two fail
 differently. Omitting `--firm-map` leaves three columns empty, which the guard
 reports as a blank. Omitting `--firm-canonical` alone does not blank anything:
-`firm` silently repeats `firm_raw`, so split spellings of one firm stay split
-and every firm's share is understated. A wrong column is a different failure
+`firm` silently repeats `firm_raw` instead of the canonical name. A wrong column is a different failure
 from a blank one, so the guard reports it as its own gap rather than folding it
 into the same message.
 
