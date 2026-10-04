@@ -124,6 +124,9 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 # it.
 DATASET_STEP = 10
 
+MANIFEST_FIELDS = ("name", "url", "category", "file_filter", "size_class")
+SIZE_CLASSES = ("S", "M", "L")
+
 _metrics_lock = threading.Lock()
 _print_lock = threading.Lock()
 # name -> (phase, started_at) for the heartbeat; mutated by worker threads
@@ -141,20 +144,22 @@ def say(msg: str) -> None:
 
 def read_manifest(path: Path, only: set | None) -> list[dict]:
     projects = []
-    for line in path.read_text().splitlines():
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
-        name, url, category, file_filter, size_class = line.split("\t")
-        if only and name not in only:
+        fields = line.split("\t")
+        if len(fields) != len(MANIFEST_FIELDS):
+            raise ValueError(f"{path}:{lineno}: expected {len(MANIFEST_FIELDS)} tab-separated"
+                             f" fields, got {len(fields)}: {line!r}")
+        row = dict(zip(MANIFEST_FIELDS, fields))
+        if row["size_class"] not in SIZE_CLASSES:
+            raise ValueError(f"{path}:{lineno}: size_class {row['size_class']!r}"
+                             f" is not one of {', '.join(SIZE_CLASSES)}")
+        if only and row["name"] not in only:
             continue
-        # An empty file_filter means "the universal mask". Every generated
-        # manifest now writes it out, so this is the path taken by a hand-written
-        # manifest that leaves the column blank — and it must not send an empty
-        # mask, which blobExec rejects and which would otherwise select every
-        # file in the repository.
-        projects.append(dict(name=name, url=url, category=category,
-                             file_filter=file_filter or UNIVERSAL_MASK,
-                             size_class=size_class))
+        # blobExec rejects an empty mask; a blank column means the universal one.
+        row["file_filter"] = row["file_filter"] or UNIVERSAL_MASK
+        projects.append(row)
     return projects
 
 
@@ -1208,7 +1213,7 @@ def cmd_progress(args: argparse.Namespace) -> int:
 
     print(f"corpus  [{bar(len(done), total)}]  {len(done)}/{total}  {pct:.1f}%")
     per_class = []
-    for cls in ("S", "M", "L"):
+    for cls in SIZE_CLASSES:
         members = [p for p in projects if p["size_class"] == cls]
         if members:
             hits = sum(1 for p in members if states[p["name"]] == "DONE")

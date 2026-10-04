@@ -271,10 +271,6 @@ def test_manifest_rejects_a_row_without_exactly_five_fields(tmp_path, row, field
         ctp.read_manifest(write_manifest(tmp_path, row), None)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "read_manifest lets the raw tuple-unpacking ValueError escape. The message "
-    "is 'not enough values to unpack (expected 5, got 4)' and names neither the "
-    "offending line nor its number, so an operator cannot find the bad row."))
 def test_manifest_error_names_the_offending_line(tmp_path):
     """A parse error must point at the row that caused it."""
     path = write_manifest(tmp_path, VALID_ROW, "zstd\thttps://z.git\tenterprise\t\\.[ch]$")
@@ -283,16 +279,6 @@ def test_manifest_error_names_the_offending_line(tmp_path):
     assert "zstd" in str(exc.value)
 
 
-def test_manifest_accepts_an_unknown_size_class_today(tmp_path):
-    """Documents current behaviour: size_class is copied through unchecked."""
-    row = "jq\thttps://x.git\tcommunity\t\\.[ch]$\tXL"
-    assert ctp.read_manifest(write_manifest(tmp_path, row), None)[0]["size_class"] == "XL"
-
-
-@pytest.mark.xfail(strict=True, reason=(
-    "read_manifest performs no size_class validation. The docstring says "
-    "S | M | L and the class drives the --jobs mix, so a typo such as 'XL' "
-    "silently reaches metrics.tsv and the DuckDB index."))
 def test_manifest_rejects_a_bad_size_class(tmp_path):
     """size_class must be one of S, M, L."""
     row = "jq\thttps://x.git\tcommunity\t\\.[ch]$\tXL"
