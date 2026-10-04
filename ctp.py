@@ -558,28 +558,46 @@ def preflight_runner_flags(args: argparse.Namespace) -> tuple[bool, str]:
                  "ctp.py passes these to every project and the runner exits 2 on an\n"
                  "unknown flag. Check pipeline.cfg points at the right checkout, or\n"
                  "update REQUIRED_RUNNER_FLAGS and run_project together.")
-
     if args.reblame and args.from_step > 7:
         sys.exit(f"--reblame needs --from-step 7 or less (got {args.from_step}).\n"
                  "The re-blame happens inside step 7; from step 8 the flag is skipped and\n"
                  "step 10 rebuilds the Parquet from the blame already on disk.")
+    refuse_memo_conflicts(args)
+    # Our own values before the runner probe, so a typo is not reported as "not implemented".
+    refuse_bad_values(args)
+
+    mask_widened = bool(args.mask_widened)
+    retokenize = (args.retokenize or "").strip()
+    refuse_unsupported_flags(requested_runner_flags(args, mask_widened, retokenize))
+    if mask_widened:
+        refuse_mask_widened_conflicts(args)
+    if retokenize:
+        refuse_retokenize_conflicts(args, mask_widened)
+    return mask_widened, retokenize
+
+
+def refuse_memo_conflicts(args: argparse.Namespace) -> None:
     if args.drop_memo and "--no-memo" in sys.argv:
         say("note: --no-memo is an alias for --drop-memo and does NOT prevent the write. "
             "The tokenizer requires BFG_MEMO_DIR, so memo/ is built and then deleted.")
-    if args.memo_dir and args.drop_memo:
+    if not args.memo_dir:
+        return
+    if args.drop_memo:
         sys.exit("--memo-dir and --drop-memo contradict each other: one puts the memo "
                  "where no wipe can reach it, the other deletes it after each project.\n"
                  "--drop-memo also only prunes <workdir>/memo, so it would not even find "
                  "an external memo. Pick one.")
-    if args.memo_dir and not Path(args.memo_dir).is_dir():
+    if not Path(args.memo_dir).is_dir():
         sys.exit(f"--memo-dir {args.memo_dir} is not an existing directory. Create it "
                  "first: a typo here would quietly start a second corpus of memos "
                  "instead of reusing the one you meant.")
-    # Our own values before the runner probe, so a typo is not reported as "not implemented".
-    if args.blame_jobs < 0:
-        sys.exit(f"--blame-jobs cannot be negative (got {args.blame_jobs}).")
-    if args.duckdb_threads < 0:
-        sys.exit(f"--duckdb-threads cannot be negative (got {args.duckdb_threads}).")
+
+
+def refuse_bad_values(args: argparse.Namespace) -> None:
+    for flag, value in (("--blame-jobs", args.blame_jobs),
+                        ("--duckdb-threads", args.duckdb_threads)):
+        if value < 0:
+            sys.exit(f"{flag} cannot be negative (got {value}).")
     if args.memory_limit:
         try:
             size_to_bytes(args.memory_limit)
@@ -588,9 +606,10 @@ def preflight_runner_flags(args: argparse.Namespace) -> tuple[bool, str]:
     if args.from_step < 1:
         sys.exit(f"--from-step must be 1 or greater (got {args.from_step}).")
 
-    mask_widened = bool(args.mask_widened)
-    retokenize = (args.retokenize or "").strip()
 
+def requested_runner_flags(args: argparse.Namespace, mask_widened: bool,
+                           retokenize: str) -> list[str]:
+    """The REQUIRES keys this invocation asks for, in REQUIRES order."""
     requested = {
         "--skip-html": args.skip_html,
         "--reblame": args.reblame,
@@ -603,42 +622,44 @@ def preflight_runner_flags(args: argparse.Namespace) -> tuple[bool, str]:
         "--mask-widened": mask_widened,
         "--retokenize": bool(retokenize),
     }
-    for flag, consequence in REQUIRES.items():
-        if not requested[flag]:
-            continue
-        needed = CHECKS.get(flag, (flag,))
-        gap = [f for f in needed if not script_supports(f)]
+    return [flag for flag in REQUIRES if requested[flag]]
+
+
+def refuse_unsupported_flags(flags: list[str]) -> None:
+    for flag in flags:
+        gap = [f for f in CHECKS.get(flag, (flag,)) if not script_supports(f)]
         if not gap:
             continue
         if flag in CHECKS:
             sys.exit(f"{flag} needs {', '.join(gap)}, which "
-                     f"{CREGIT}/run_pipeline_process.sh does not advertise.\n{consequence}")
-        sys.exit(f"{flag} is not implemented by {CREGIT}/run_pipeline_process.sh.\n{consequence}")
+                     f"{CREGIT}/run_pipeline_process.sh does not advertise.\n{REQUIRES[flag]}")
+        sys.exit(f"{flag} is not implemented by {CREGIT}/run_pipeline_process.sh.\n{REQUIRES[flag]}")
 
+
+def refuse_mask_widened_conflicts(args: argparse.Namespace) -> None:
+    if args.from_step < 2:
+        sys.exit("--mask-widened needs --from-step 2 or greater. Step 1 deletes the project\n"
+                 "workdir, taking with it the blob map this flag reuses and the cregit.git\n"
+                 "its new_blob ids live in, so there would be nothing left to preserve.")
+    if args.shards > 1:
+        sys.exit("--mask-widened cannot be combined with sharding: each shard builds a fresh\n"
+                 "blob map, so there is no recorded mask to widen.")
+
+
+def refuse_retokenize_conflicts(args: argparse.Namespace, mask_widened: bool) -> None:
+    if args.from_step != 2:
+        sys.exit(f"--retokenize needs --from-step 2 exactly (got {args.from_step}).\n"
+                 "Step 1 deletes the blob map this flag edits. Step 3 and later skip step 2,\n"
+                 "so the tokens would never be remade and the rest of the pipeline would run\n"
+                 "over the stale ones and exit 0.")
     if mask_widened:
-        if args.from_step < 2:
-            sys.exit("--mask-widened needs --from-step 2 or greater. Step 1 deletes the project\n"
-                     "workdir, taking with it the blob map this flag reuses and the cregit.git\n"
-                     "its new_blob ids live in, so there would be nothing left to preserve.")
-        if args.shards > 1:
-            sys.exit("--mask-widened cannot be combined with sharding: each shard builds a fresh\n"
-                     "blob map, so there is no recorded mask to widen.")
-    if retokenize:
-        if args.from_step != 2:
-            sys.exit(f"--retokenize needs --from-step 2 exactly (got {args.from_step}).\n"
-                     "Step 1 deletes the blob map this flag edits. Step 3 and later skip step 2,\n"
-                     "so the tokens would never be remade and the rest of the pipeline would run\n"
-                     "over the stale ones and exit 0.")
-        if mask_widened:
-            sys.exit("--mask-widened and --retokenize cannot be used in the same run. Each one\n"
-                     "verifies a different invariant of the blob map, and together neither check\n"
-                     "means anything: one reuses rows across a mask change, the other deletes rows\n"
-                     "a tokenizer change invalidated.")
-        if args.shards > 1:
-            sys.exit("--retokenize cannot be combined with sharding: each shard builds a fresh\n"
-                     "blob map, so there are no cached tokenizations to invalidate.")
-
-    return mask_widened, retokenize
+        sys.exit("--mask-widened and --retokenize cannot be used in the same run. Each one\n"
+                 "verifies a different invariant of the blob map, and together neither check\n"
+                 "means anything: one reuses rows across a mask change, the other deletes rows\n"
+                 "a tokenizer change invalidated.")
+    if args.shards > 1:
+        sys.exit("--retokenize cannot be combined with sharding: each shard builds a fresh\n"
+                 "blob map, so there are no cached tokenizations to invalidate.")
 
 
 def resolve_provenance_paths(args: argparse.Namespace) -> tuple[str, str, str]:
