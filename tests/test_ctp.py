@@ -5,10 +5,6 @@ subprocess.run and subprocess.Popen with a guard that raises, and moves every
 path constant (CORPUS, OUT, CREGIT, STATE, METRICS, RUNS_LOG) into tmp_path. A test
 that needs a subprocess installs its own recording fake. Nothing here touches
 the real corpus-files tree, metrics.tsv, runs.log or ctp.duckdb.
-
-Several tests carry `xfail(strict=True)`. Each one states a contract the module
-docstring promises but the code does not keep. They are documentation, not
-requests: do not "fix" them by changing the assertion.
 """
 
 from __future__ import annotations
@@ -360,11 +356,8 @@ def test_lock_is_released_after_a_failed_project(sandbox, monkeypatch, jq):
 
 
 def test_lock_is_released_when_the_subprocess_raises(sandbox, monkeypatch, jq):
-    """The exception escapes run_project (see the xfail below), but the finally
-    block must still hand the lock back."""
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(raise_on="pipeline"))
-    with pytest.raises(OSError):
-        ctp.run_project(jq)
+    assert ctp.run_project(jq) == "failed"
     assert lock_is_free(ctp.lock_path("jq"))
 
 
@@ -984,11 +977,6 @@ def test_a_done_project_writes_the_stamp_that_makes_the_next_run_skip(sandbox, r
     assert ctp.run_project(jq) == "skipped"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Defect: an exception from subprocess (for example the runner script being "
-    "absent, OSError) is not caught. It escapes run_project, propagates through "
-    "ThreadPoolExecutor.map in cmd_run and aborts the whole corpus run instead "
-    "of marking one project failed."))
 def test_run_project_reports_failed_when_the_subprocess_raises(monkeypatch, jq):
     """One unusable project must not end the run."""
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(raise_on="pipeline"))

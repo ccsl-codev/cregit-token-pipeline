@@ -668,15 +668,16 @@ def run_project(project: dict) -> RunOutcome:
             if not check_memo_dir(name, _OPTS, workdir):
                 return RunOutcome.FAILED
 
-            pipeline_args = build_pipeline_args(project, _OPTS, workdir)
-            rc = run_phase(project, "pipeline", pipeline_args)
-            if rc != 0:
+            try:
+                rc = run_phase(project, "pipeline", build_pipeline_args(project, _OPTS, workdir))
+                if rc == 0:
+                    rc = run_phase(project, "validate", [
+                        "python3", str(CORPUS / "validate.py"),
+                        str(workdir / f"{name}-dataset.parquet"), str(stamp),
+                    ])
+            except OSError as exc:
+                say(f"{name} ✗ a phase could not start: {exc}")
                 return RunOutcome.FAILED
-
-            rc = run_phase(project, "validate", [
-                "python3", str(CORPUS / "validate.py"),
-                str(workdir / f"{name}-dataset.parquet"), str(stamp),
-            ])
             if rc != 0:
                 return RunOutcome.FAILED
 
