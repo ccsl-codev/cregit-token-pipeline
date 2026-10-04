@@ -897,11 +897,6 @@ def test_a_second_attempt_does_not_overwrite_the_first_log(
     assert logs[0].read_bytes() == b"first attempt\n"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Defect: the log name has one-second resolution "
-    "(f'{phase}-{datetime.now():%Y%m%dT%H%M%S}.log'), so two attempts inside "
-    "the same second collide and the second truncates the first. The runner "
-    "exits 2 immediately on the current argv, so a retry pass hits this."))
 def test_two_attempts_in_the_same_second_keep_both_logs(
         sandbox, monkeypatch, clock, jq):
     """The 'never overwritten' promise must hold even for a fast retry."""

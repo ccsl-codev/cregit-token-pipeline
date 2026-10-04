@@ -453,11 +453,22 @@ def shard_class(project: dict) -> bool:
             and project["size_class"] in _OPTS.get("shard_classes", ()))
 
 
+def unique_log_name(logdir: Path, phase: str) -> Path:
+    """A retry inside the same second gets a _N suffix, which sorts after the plain name."""
+    stamp = f"{datetime.now():%Y%m%dT%H%M%S}"
+    logfile = logdir / f"{phase}-{stamp}.log"
+    n = 1
+    while logfile.exists():
+        logfile = logdir / f"{phase}-{stamp}_{n}.log"
+        n += 1
+    return logfile
+
+
 def run_phase(project: dict, phase: str, args: list[str]) -> int:
     name, cls = project["name"], project["size_class"]
     logdir = state_dir(name) / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
-    logfile = logdir / f"{phase}-{datetime.now():%Y%m%dT%H%M%S}.log"
+    logfile = unique_log_name(logdir, phase)
 
     _live[name] = (phase, time.time())
     say(f"{name} ▶ {phase} started (log: {logfile})")
