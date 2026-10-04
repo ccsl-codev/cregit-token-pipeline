@@ -230,6 +230,42 @@ def runner_script(sandbox):
     return _write
 
 
+def provenance_kwargs(root: Path, **override) -> dict:
+    """Real files for the three provenance flags; pass e.g. project_meta="" to
+    leave one out. A path that is not a file hits a different refusal."""
+    meta = root / "project_meta.json"
+    meta.write_text('{"jq": {}}')
+    firm = root / "affiliation.merged.csv"
+    firm.write_text("domain,company,source\nredhat.com,Red Hat,gitdm\n")
+    canonical = root / "firm_canonical.csv"
+    canonical.write_text("firm_raw,firm\nRed Hat,Red Hat\n")
+    kwargs = dict(project_meta=str(meta), firm_map=str(firm),
+                  firm_canonical=str(canonical))
+    kwargs.update(override)
+    return kwargs
+
+
+@pytest.fixture
+def ready(sandbox, monkeypatch, runner_script):
+    """A sandbox one cmd_run call away from a run that starts no process."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
+    return sandbox
+
+
+@pytest.fixture
+def must_not_start(sandbox, monkeypatch, runner_script):
+    """Same sandbox, but starting the run fails the test: every refusal must
+    come before the devenv capture."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    return sandbox
+
+
 # --------------------------------------------------------------------------- #
 # manifest parsing
 # --------------------------------------------------------------------------- #
@@ -421,21 +457,6 @@ def test_no_gc_option_leaves_the_runner_default_alone(runner, jq):
     assert "--gc" not in runner.argv("pipeline")
 
 
-def test_run_refuses_to_start_when_the_runner_lacks_gc(
-        sandbox, monkeypatch, runner_script):
-    """A checkout without --gc still packs unconditionally, and an unguarded
-    repack failure fires the EXIT trap that deletes the workdir. Refuse rather
-    than let --gc look effective while the old danger remains."""
-    runner_script(REAL_RUNNER_USAGE.replace("--gc MODE", "--no-such-flag"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(gc="none"))
-    assert "--gc is not implemented" in str(exc.value)
-    assert not (sandbox.root / "runs.log").exists()
-
-
 def test_run_accepts_gc_on_a_checkout_that_implements_it(
         sandbox, monkeypatch, runner_script):
     """The refusal must not fire on the patched runner."""
@@ -446,19 +467,6 @@ def test_run_accepts_gc_on_a_checkout_that_implements_it(
 
     assert ctp.cmd_run(run_args(gc="plain")) == 0
     assert ctp._OPTS["gc"] == "plain"
-
-
-def test_run_rejects_a_from_step_below_one(sandbox, monkeypatch, runner_script):
-    """Step 0 is not a step. Catch it before the devenv capture, because the
-    runner would treat it as a full run and wipe the workdir it was meant to
-    resume."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(from_step=0))
-    assert "--from-step must be 1 or greater" in str(exc.value)
 
 
 def test_run_announces_a_resume_so_the_operator_sees_it(
@@ -472,39 +480,6 @@ def test_run_announces_a_resume_so_the_operator_sees_it(
 
     assert ctp.cmd_run(run_args(from_step=3)) == 0
     assert "resuming at step 3" in capsys.readouterr().out
-
-
-def test_run_refuses_to_start_when_the_runner_lacks_a_required_flag(
-        sandbox, monkeypatch, runner_script):
-    """A defect, turned into a gate. Every project passes --work and --mask, so a
-    runner that does not know them costs one exit-2 per project and produces
-    nothing. Refuse once instead, before the devenv capture starts anything.
-    """
-    runner_script(REAL_RUNNER_USAGE.replace("--mask", "--file-filter"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    args = run_args(jobs=1, retries=0, skip_html=False, drop_memo=False)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(args)
-    assert "does not accept: --mask" in str(exc.value)
-    assert not (sandbox.root / "runs.log").exists()
-
-
-def test_run_refuses_to_start_when_the_runner_lacks_skip_html(
-        sandbox, monkeypatch, runner_script):
-    """Prevention contract: rather than generate the HTML and delete it later,
-    the run must refuse. The check happens before the devenv capture, so no
-    process starts."""
-    runner_script(REAL_RUNNER_USAGE.replace("--skip-html", "--no-such-flag"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    args = run_args(jobs=1, retries=0, skip_html=True, drop_memo=False)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(args)
-    assert "--skip-html is not implemented" in str(exc.value)
-    assert not (sandbox.root / "runs.log").exists()
 
 
 def test_run_starts_when_the_runner_does_support_skip_html(
@@ -634,51 +609,6 @@ def test_a_memo_dir_inside_the_work_directory_is_refused(sandbox, runner, jq):
     ctp._OPTS.update(skip_html=False, drop_memo=False,
                      memo_dir=str(sandbox.out / "jq" / "inner"))
     assert ctp.run_project(jq) == "failed"
-
-
-def test_run_refuses_memo_dir_together_with_drop_memo(
-        sandbox, monkeypatch, runner_script):
-    """One preserves the memo, the other deletes it. retain.prune only looks at
-    <workdir>/memo, so the combination would preserve everything while reporting
-    a prune."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    memo_root = sandbox.root / "memos"
-    memo_root.mkdir()
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(memo_dir=str(memo_root), drop_memo=True))
-    assert "contradict" in str(exc.value)
-
-
-def test_run_refuses_a_memo_dir_that_does_not_exist(
-        sandbox, monkeypatch, runner_script):
-    """A typo would quietly start a second corpus of memos instead of reusing the
-    2.6 million entries the flag exists to reuse."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(memo_dir=str(sandbox.root / "absent")))
-    assert "not an existing directory" in str(exc.value)
-
-
-def test_run_refuses_a_memo_dir_on_a_runner_that_cannot_place_it(
-        sandbox, monkeypatch, runner_script):
-    """Same rule as --memory-limit and --project-meta: an unpatched checkout
-    hard-codes BFG_MEMO_DIR to <work>/memo and would drop the flag, so the memo
-    would be deleted by the very run that was told to keep it."""
-    runner_script(REAL_RUNNER_USAGE.replace("--memo-dir DIR", "--no-such-flag"))
-    write_manifest(sandbox.root, VALID_ROW)
-    memo_root = sandbox.root / "memos"
-    memo_root.mkdir()
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(memo_dir=str(memo_root)))
-    assert "--memo-dir" in str(exc.value)
 
 
 def test_run_accepts_a_memo_dir_on_a_patched_runner(
@@ -1029,6 +959,92 @@ def run_args(**over):
                 mask="", mask_widened=False, retokenize="", reblame=False)
     base.update(over)
     return argparse.Namespace(**base)
+
+
+# --------------------------------------------------------------------------- #
+# refusals before the run starts
+# --------------------------------------------------------------------------- #
+
+def memos(root: Path) -> str:
+    (root / "memos").mkdir()
+    return str(root / "memos")
+
+
+def sidecar(root: Path) -> str:
+    (root / "project_meta.json").write_text("{}")
+    return str(root / "project_meta.json")
+
+
+def lacks(usage_text: str) -> str:
+    return REAL_RUNNER_USAGE.replace(usage_text, "--no-such-flag")
+
+
+# (runner usage, run_args overrides, substrings of the refusal). A callable
+# override is given the sandbox root, for options that need a real path.
+REFUSALS = [
+    pytest.param(lacks("--mask"), {}, ["does not accept: --mask"], id="runner-lacks-mask"),
+    pytest.param(lacks("--gc MODE"), dict(gc="none"), ["--gc is not implemented"],
+                 id="runner-lacks-gc"),
+    pytest.param(lacks("--skip-html"), dict(skip_html=True),
+                 ["--skip-html is not implemented"], id="runner-lacks-skip-html"),
+    pytest.param(lacks("--memo-dir DIR"), dict(memo_dir=memos), ["--memo-dir"],
+                 id="runner-lacks-memo-dir"),
+    pytest.param(lacks("--shards N"), dict(shards=6), ["--shards needs"],
+                 id="runner-lacks-shards"),
+    pytest.param(lacks("--jobs N"), dict(blame_jobs=8), ["--blame-jobs needs --jobs"],
+                 id="runner-lacks-jobs"),
+    pytest.param(lacks("--memory-limit SIZE"), dict(memory_limit="3GB"),
+                 ["--memory-limit is not implemented"], id="runner-lacks-memory-limit"),
+    pytest.param(lacks("--duckdb-threads N"), dict(duckdb_threads=2),
+                 ["--duckdb-threads is not implemented"], id="runner-lacks-duckdb-threads"),
+    pytest.param(lacks("--project-key NAME"), dict(project_meta=sidecar), ["--project-key"],
+                 id="runner-lacks-project-key"),
+    pytest.param(lacks("--mask-widened"), dict(mask_widened=True, from_step=2),
+                 ["--mask-widened is not implemented"], id="runner-lacks-mask-widened"),
+    pytest.param(lacks("--retokenize EXTS"), dict(retokenize="rs", from_step=2),
+                 ["--retokenize is not implemented"], id="runner-lacks-retokenize"),
+    pytest.param(None, dict(from_step=0), ["--from-step must be 1 or greater"],
+                 id="from-step-zero"),
+    pytest.param(None, dict(memo_dir=memos, drop_memo=True), ["contradict"],
+                 id="memo-dir-with-drop-memo"),
+    pytest.param(None, dict(memo_dir=lambda root: str(root / "absent")),
+                 ["not an existing directory"], id="memo-dir-absent"),
+    pytest.param(None, dict(blame_jobs=-1), ["--blame-jobs cannot be negative"],
+                 id="negative-blame-jobs"),
+    pytest.param(None, dict(duckdb_threads=-1), ["--duckdb-threads cannot be negative"],
+                 id="negative-duckdb-threads"),
+    # A percentage measures total RAM, and only the free part is usable.
+    pytest.param(None, dict(memory_limit="80%"), ["--memory-limit", "not a percentage"],
+                 id="memory-limit-percentage"),
+    pytest.param(None, dict(project_meta=lambda root: str(root / "absent.json")),
+                 ["does not exist", "validate_schema.py"], id="sidecar-absent"),
+    # Step 1 deletes the blob map that both flags work on.
+    pytest.param(None, dict(mask_widened=True, from_step=1), ["--from-step 2"],
+                 id="mask-widened-at-step-1"),
+    pytest.param(None, dict(mask_widened=True, from_step=2, shards=4),
+                 ["no recorded mask to widen"], id="mask-widened-with-shards"),
+    # Step 3 and later skip step 2, so the tokens would never be remade.
+    *(pytest.param(None, dict(retokenize="rs", from_step=step), ["--from-step 2 exactly"],
+                   id=f"retokenize-at-step-{step}") for step in (1, 3, 7)),
+    pytest.param(None, dict(retokenize="rs", from_step=2, shards=4),
+                 ["no cached tokenizations to invalidate"], id="retokenize-with-shards"),
+    pytest.param(None, dict(retokenize="rs", mask_widened=True, from_step=2),
+                 ["cannot be used in the same run"], id="retokenize-with-mask-widened"),
+    pytest.param(None, dict(allow_empty_provenance=False, from_step=10),
+                 ["reaches step 10"], id="provenance-gap-at-step-10"),
+]
+
+
+@pytest.mark.parametrize("usage, over, said", REFUSALS)
+def test_run_refuses_before_anything_starts(must_not_start, runner_script, usage, over, said):
+    if usage is not None:
+        runner_script(usage)
+    over = {k: v(must_not_start.root) if callable(v) else v for k, v in over.items()}
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(**over))
+    for text in said:
+        assert text in str(exc.value)
+    assert not (must_not_start.root / "runs.log").exists()
 
 
 def test_cmd_run_with_an_empty_manifest_does_nothing(sandbox, monkeypatch, capsys):
@@ -1441,20 +1457,6 @@ def test_shard_classes_is_configurable(runner, jq):
     assert runner.argv("pipeline").count("--mode") == 1
 
 
-def test_run_refuses_to_shard_when_the_runner_cannot(
-        sandbox, monkeypatch, runner_script):
-    """Same rule as --skip-html: refuse once, before the devenv capture, rather
-    than discover per project that the checkout has no sharded mode."""
-    runner_script(REAL_RUNNER_USAGE.replace("--shards N", "--nope N"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(shards=6))
-    assert "--shards needs" in str(exc.value)
-    assert not (sandbox.root / "runs.log").exists()
-
-
 def test_run_announces_the_shard_plan(sandbox, monkeypatch, capsys):
     """A run that silently changed tokenizer mode would be hard to explain later
     from the logs alone."""
@@ -1514,30 +1516,6 @@ def test_no_blame_jobs_leaves_the_runner_default_alone(runner, jq):
     ctp._OPTS.update(skip_html=False, drop_memo=False, blame_jobs=0)
     ctp.run_project(jq)
     assert "--jobs" not in runner.argv("pipeline")
-
-
-def test_run_refuses_blame_jobs_on_a_runner_that_blames_serially(
-        sandbox, monkeypatch, runner_script):
-    """Accepting the flag against an unpatched checkout would promise a speedup
-    the runner cannot deliver, and the difference is days per project."""
-    runner_script(REAL_RUNNER_USAGE.replace("--jobs N", "--no-such-flag"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(blame_jobs=8))
-    assert "--blame-jobs needs --jobs" in str(exc.value)
-
-
-def test_run_rejects_a_negative_blame_jobs(sandbox, monkeypatch, runner_script):
-    """A negative count is a typo, and the runner would reject it hours later."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(blame_jobs=-1))
-    assert "--blame-jobs cannot be negative" in str(exc.value)
 
 
 def test_run_accepts_blame_jobs_on_a_patched_runner(
@@ -1696,55 +1674,6 @@ def test_no_memory_flags_leave_the_generator_default_alone(runner, jq):
     assert "--duckdb-threads" not in argv
 
 
-def test_run_refuses_memory_limit_on_a_runner_that_ignores_it(
-        sandbox, monkeypatch, runner_script):
-    """Accepting the flag against an unpatched checkout would drop it silently,
-    and step 10 would run at 8GB anyway — the failure this guard exists for."""
-    runner_script(REAL_RUNNER_USAGE.replace("--memory-limit SIZE", "--no-such-flag"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(memory_limit="3GB"))
-    assert "--memory-limit is not implemented" in str(exc.value)
-
-
-def test_run_refuses_duckdb_threads_on_a_runner_that_ignores_it(
-        sandbox, monkeypatch, runner_script):
-    """Same rule as --memory-limit."""
-    runner_script(REAL_RUNNER_USAGE.replace("--duckdb-threads N", "--no-such-flag"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(duckdb_threads=2))
-    assert "--duckdb-threads is not implemented" in str(exc.value)
-
-
-def test_run_rejects_a_negative_duckdb_threads(sandbox, monkeypatch, runner_script):
-    """A negative count is a typo, and step 10 is the last step."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(duckdb_threads=-1))
-    assert "--duckdb-threads cannot be negative" in str(exc.value)
-
-
-def test_run_rejects_a_bad_memory_limit_before_the_run(
-        sandbox, monkeypatch, runner_script):
-    """Step 10 is hours in. A typo must surface now, not after tokenizing."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(memory_limit="80%"))
-    assert "--memory-limit" in str(exc.value)
-    assert "not a percentage" in str(exc.value)
-
-
 def test_run_warns_when_the_memory_budget_does_not_fit(
         sandbox, monkeypatch, runner_script, capsys):
     """The warning is the guard whose absence killed the 2026-09-15 run."""
@@ -1813,35 +1742,6 @@ def test_no_sidecar_sends_neither_flag(runner, jq):
     assert "--project-key" not in argv
 
 
-def test_run_refuses_a_sidecar_path_that_does_not_exist(
-        sandbox, monkeypatch, runner_script):
-    """Without this the whole corpus would be regenerated with blank provenance,
-    which a consumer cannot tell from provenance that is genuinely unknown."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(project_meta=str(sandbox.root / "absent.json")))
-    assert "does not exist" in str(exc.value)
-    assert "validate_schema.py" in str(exc.value)
-
-
-def test_run_refuses_a_sidecar_on_a_runner_that_cannot_forward_it(
-        sandbox, monkeypatch, runner_script):
-    """Same rule as --memory-limit: an unpatched checkout would drop the flag and
-    the columns would be blank anyway."""
-    runner_script(REAL_RUNNER_USAGE.replace("--project-key NAME", "--no-such-flag"))
-    write_manifest(sandbox.root, VALID_ROW)
-    meta = sandbox.root / "project_meta.json"
-    meta.write_text("{}")
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(project_meta=str(meta)))
-    assert "--project-key" in str(exc.value)
-
-
 def test_run_accepts_a_sidecar_on_a_patched_runner(
         sandbox, monkeypatch, runner_script):
     runner_script()
@@ -1894,47 +1794,6 @@ def test_a_relative_sidecar_path_is_made_absolute(
 # heartbeats. The tests below therefore pin the refusal, the itemised warning the
 # escape hatch prints, and the fact that the hatch cannot arrive by default.
 # --------------------------------------------------------------------------- #
-
-def provenance_kwargs(root: Path, **override) -> dict:
-    """Real on-disk values for the three provenance flags.
-
-    The files must genuinely exist: cmd_run's per-flag checks refuse a path that
-    is not a file, and that is a DIFFERENT refusal from the guard's. Pass
-    e.g. project_meta="" to leave one flag out.
-    """
-    meta = root / "project_meta.json"
-    meta.write_text('{"jq": {}}')
-    firm = root / "affiliation.merged.csv"
-    firm.write_text("domain,company,source\nredhat.com,Red Hat,gitdm\n")
-    canonical = root / "firm_canonical.csv"
-    canonical.write_text("firm_raw,firm\nRed Hat,Red Hat\n")
-    kwargs = dict(project_meta=str(meta), firm_map=str(firm),
-                  firm_canonical=str(canonical))
-    kwargs.update(override)
-    return kwargs
-
-
-@pytest.fixture
-def ready(sandbox, monkeypatch, runner_script):
-    """A sandbox one cmd_run call away from a run that starts no process."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-    return sandbox
-
-
-@pytest.fixture
-def must_not_start(sandbox, monkeypatch, runner_script):
-    """Same sandbox, but starting the run at all fails the test. The guard has to
-    fire before the devenv capture: a refusal that arrives after 6h48m of work is
-    the defect, not the fix."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-    monkeypatch.setattr(ctp, "run_project", forbidden)
-    return sandbox
-
 
 def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
     """The canonical corpus invocation — all three provenance flags supplied —
@@ -2049,15 +1908,6 @@ def test_a_run_that_cannot_reach_step_10_is_not_gated(ready, capsys):
     blank one, and gating it would refuse a harmless no-op."""
     assert ctp.cmd_run(run_args(allow_empty_provenance=False, from_step=11)) == 0
     assert "refusing" not in capsys.readouterr().out
-
-
-def test_a_run_starting_at_step_10_is_still_gated(must_not_start):
-    """The boundary. --from-step 10 runs the dataset step and nothing else, which
-    is exactly how a Parquet gets republished, so it is the case that most needs
-    the guard rather than the one that escapes it."""
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(allow_empty_provenance=False, from_step=10))
-    assert "reaches step 10" in str(exc.value)
 
 
 @pytest.mark.parametrize("absent, expected", [
@@ -2289,41 +2139,6 @@ def test_a_missing_mask_widened_option_sends_no_flag(runner, jq):
     assert "--mask-widened" not in runner.argv("pipeline")
 
 
-def test_mask_widened_at_step_one_is_refused_because_step_one_deletes_the_workdir(
-        sandbox, monkeypatch, capsys):
-    """The flag exists to preserve the blob map, and step 1 deletes the directory
-    holding it. Running anyway would preserve nothing and look like a success."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-    monkeypatch.setattr(ctp, "run_project", forbidden)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(mask_widened=True, from_step=1))
-    assert "--from-step 2" in str(exc.value)
-
-
-def test_mask_widened_is_refused_on_a_runner_that_cannot_forward_it(
-        sandbox, monkeypatch, runner_script, capsys):
-    """Dropped silently, blobExec refuses every project on the recorded mask and
-    the corpus run reads as broken rather than as a missing feature."""
-    runner_script(REAL_RUNNER_USAGE.replace("--mask-widened", "--nope-widened"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-    monkeypatch.setattr(ctp, "run_project", forbidden)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(mask_widened=True, from_step=2))
-    assert "--mask-widened is not implemented" in str(exc.value)
-
-
-def test_mask_widened_is_refused_together_with_sharding(sandbox, monkeypatch):
-    """Each shard builds a fresh blob map, so there is no recorded mask to widen."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-    monkeypatch.setattr(ctp, "run_project", forbidden)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(mask_widened=True, from_step=2, shards=4))
-    assert "no recorded mask to widen" in str(exc.value)
-
-
 def test_mask_widened_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
     """This is the one flag that reuses a cache the tool otherwise refuses. A log
     a reader cannot tell that from is not good enough."""
@@ -2400,56 +2215,6 @@ def test_a_missing_retokenize_option_sends_no_flag(runner, jq):
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
     assert "--retokenize" not in runner.argv("pipeline")
-
-
-def test_retokenize_needs_step_two_exactly_not_two_or_more(sandbox, monkeypatch):
-    """Step 1 deletes the blob map this flag edits. Step 3 and later SKIP step 2,
-    so the tokens would never be remade and the rest of the pipeline would run over
-    the stale ones and exit 0 — the worst outcome, because it looks like success."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-    monkeypatch.setattr(ctp, "run_project", forbidden)
-    for bad in (1, 3, 7):
-        with pytest.raises(SystemExit) as exc:
-            ctp.cmd_run(run_args(retokenize="rs", from_step=bad))
-        assert "--from-step 2 exactly" in str(exc.value)
-
-
-def test_retokenize_is_refused_on_a_runner_that_cannot_forward_it(
-        sandbox, monkeypatch, runner_script):
-    """Dropped silently, step 2 reuses the very tokenizations the operator asked to
-    discard and the run exits 0. Nothing in the output would say the corrected
-    tokenizer never ran."""
-    runner_script(REAL_RUNNER_USAGE.replace("--retokenize EXTS", "--nope EXTS"))
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-    monkeypatch.setattr(ctp, "run_project", forbidden)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(retokenize="rs", from_step=2))
-    assert "--retokenize is not implemented" in str(exc.value)
-
-
-def test_retokenize_and_mask_widened_are_refused_together(sandbox, monkeypatch):
-    """Each verifies a different invariant of the blob map. Together neither check
-    means anything: one reuses rows across a mask change, the other deletes rows a
-    tokenizer change invalidated."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-    monkeypatch.setattr(ctp, "run_project", forbidden)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(retokenize="rs", mask_widened=True, from_step=2))
-    assert "cannot be used in the same run" in str(exc.value)
-
-
-def test_retokenize_is_refused_together_with_sharding(sandbox, monkeypatch):
-    """Each shard builds a fresh blob map, so there are no cached tokenizations to
-    invalidate."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
-    monkeypatch.setattr(ctp, "run_project", forbidden)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(retokenize="rs", from_step=2, shards=4))
-    assert "no cached tokenizations to invalidate" in str(exc.value)
 
 
 def test_retokenize_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
