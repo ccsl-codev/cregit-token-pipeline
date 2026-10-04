@@ -1,24 +1,7 @@
 #!/usr/bin/env python3
-"""Schema gate: every project parquet must carry the same columns and types.
-
-    ./validate_schema.py <dataset.parquet> [<dataset.parquet> ...]
-    ./validate_schema.py --emit-contract <dataset.parquet>   # print, do not check
-
-Why a separate gate from validate.py: that one asks "did this project produce a
-non-empty parquet". This one asks "do all projects agree". A corpus is unusable
-if one project has 38 columns and another 23, or if `token_index` is BIGINT in
-one and VARCHAR in another. A consumer would union them and get silent nulls.
-
-Exit status is the whole interface:
-
-  0  every file matches the contract
-  1  at least one drifted. Every drift is printed, not just the first
-  2  wrong invocation
-
-duckdb is imported inside read_schema, not at module scope, so the pure
-comparison logic can be unit-tested without duckdb installed. duckdb comes from
-`devenv shell` and is absent from .venv.
-"""
+"""Schema gate: every parquet must carry the 70 columns of EXPECTED_COLUMNS.
+Usage: validate_schema.py <parquet>...  |  --emit-contract <parquet> (print, no check).
+Exit 0 all match, 1 any drift (all drifts printed), 2 usage. duckdb is imported lazily."""
 from __future__ import annotations
 
 import argparse
@@ -29,60 +12,9 @@ USAGE = "usage: validate_schema.py [--emit-contract] <dataset.parquet> ..."
 EXIT_DRIFT = 1
 EXIT_USAGE = 2
 
-# The contract, measured from the cregit-issue61 output, has been widened
-# since.
-#
-# 70 columns. It was 38 (and 23 before that; the 15 footer columns are
-# commit-trailer evidence, which matters to this research because Signed-off-by,
-# Reviewed-by and Co-authored-by carry attribution that authorship alone does
-# not).
-#
-# The 29 after repo_name are per-project provenance: which roster or search
-# found the project, which stratum it was assigned and on what evidence, its
-# shared-history cluster, and the regex mask it was tokenized with. They come
-# from an optional JSON sidecar the user supplies with `ctp.py run
-# --project-meta`. An absent sidecar leaves all 29 columns empty, not missing —
-# the schema never changes shape. They repeat per row by design — a reader can
-# filter without a second join against the sidecar, and a column is cheap to
-# drop at publish time but expensive to add later.
-#
-# The sidecar is a JSON object keyed by project name. Each value is an object
-# whose keys are these 29 field names and whose values are all strings. A key
-# missing from one project's object becomes an empty string for that column,
-# the same as when the sidecar itself is absent.
-#
-# clone_url is among them because repo_name is a lossy slug. provenance_status
-# is a free string the sidecar sets; this repository does not interpret it.
-# file_mask is there because the mask widened once already, from per-language
-# to universal (see file_mask.py), and without this column nobody could tell
-# which rows came from which mask.
-#
-# These 29 names and their order must match PROJECT_META_FIELDS in
-# generate_dataset.py, inside the configured cregit checkout
-# (cregit-issue61/generate_dataset/generate_dataset.py). That file is the
-# single authority for the field list; nothing in this repository generates or
-# owns it.
-#
-# The three after person_domain are the firm attribution. They sit there
-# because they are RESOLVED FROM person_domain — the key and its answer belong
-# together — and before repo_tag so the identity block stays contiguous.
-#
-# Unlike the 29 provenance columns they are not per-project constants: they come
-# from a per-row join against a domain-to-firm CSV the caller supplies, so they
-# are the only columns in this contract whose value can differ between two rows
-# of one project. This repository ships no such CSV and does not build one.
-#
-#   firm_raw     the map's `company` string, unaltered
-#   firm         the canonical name, from a reviewed firm-name table
-#   firm_source  the map's `source`, so a reader can tell a hand-curated
-#                attribution (patch, gitdm, rich, correction) from a
-#                single-person inference (cncf-gitdm-single)
-#
-# All three are '' when person_domain is not in the map, so an empty firm_source
-# means "no attribution" and is the column to filter on.
-#
-# Still absent: person_email is published as it stands. That is a release
-# decision, not a schema defect, and it is not settled here.
+# --project-meta sidecar: a JSON object keyed by project name; each value maps the 29
+# provenance fields (clone_url..file_mask) to strings, a missing key giving ''. Names
+# and order must match PROJECT_META_FIELDS in cregit's generate_dataset.py.
 EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("repo_name", "VARCHAR"),
     ("clone_url", "VARCHAR"),
@@ -135,6 +67,8 @@ EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("person_name", "VARCHAR"),
     ("person_email", "VARCHAR"),
     ("person_domain", "VARCHAR"),
+    # A per-row join of person_domain against the caller's --firm-map CSV, so these
+    # can differ within one project. All three are '' when the domain is not mapped.
     ("firm_raw", "VARCHAR"),
     ("firm", "VARCHAR"),
     ("firm_source", "VARCHAR"),
@@ -173,15 +107,8 @@ def compare_schema(
     actual: list[tuple[str, str]],
     expected: tuple[tuple[str, str], ...] = EXPECTED_COLUMNS,
 ) -> list[Drift]:
-    """Every way `actual` disagrees with the contract, in a stable order.
-
-    Reports all drifts rather than the first, because a schema change usually
-    moves several columns at once and fixing them one run at a time is slow.
-
-    Column order is checked too. Parquet is read by name, so order does not break
-    a consumer, but a reordering means the generator changed and that is worth a
-    human looking at it.
-    """
+    """Every drift, not just the first, in a stable order. Order is checked too: it
+    breaks no by-name reader, but it means the generator changed."""
     drifts: list[Drift] = []
     actual_types = dict(actual)
     expected_types = dict(expected)
@@ -197,7 +124,6 @@ def compare_schema(
         if name not in expected_types:
             drifts.append(Drift("unexpected", name, f"found {found}, not in contract"))
 
-    # Order is only meaningful when the two column sets already agree.
     if not drifts and [n for n, _ in actual] != [n for n, _ in expected]:
         drifts.append(Drift("order", "-", "same columns, different order"))
     return drifts
@@ -205,7 +131,7 @@ def compare_schema(
 
 def read_schema(path: str) -> list[tuple[str, str]]:
     """(name, type) per column, in file order. Needs duckdb."""
-    import duckdb                          # devenv-only; see the module docstring
+    import duckdb
 
     rows = duckdb.sql("describe select * from read_parquet(?)",
                       params=[path]).fetchall()
@@ -213,11 +139,7 @@ def read_schema(path: str) -> list[tuple[str, str]]:
 
 
 def emit_contract(path: str) -> None:
-    """Print a file's schema as a paste-ready EXPECTED_COLUMNS block.
-
-    For when the generator legitimately changes: read the new schema, review the
-    diff by eye, then paste. Better than hand-typing 70 rows.
-    """
+    """Print a file's schema as a paste-ready EXPECTED_COLUMNS block."""
     for name, typ in read_schema(path):
         print(f'    ("{name}", "{typ}"),')
 
@@ -247,8 +169,7 @@ def check(paths: list[str]) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """No --help: this parser only structures the two invocation shapes below,
-    it does not take on the usage/error text that is the contract in `main`."""
+    """No --help: the usage and error text in main() is the contract."""
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--emit-contract", action="store_true",
                     help="print one file's schema as a paste-ready contract block")
