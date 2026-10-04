@@ -286,6 +286,17 @@ reading, rather than un-shifting a field.
   `ankitects__anki`, 528,676 of 529,083 `.rs` rows. Per-project counts:
   `ellians-master/.../mojibake-census/data/token_type_prefixed.tsv`.
 
+**Status, 2026-10-04: fixed in the 45 dataset projects with Rust files.**
+`ctp.py run --from-step 2 --retokenize rs` tokenized their `.rs` blobs again with
+the current tokenizer, folded the repositories again, and blamed every file again
+with `-C100` (cregit `759f8be`, `c9e4d74` and `e411e7a`). The run also covered
+`elastic__elasticsearch` and `oceanbase__oceanbase`, whose `.rs` files exist only in
+history. After it, no `.rs` file at HEAD of the 47 tokenized repositories holds a
+`line:col` prefix. 22 of the projects had blob maps built with the old mask `\.rs$`,
+so a `--mask-widened` run moved them to the universal mask first. Until then their
+`file_mask` column named the universal mask, but their tokens came from `\.rs$`; the
+column is now true. The text below describes the Parquets before these runs.
+
 **The author of a `.rs` token is often the commit that moved it, not the commit that
 wrote it.** This is open, and the step-10 rerun does not fix it. The 45 corpus
 projects with Rust files were tokenized before cregit `729643e` (2026-09-20), which
