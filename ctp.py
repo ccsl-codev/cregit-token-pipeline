@@ -657,48 +657,50 @@ def refuse_retokenize_conflicts(args: argparse.Namespace, mask_widened: bool) ->
                  "blob map, so there are no cached tokenizations to invalidate.")
 
 
+def refuse_unless_runner_accepts(flag: str, needed: tuple[str, ...], consequence: str = "") -> None:
+    missing = [f for f in needed if not script_supports(f)]
+    if missing:
+        sys.exit(f"{flag} needs {', '.join(missing)}, which "
+                 f"{CREGIT}/run_pipeline_process.sh does not accept.{consequence}")
+
+
+def resolve_project_meta(path: str) -> str:
+    if not Path(path).exists():
+        sys.exit(f"--project-meta {path} does not exist. "
+                 "The sidecar format is documented in validate_schema.py, "
+                 "in the comment above EXPECTED_COLUMNS.")
+    refuse_unless_runner_accepts("--project-meta", ("--project-meta", "--project-key"))
+    # Absolute: the runner starts with cwd=CREGIT, not this repository.
+    return str(Path(path).resolve())
+
+
+def resolve_firm_paths(firm_map: str, firm_canonical: str) -> tuple[str, str]:
+    if not firm_map:
+        if firm_canonical:
+            sys.exit("--firm-canonical without --firm-map has no firm_raw to "
+                     "canonicalise. Pass a domain-to-firm CSV via --firm-map too.")
+        return "", ""
+    if not Path(firm_map).is_file():
+        sys.exit(f"--firm-map {firm_map} is not a file. Supply a "
+                 "domain-to-firm CSV; this tool only joins it in, it does "
+                 "not build one.")
+    refuse_unless_runner_accepts(
+        "--firm-map", ("--firm-map", "--firm-canonical"),
+        "\nThat checkout would run step 10 without the firm join, so "
+        "every Parquet would carry three blank firm columns.")
+    if firm_canonical and not Path(firm_canonical).is_file():
+        sys.exit(f"--firm-canonical {firm_canonical} is not a file.")
+    return (str(Path(firm_map).resolve()),
+            str(Path(firm_canonical).resolve()) if firm_canonical else "")
+
+
 def resolve_provenance_paths(args: argparse.Namespace) -> tuple[str, str, str]:
     """--project-meta, --firm-map and --firm-canonical as absolute paths ("" when
     omitted). Exits on a missing file or a flag the checkout does not accept."""
-    project_meta = ""
-    if args.project_meta:
-        if not Path(args.project_meta).exists():
-            sys.exit(f"--project-meta {args.project_meta} does not exist. "
-                     "The sidecar format is documented in validate_schema.py, "
-                     "in the comment above EXPECTED_COLUMNS.")
-        missing = [f for f in ("--project-meta", "--project-key")
-                   if not script_supports(f)]
-        if missing:
-            sys.exit(f"--project-meta needs {', '.join(missing)}, which "
-                     f"{CREGIT}/run_pipeline_process.sh does not accept.")
-        # Absolute: the runner starts with cwd=CREGIT, not this repository.
-        project_meta = str(Path(args.project_meta).resolve())
-
+    project_meta = resolve_project_meta(args.project_meta) if args.project_meta else ""
     # A firm map that never arrives does not fail the run: it publishes blank
     # firm columns across the whole corpus.
-    firm_map = firm_canonical = ""
-    if args.firm_map:
-        if not Path(args.firm_map).is_file():
-            sys.exit(f"--firm-map {args.firm_map} is not a file. Supply a "
-                     "domain-to-firm CSV; this tool only joins it in, it does "
-                     "not build one.")
-        missing = [f for f in ("--firm-map", "--firm-canonical")
-                   if not script_supports(f)]
-        if missing:
-            sys.exit(f"--firm-map needs {', '.join(missing)}, which "
-                     f"{CREGIT}/run_pipeline_process.sh does not accept.\n"
-                     "That checkout would run step 10 without the firm join, so "
-                     "every Parquet would carry three blank firm columns.")
-        firm_map = str(Path(args.firm_map).resolve())
-        if args.firm_canonical:
-            if not Path(args.firm_canonical).is_file():
-                sys.exit(f"--firm-canonical {args.firm_canonical} is not a file.")
-            firm_canonical = str(Path(args.firm_canonical).resolve())
-    elif args.firm_canonical:
-        sys.exit("--firm-canonical without --firm-map has no firm_raw to "
-                 "canonicalise. Pass a domain-to-firm CSV via --firm-map too.")
-
-    return project_meta, firm_map, firm_canonical
+    return (project_meta, *resolve_firm_paths(args.firm_map, args.firm_canonical))
 
 
 def provenance_gaps(project_meta: str, firm_map: str, firm_canonical: str) -> list[tuple[str, str]]:
