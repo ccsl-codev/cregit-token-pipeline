@@ -802,6 +802,48 @@ def announce_run(opts: dict, jobs: int) -> None:
             f"{'es' if len(opts['shard_classes']) > 1 else ''} {', '.join(opts['shard_classes'])}")
 
 
+def run_options(args: argparse.Namespace) -> dict:
+    """The checked options run_project reads through _OPTS. Exits on a refusal."""
+    mask_widened, retokenize = preflight_runner_flags(args)
+    project_meta, firm_map, firm_canonical = resolve_provenance_paths(args)
+    enforce_provenance(provenance_gaps(project_meta, firm_map, firm_canonical), args)
+    return dict(skip_html=args.skip_html, drop_memo=args.drop_memo,
+                reblame=args.reblame,
+                memo_dir=args.memo_dir,
+                shards=args.shards,
+                shard_classes=tuple(c.strip() for c in args.shard_classes.split(",") if c.strip()),
+                from_step=args.from_step, gc=args.gc,
+                mask_widened=mask_widened,
+                retokenize=retokenize,
+                blame_jobs=args.blame_jobs,
+                memory_limit=args.memory_limit,
+                duckdb_threads=args.duckdb_threads,
+                mask=args.mask,
+                project_meta=project_meta,
+                firm_map=firm_map, firm_canonical=firm_canonical)
+
+
+def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
+    """name -> RunOutcome after the first pass and up to `retries` passes over the rest."""
+    results: dict = {}
+    stop = threading.Event()
+    threading.Thread(target=heartbeat, args=(stop, results), daemon=True).start()
+    try:
+        for attempt in range(1 + retries):
+            todo = [p for p in projects
+                    if results.get(p["name"]) not in (RunOutcome.DONE, RunOutcome.SKIPPED)]
+            if not todo:
+                break
+            if attempt:
+                say(f"retry pass {attempt}: {[p['name'] for p in todo]}")
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                for p, res in zip(todo, pool.map(run_project, todo)):
+                    results[p["name"]] = res
+    finally:
+        stop.set()
+    return results
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     projects = read_manifest(CORPUS / args.manifest, set(args.only.split(",")) if args.only else None)
@@ -809,24 +851,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         say("nothing to run (empty manifest / --only filter matched nothing)")
         return 0
 
-    mask_widened, retokenize = preflight_runner_flags(args)
-    project_meta, firm_map, firm_canonical = resolve_provenance_paths(args)
-    enforce_provenance(provenance_gaps(project_meta, firm_map, firm_canonical), args)
-
-    shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
-    _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
-                 reblame=args.reblame,
-                 memo_dir=args.memo_dir,
-                 shards=args.shards, shard_classes=shard_classes,
-                 from_step=args.from_step, gc=args.gc,
-                 mask_widened=mask_widened,
-                 retokenize=retokenize,
-                 blame_jobs=args.blame_jobs,
-                 memory_limit=args.memory_limit,
-                 duckdb_threads=args.duckdb_threads,
-                 mask=args.mask,
-                 project_meta=project_meta,
-                 firm_map=firm_map, firm_canonical=firm_canonical)
+    _OPTS.update(run_options(args))
     announce_run(_OPTS, args.jobs)
 
     run_start = time.time()
@@ -836,24 +861,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     with RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-start\tjobs={args.jobs}\tprojects={len(projects)}\n")
 
-    results: dict = {}
-    stop = threading.Event()
-    hb = threading.Thread(target=heartbeat, args=(stop, results), daemon=True)
-    hb.start()
-
-    try:
-        for attempt in range(1 + args.retries):
-            todo = [p for p in projects
-                   if results.get(p["name"]) not in (RunOutcome.DONE, RunOutcome.SKIPPED)]
-            if not todo:
-                break
-            if attempt:
-                say(f"retry pass {attempt}: {[p['name'] for p in todo]}")
-            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-                for p, res in zip(todo, pool.map(run_project, todo)):
-                    results[p["name"]] = res
-    finally:
-        stop.set()
+    results = run_passes(projects, args.jobs, args.retries)
 
     rc = 0 if all(v.is_success for v in results.values()) else 1
     with RUNS_LOG.open("a") as f:
