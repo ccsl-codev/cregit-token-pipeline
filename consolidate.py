@@ -161,6 +161,65 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(list(argv))
 
 
+def create_tokens_view(con, usable: list[str]) -> int:
+    """Rows in the new tokens view; 0, and no view, when no parquet is usable."""
+    if not usable:
+        return 0
+    files = ", ".join(sql_literal(f) for f in usable)
+    con.execute(f"""create or replace view tokens as
+        select p.category, p.size_class, t.*
+        from read_parquet([{files}]) t
+        join projects p on t.repo_name = p.name""")
+    return con.sql("select count(*) from tokens").fetchone()[0]
+
+
+def print_schema_problems(drifted: list, unread: list, n_validated: int) -> None:
+    if drifted:
+        named = ", ".join(f"{Path(p).name} ({n} columns)" for p, n, _ in drifted)
+        print(f"  schema mismatch, left out of the tokens view: "
+              f"{len(drifted)} of {n_validated} "
+              f"({named}): the contract is "
+              f"{len(EXPECTED_COLUMNS)} columns, see validate_schema.py")
+    if unread:
+        named = ", ".join(f"{Path(p).name}: {why}" for p, why in unread)
+        print(f"  ! schema not read for {len(unread)} of {n_validated} "
+              f"parquet(s) ({named}): left in the tokens view, "
+              "run validate_schema.py on them", file=sys.stderr)
+
+
+FLAG_NOTES = (
+    ("parquet_missing", "DONE but parquet missing",
+     "flagged parquet_missing, left out of the tokens view"),
+    ("rows_unreadable", "unreadable rows= in stamp",
+     "flagged rows_unreadable, token_rows is null"),
+)
+
+
+def print_project_flags(projects: list[ProjectRow]) -> None:
+    excluded = [(p.name, p.excluded_because) for p in projects if p.excluded_because]
+    if excluded:
+        print(f"  publication exclusions: {len(excluded)} "
+              "(row kept in projects, left out of the tokens view)")
+        for name, why in excluded:
+            print(f"    - {name}: {why}")
+    for attr, label, note in FLAG_NOTES:
+        names = [p.name for p in projects if getattr(p, attr)]
+        if names:
+            print(f"  {label}: {len(names)} ({', '.join(names)}): {note}")
+
+
+def print_state_counts(projects: list[ProjectRow]) -> None:
+    for state in ("DONE", "RUNNING", "FAILED", "QUEUED"):
+        n = sum(1 for p in projects if p.state == state)
+        if n:
+            print(f"  {state}: {n}")
+
+
+def publishable_parquets(projects: list[ProjectRow]) -> list[str]:
+    return [p.parquet_path for p in projects
+            if p.state == "DONE" and p.parquet_path and not p.excluded_because]
+
+
 def main(argv: Sequence[str] = ()) -> None:
     args = parse_args(argv)
     manifests = ([resolve_manifest(v) for v in args.manifest]
@@ -174,58 +233,18 @@ def main(argv: Sequence[str] = ()) -> None:
     con.execute(f"""create or replace table phase_metrics as
         select * from read_csv('{CORPUS / 'metrics.tsv'}', delim='\t', header=true)""")
 
-    validated = [p.parquet_path for p in projects
-                 if p.state == "DONE" and p.parquet_path and not p.excluded_because]
+    validated = publishable_parquets(projects)
     usable, drifted, unread = schema_split(validated)
-    if usable:
-        files = ", ".join(sql_literal(f) for f in usable)
-        con.execute(f"""create or replace view tokens as
-            select p.category, p.size_class, t.*
-            from read_parquet([{files}]) t
-            join projects p on t.repo_name = p.name""")
-        total = con.sql("select count(*) from tokens").fetchone()[0]
-    else:
-        total = 0
+    total = create_tokens_view(con, usable)
 
     print(f"ctp.duckdb rebuilt: {DB}")
     print(f"  manifests: {', '.join(Path(m).name for m in manifests)}")
-    for state in ("DONE", "RUNNING", "FAILED", "QUEUED"):
-        n = sum(1 for p in projects if p.state == state)
-        if n:
-            print(f"  {state}: {n}")
+    print_state_counts(projects)
     print(f"  tokens view: {total:,} rows across {len(usable)} projects")
-
-    if drifted:
-        named = ", ".join(f"{Path(p).name} ({n} columns)" for p, n, _ in drifted)
-        print(f"  schema mismatch, left out of the tokens view: "
-              f"{len(drifted)} of {len(validated)} "
-              f"({named}): the contract is "
-              f"{len(EXPECTED_COLUMNS)} columns, see validate_schema.py")
-    if unread:
-        named = ", ".join(f"{Path(p).name}: {why}" for p, why in unread)
-        print(f"  ! schema not read for {len(unread)} of {len(validated)} "
-              f"parquet(s) ({named}): left in the tokens view, "
-              "run validate_schema.py on them", file=sys.stderr)
-
-    excluded = [(p.name, p.excluded_because) for p in projects if p.excluded_because]
-    if excluded:
-        print(f"  publication exclusions: {len(excluded)} "
-              "(row kept in projects, left out of the tokens view)")
-        for name, why in excluded:
-            print(f"    - {name}: {why}")
-
-    no_parquet = [p.name for p in projects if p.parquet_missing]
-    if no_parquet:
-        print(f"  DONE but parquet missing: {len(no_parquet)} "
-              f"({', '.join(no_parquet)}): flagged parquet_missing, "
-              "left out of the tokens view")
-    unreadable = [p.name for p in projects if p.rows_unreadable]
-    if unreadable:
-        print(f"  unreadable rows= in stamp: {len(unreadable)} "
-              f"({', '.join(unreadable)}): flagged rows_unreadable, "
-              "token_rows is null")
+    print_schema_problems(drifted, unread, len(validated))
+    print_project_flags(projects)
     con.close()
-    if unreadable:
+    if any(p.rows_unreadable for p in projects):
         sys.exit(1)
 
 
