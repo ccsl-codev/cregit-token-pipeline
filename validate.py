@@ -1,29 +1,7 @@
 #!/usr/bin/env python3
-"""Post-run gate: a project is only DONE if its parquet passes these checks.
-
-Usage: validate.py <dataset.parquet> <stamp-file>
-Run inside `devenv shell` (needs duckdb).
-
-Exit status is the whole interface ctp.py sees:
-
-  0  accepted. The stamp is written, so the next ctp pass skips the project.
-  1  rejected. No stamp, so the next ctp pass retries the project.
-  2  wrong invocation. Usage is printed and nothing else is touched.
-
-Two positional arguments, no flags: that is the whole CLI, and it is a
-published contract, not an oversight. sys.argv is parsed by hand on purpose --
-argparse would add a --help and an error-formatting surface this script does
-not need, for two required paths.
-
-The checks are plain `if` statements on purpose. `assert` vanishes under
-`python -O`, and a gate that an interpreter flag can delete is not a gate: any
-parquet would then be stamped DONE.
-
-The parquet path is bound as a query parameter and is never pasted into the SQL
-text. Project names come from the manifest, so a name holding a single quote
-would otherwise unbalance the string literal and break the gate, and a crafted
-name could inject SQL.
-"""
+"""Post-run gate. Usage: validate.py <dataset.parquet> <stamp-file>
+Exit 0 writes the stamp (ctp skips the project), 1 rejects, 2 is a usage error.
+Plain `if`s, not `assert` (gone under `python -O`); the path is a bound SQL parameter."""
 import os
 import sys
 
@@ -40,7 +18,6 @@ COUNT_SQL = "select count(*) from read_parquet(?)"
 
 
 def reject(reason: str) -> None:
-    """Report a rejected parquet and exit. Writes no stamp."""
     print(f"FAIL {reason}", file=sys.stderr)
     sys.exit(EXIT_REJECTED)
 
