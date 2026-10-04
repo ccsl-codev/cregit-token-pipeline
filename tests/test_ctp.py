@@ -399,19 +399,70 @@ def test_lock_is_released_when_the_subprocess_raises(sandbox, monkeypatch, jq):
 # flag handling
 # --------------------------------------------------------------------------- #
 
-def test_skip_html_is_forwarded_to_the_runner(runner, jq):
-    """--skip-html only saves the 94-255 MB per project if it reaches the
-    runner argv."""
-    ctp._OPTS.update(skip_html=True, drop_memo=False)
+# flag -> value it must carry, or None for a bare flag.
+FORWARDED = [
+    pytest.param(dict(skip_html=True), {"--skip-html": None}, id="skip-html"),
+    pytest.param(dict(gc="none"), {"--gc": "none"}, id="gc"),
+    pytest.param(dict(blame_jobs=8), {"--jobs": "8"}, id="blame-jobs-as-runner-jobs"),
+    pytest.param(dict(memory_limit="3GB"), {"--memory-limit": "3GB"}, id="memory-limit"),
+    pytest.param(dict(duckdb_threads=2), {"--duckdb-threads": "2"}, id="duckdb-threads"),
+    # The key is the manifest name, so it is not the operator's to get wrong.
+    pytest.param(dict(project_meta="/somewhere/project_meta.json"),
+                 {"--project-meta": "/somewhere/project_meta.json", "--project-key": "jq"},
+                 id="sidecar-and-its-key"),
+    pytest.param(dict(mask_widened=True, from_step=2), {"--mask-widened": None},
+                 id="mask-widened"),
+    pytest.param(dict(retokenize="rs", from_step=2), {"--retokenize": "rs"}, id="retokenize"),
+    pytest.param(dict(shards=4, shard_classes=("S", "M")),
+                 {"--mode": "sharded", "--shards": "4"}, id="shards-for-a-listed-class"),
+]
+
+NOT_SENT = [
+    pytest.param(dict(skip_html=False), ["--skip-html"], id="skip-html-off"),
+    pytest.param(dict(gc=None), ["--gc"], id="no-gc"),
+    pytest.param(dict(memo_dir=""), ["--memo-dir"], id="no-memo-dir"),
+    pytest.param(dict(blame_jobs=0), ["--jobs"], id="no-blame-jobs"),
+    pytest.param(dict(blame_jobs=8), ["--blame-jobs"], id="old-blame-jobs-name"),
+    pytest.param(dict(memory_limit=None, duckdb_threads=0),
+                 ["--memory-limit", "--duckdb-threads"], id="no-memory-flags"),
+    pytest.param(dict(project_meta=""), ["--project-meta", "--project-key"], id="no-sidecar"),
+    pytest.param(dict(from_step=2, mask_widened=False), ["--mask-widened"],
+                 id="no-mask-widened"),
+    pytest.param(dict(from_step=2, retokenize=""), ["--retokenize"], id="no-retokenize"),
+    pytest.param(dict(from_step=1), ["1"], id="step-one-is-the-runner-default"),
+    pytest.param(dict(shards=0, shard_classes=("L",)), ["--mode", "--shards"], id="no-shards"),
+    pytest.param(dict(shards=1, shard_classes=("S",)), ["--mode"], id="one-shard"),
+    pytest.param(dict(shards=6, shard_classes=("L",)), ["--mode"], id="class-not-listed"),
+    pytest.param({}, ["--mask-widened", "--retokenize", "--mode"], id="keys-unset"),
+]
+
+
+@pytest.mark.parametrize("opts, sent", FORWARDED)
+def test_an_option_reaches_the_runner_argv(runner, jq, opts, sent):
+    ctp._OPTS.update({"skip_html": False, "drop_memo": False, **opts})
     ctp.run_project(jq)
-    assert runner.argv("pipeline")[-1] == "--skip-html"
+    argv = runner.argv("pipeline")
+    for flag, value in sent.items():
+        assert argv.count(flag) == 1
+        if value is not None:
+            assert argv[argv.index(flag) + 1] == value
 
 
-def test_skip_html_is_absent_when_the_flag_is_off(runner, jq):
-    """The default run must not change the runner's behaviour."""
+@pytest.mark.parametrize("opts, absent", NOT_SENT)
+def test_an_option_left_off_sends_no_flag(runner, jq, opts, absent):
+    ctp._OPTS.update({"skip_html": False, "drop_memo": False, **opts})
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    for flag in absent:
+        assert flag not in argv
+
+
+def test_an_unset_from_step_means_a_full_run(runner, jq):
+    """run_project reads _OPTS directly, so a caller that never set it must
+    get step 1, not a crash."""
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
-    assert "--skip-html" not in runner.argv("pipeline")
+    assert runner.argv("pipeline")[-1] == "\\.[ch]$"
 
 
 def test_from_step_is_appended_last_because_it_is_positional(runner, jq):
@@ -422,39 +473,6 @@ def test_from_step_is_appended_last_because_it_is_positional(runner, jq):
     argv = runner.argv("pipeline")
     assert argv[-1] == "3"
     assert argv[-2] == "--skip-html"
-
-
-def test_from_step_one_sends_no_positional_at_all(runner, jq):
-    """Step 1 is the runner's own default. Sending it explicitly would change
-    nothing, and an absent argument cannot be misread."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=1)
-    ctp.run_project(jq)
-    assert "1" not in runner.argv("pipeline")
-
-
-def test_a_missing_from_step_option_behaves_as_step_one(runner, jq):
-    """run_project reads _OPTS directly, so a caller that never set from_step
-    must still get a full run rather than a crash."""
-    ctp._OPTS.clear()
-    ctp._OPTS.update(skip_html=False, drop_memo=False)
-    ctp.run_project(jq)
-    assert runner.argv("pipeline")[-1] == "\\.[ch]$"
-
-
-def test_gc_mode_is_forwarded_to_the_runner(runner, jq):
-    """The repack default costs hours per project at corpus scale, so the
-    choice has to reach the runner argv to mean anything."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, gc="none")
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert argv[argv.index("--gc") + 1] == "none"
-
-
-def test_no_gc_option_leaves_the_runner_default_alone(runner, jq):
-    """Omitting --gc must not silently pick a mode for the runner."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, gc=None)
-    ctp.run_project(jq)
-    assert "--gc" not in runner.argv("pipeline")
 
 
 def test_run_accepts_gc_on_a_checkout_that_implements_it(
@@ -593,14 +611,6 @@ def test_memo_dir_is_forwarded_as_one_subdirectory_per_project(sandbox, runner, 
     assert argv[argv.index("--memo-dir") + 1] == str(memo_root / "jq")
     # And outside the directory the runner deletes, which is the whole point.
     assert not str(memo_root / "jq").startswith(str(sandbox.out / "jq"))
-
-
-def test_no_memo_dir_sends_no_flag_so_the_default_is_untouched(sandbox, runner, jq):
-    """Nothing existing may change behaviour: without the flag the runner keeps
-    putting the memo in <work>/memo exactly as before."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, memo_dir="")
-    ctp.run_project(jq)
-    assert "--memo-dir" not in runner.argv("pipeline")
 
 
 def test_a_memo_dir_inside_the_work_directory_is_refused(sandbox, runner, jq):
@@ -1412,51 +1422,6 @@ def test_proc_scan_agrees_with_real_proc_for_our_own_process(sandbox):
 # sharding
 # --------------------------------------------------------------------------- #
 
-def test_sharding_is_off_unless_asked_for(runner, jq):
-    """Sharding costs transient disk, so it must never be the default. Three
-    concurrent S-class projects already fill this box."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=0, shard_classes=("L",))
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert "--mode" not in argv and "--shards" not in argv
-
-
-def test_one_shard_is_not_sharding(runner, jq):
-    """--shards 1 would pay the sharded-mode overhead for no parallelism, so it
-    is treated as off rather than honoured literally."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=1, shard_classes=("S",))
-    ctp.run_project(jq)
-    assert "--mode" not in runner.argv("pipeline")
-
-
-def test_an_l_class_project_is_sharded(runner):
-    """An L-class project is the case sharding exists for."""
-    big = dict(name="linux", url="https://example.invalid/linux.git",
-               category="community", file_filter=r"\.[ch]$", size_class="L")
-    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=6, shard_classes=("L",))
-    ctp.run_project(big)
-    argv = runner.argv("pipeline")
-    assert argv[argv.index("--mode") + 1] == "sharded"
-    assert argv[argv.index("--shards") + 1] == "6"
-
-
-def test_an_s_class_project_is_not_sharded_by_default(runner, jq):
-    """--shard-classes defaults to L. An S project gains nothing and would only
-    multiply the disk."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=6, shard_classes=("L",))
-    ctp.run_project(jq)
-    assert "--mode" not in runner.argv("pipeline")
-
-
-def test_shard_classes_is_configurable(runner, jq):
-    """M class may be worth sharding once measured, so the classes are a list
-    rather than a hard-coded L."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, shards=4,
-                     shard_classes=("S", "M"))
-    ctp.run_project(jq)
-    assert runner.argv("pipeline").count("--mode") == 1
-
-
 def test_run_announces_the_shard_plan(sandbox, monkeypatch, capsys):
     """A run that silently changed tokenizer mode would be hard to explain later
     from the logs alone."""
@@ -1493,29 +1458,6 @@ def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
     assert ctp.shard_class(L) is False
     ctp._OPTS.clear()
     assert ctp.shard_class(L) is False, "an unset _OPTS must not shard"
-
-
-def test_blame_jobs_is_sent_to_the_runner_as_jobs(runner, jq):
-    """Blame is the bottleneck. The worker count only helps if it reaches the
-    runner argv — and it must use the runner's name for the flag.
-
-    cregit-issue61 7a70a92 renamed the runner's --blame-jobs to --jobs on
-    2026-09-18. ctp.py kept sending the old name, so its preflight refused every
-    project and the corpus run could not be restarted. ctp.py's own CLI name is
-    still --blame-jobs, because ctp.py's --jobs means concurrent projects.
-    """
-    ctp._OPTS.update(skip_html=False, drop_memo=False, blame_jobs=8)
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert argv[argv.index("--jobs") + 1] == "8"
-    assert "--blame-jobs" not in argv
-
-
-def test_no_blame_jobs_leaves_the_runner_default_alone(runner, jq):
-    """Zero means "not asked for", so the runner keeps its own default."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, blame_jobs=0)
-    ctp.run_project(jq)
-    assert "--jobs" not in runner.argv("pipeline")
 
 
 def test_run_accepts_blame_jobs_on_a_patched_runner(
@@ -1647,33 +1589,6 @@ def test_memory_budget_counts_every_concurrent_job(monkeypatch):
     assert ctp.memory_budget_warning("3GB", 3) is not None, "1.4 x 3 x 3GB = 12.6 GiB"
 
 
-def test_memory_limit_is_forwarded_to_the_runner(runner, jq):
-    """Step 10 is the only step that can exhaust RAM. The cap only helps if it
-    reaches the runner argv."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, memory_limit="3GB")
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert argv[argv.index("--memory-limit") + 1] == "3GB"
-
-
-def test_duckdb_threads_is_forwarded_to_the_runner(runner, jq):
-    """Each sorting thread holds its own buffers, so the count bounds the peak."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, duckdb_threads=2)
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert argv[argv.index("--duckdb-threads") + 1] == "2"
-
-
-def test_no_memory_flags_leave_the_generator_default_alone(runner, jq):
-    """Unset means "not asked for", so generate_dataset.py keeps its own 8GB."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False,
-                     memory_limit=None, duckdb_threads=0)
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert "--memory-limit" not in argv
-    assert "--duckdb-threads" not in argv
-
-
 def test_run_warns_when_the_memory_budget_does_not_fit(
         sandbox, monkeypatch, runner_script, capsys):
     """The warning is the guard whose absence killed the 2026-09-15 run."""
@@ -1719,28 +1634,6 @@ def test_run_accepts_the_memory_flags_on_a_patched_runner(
 # metadata columns, and the sidecar is what fills them. Getting this wrong is
 # quiet: the run succeeds and the columns are blank.
 # --------------------------------------------------------------------------- #
-
-def test_the_sidecar_is_forwarded_with_this_project_as_the_key(runner, jq):
-    """The sidecar is keyed by the manifest name, which is what the runner is
-    already told through --repo-name, so the key is not the operator's to get
-    wrong."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False,
-                     project_meta="/somewhere/project_meta.json")
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert argv[argv.index("--project-meta") + 1] == "/somewhere/project_meta.json"
-    assert argv[argv.index("--project-key") + 1] == jq["name"]
-
-
-def test_no_sidecar_sends_neither_flag(runner, jq):
-    """Absent means absent: the generator then writes the metadata columns empty
-    and the file still matches the corpus contract."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, project_meta="")
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert "--project-meta" not in argv
-    assert "--project-key" not in argv
-
 
 def test_run_accepts_a_sidecar_on_a_patched_runner(
         sandbox, monkeypatch, runner_script):
@@ -2111,34 +2004,6 @@ def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq)
 # here are as much about what it refuses as about what it forwards.
 # --------------------------------------------------------------------------- #
 
-def test_mask_widened_is_forwarded_to_the_runner(runner, jq):
-    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
-                     mask_widened=True)
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert "--mask-widened" in argv
-    # Still before the positional FROM_STEP, which the runner reads from the tail.
-    assert argv[-1] == "2"
-
-
-def test_no_mask_widened_sends_no_flag_so_the_refusal_stays_the_default(runner, jq):
-    """The default is a full rebuild on a mask change. Nothing in this change may
-    make that happen by accident."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
-                     mask_widened=False)
-    ctp.run_project(jq)
-    assert "--mask-widened" not in runner.argv("pipeline")
-
-
-def test_a_missing_mask_widened_option_sends_no_flag(runner, jq):
-    """run_project reads _OPTS directly, so a caller that never set the key must
-    get the safe behaviour rather than a crash."""
-    ctp._OPTS.clear()
-    ctp._OPTS.update(skip_html=False, drop_memo=False)
-    ctp.run_project(jq)
-    assert "--mask-widened" not in runner.argv("pipeline")
-
-
 def test_mask_widened_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
     """This is the one flag that reuses a cache the tool otherwise refuses. A log
     a reader cannot tell that from is not good enough."""
@@ -2188,34 +2053,6 @@ def test_an_override_warns_that_the_recorded_mask_will_not_match(sandbox, monkey
 # changes neither — which is exactly how a 16-day-stale rust_tokenizer shipped
 # shifted token columns and the run exited 0.
 # ---------------------------------------------------------------------------
-
-def test_retokenize_is_forwarded_to_the_runner(runner, jq):
-    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
-                     mask_widened=False, retokenize="rs")
-    ctp.run_project(jq)
-    argv = runner.argv("pipeline")
-    assert "--retokenize" in argv
-    assert argv[argv.index("--retokenize") + 1] == "rs"
-    # Still before the positional FROM_STEP, which the runner reads from the tail.
-    assert argv[-1] == "2"
-
-
-def test_no_retokenize_sends_no_flag_so_nothing_is_discarded_by_accident(runner, jq):
-    """The default must never delete cached work. This flag is opt-in only."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
-                     mask_widened=False, retokenize="")
-    ctp.run_project(jq)
-    assert "--retokenize" not in runner.argv("pipeline")
-
-
-def test_a_missing_retokenize_option_sends_no_flag(runner, jq):
-    """run_project reads _OPTS directly, so a caller that never set the key gets
-    the safe behaviour rather than a crash."""
-    ctp._OPTS.clear()
-    ctp._OPTS.update(skip_html=False, drop_memo=False)
-    ctp.run_project(jq)
-    assert "--retokenize" not in runner.argv("pipeline")
-
 
 def test_retokenize_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
     """This flag DELETES cached work. A reader of the log must see which extensions
