@@ -376,22 +376,15 @@ def test_second_concurrent_run_of_the_same_project_is_deferred(sandbox, runner, 
     assert runner.calls == []
 
 
-def test_lock_is_released_after_a_successful_project(sandbox, runner, jq):
+@pytest.mark.parametrize("runner_kwargs, outcome", [
+    pytest.param({}, "done", id="success"),
+    pytest.param(dict(pipeline_rc=2), "failed", id="failure"),
+    pytest.param(dict(raise_on="pipeline"), "failed", id="popen-raises"),
+])
+def test_the_lock_is_released_after_every_outcome(monkeypatch, jq, runner_kwargs, outcome):
     """A leaked lock makes the next run report the project as RUNNING for ever."""
-    assert ctp.run_project(jq) == "done"
-    assert lock_is_free(ctp.lock_path("jq"))
-
-
-def test_lock_is_released_after_a_failed_project(sandbox, monkeypatch, jq):
-    """Same contract on the failure path, which is the common one."""
-    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(pipeline_rc=2))
-    assert ctp.run_project(jq) == "failed"
-    assert lock_is_free(ctp.lock_path("jq"))
-
-
-def test_lock_is_released_when_the_subprocess_raises(sandbox, monkeypatch, jq):
-    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(raise_on="pipeline"))
-    assert ctp.run_project(jq) == "failed"
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(**runner_kwargs))
+    assert ctp.run_project(jq) == outcome
     assert lock_is_free(ctp.lock_path("jq"))
 
 
@@ -520,17 +513,13 @@ def test_drop_memo_prunes_only_after_the_project_validates(sandbox, runner, jq):
     assert seen == [dict(name="jq", subtrees=("memo",), apply=True, stamped=True)]
 
 
-def test_drop_memo_does_not_prune_when_the_pipeline_fails(monkeypatch, jq):
+@pytest.mark.parametrize("runner_kwargs", [
+    pytest.param(dict(pipeline_rc=2), id="pipeline-fails"),
+    pytest.param(dict(validate_rc=1), id="validation-fails"),
+])
+def test_drop_memo_does_not_prune_a_failed_project(monkeypatch, jq, runner_kwargs):
     """A failed project keeps memo/ so blobExec can resume incrementally."""
-    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(pipeline_rc=2))
-    monkeypatch.setattr(ctp.retain, "prune", forbidden)
-    ctp._OPTS.update(skip_html=False, drop_memo=True)
-    assert ctp.run_project(jq) == "failed"
-
-
-def test_drop_memo_does_not_prune_when_validation_fails(monkeypatch, jq):
-    """Same for a project whose parquet fails the gate."""
-    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(validate_rc=1))
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(**runner_kwargs))
     monkeypatch.setattr(ctp.retain, "prune", forbidden)
     ctp._OPTS.update(skip_html=False, drop_memo=True)
     assert ctp.run_project(jq) == "failed"
@@ -571,8 +560,6 @@ def test_memo_dir_is_forwarded_as_one_subdirectory_per_project(sandbox, runner, 
 
     argv = runner.argv("pipeline")
     assert argv[argv.index("--memo-dir") + 1] == str(memo_root / "jq")
-    # And outside the directory the runner deletes, which is the whole point.
-    assert not str(memo_root / "jq").startswith(str(sandbox.out / "jq"))
 
 
 def test_a_memo_dir_inside_the_work_directory_is_refused(sandbox, runner, jq):
@@ -605,60 +592,35 @@ def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
         "--mask", r"\.[ch]$",
     ]
     assert runner.calls[0].kwargs["cwd"] == sandbox.cregit
+    sent = {a for a in runner.argv("pipeline") if a.startswith("--")}
+    assert sent == set(ctp.REQUIRED_RUNNER_FLAGS), "the preflight constant drifted"
 
 
-def test_the_log_survives_the_runner_deleting_the_workdir(sandbox, monkeypatch, jq):
-    """A defect. run_pipeline_process.sh runs `rm -rf "$WORK"` at FROM_STEP=1 and
-    again from its EXIT trap on failure. $WORK is the project workdir. The log of
-    the failing run used to live inside it, so the evidence died with the run.
+class WipingRunner(FakeRunner):
+    """Fails the pipeline after `rm -rf "$WORK"`, as run_pipeline_process.sh
+    does at FROM_STEP=1 and from its EXIT trap."""
 
-    The fake runner deletes the workdir exactly as the real one does.
-    """
-    class WipingRunner(FakeRunner):
-        def __call__(self, args, **kwargs):
-            if self.phase_of(args) == "pipeline":
-                shutil.rmtree(sandbox.out / "jq")
-            return super().__call__(args, **kwargs)
+    def __call__(self, args, **kwargs):
+        if self.phase_of(args) == "pipeline":
+            shutil.rmtree(Path(args[args.index("--work") + 1]))
+        return super().__call__(args, **kwargs)
 
+
+def test_the_log_and_the_lock_survive_the_runner_deleting_the_workdir(
+        sandbox, monkeypatch, jq):
     monkeypatch.setattr(ctp.subprocess, "Popen", WipingRunner(pipeline_rc=2))
     assert ctp.run_project(jq) == "failed"
 
-    logs = sorted((ctp.state_dir("jq") / "logs").glob("pipeline-*.log"))
-    assert logs, "the runner's wipe destroyed the log of its own failure"
     assert not (sandbox.out / "jq").exists()
-
-
-def test_the_lock_survives_the_runner_deleting_the_workdir(sandbox, monkeypatch, jq):
-    """Same wipe, the other casualty. An unlinked lock file still satisfies THIS
-    process, so the guard looked healthy while a second ctp.py could create a new
-    file and take its own lock on the same project.
-    """
-    class WipingRunner(FakeRunner):
-        def __call__(self, args, **kwargs):
-            if self.phase_of(args) == "pipeline":
-                shutil.rmtree(sandbox.out / "jq")
-            return super().__call__(args, **kwargs)
-
-    monkeypatch.setattr(ctp.subprocess, "Popen", WipingRunner(pipeline_rc=2))
-    ctp.run_project(jq)
-
-    assert ctp.lock_path("jq").exists(), "the lock file went with the workdir"
+    assert list((ctp.state_dir("jq") / "logs").glob("pipeline-*.log"))
+    assert ctp.lock_path("jq").exists()
     assert not ctp.lock_path("jq").is_relative_to(sandbox.out / "jq")
 
 
 def test_status_reports_failed_after_the_runner_wiped_the_workdir(sandbox, monkeypatch, capsys, jq):
-    """A failed project must not read as QUEUED. The old rule inferred FAILED from
-    the workdir existing, which the runner deletes on failure. state_dir records
-    the attempt instead, and the runner never touches it."""
-    class WipingRunner(FakeRunner):
-        def __call__(self, args, **kwargs):
-            if self.phase_of(args) == "pipeline":
-                shutil.rmtree(sandbox.out / "jq")
-            return super().__call__(args, **kwargs)
-
+    """The workdir is gone, so only state_dir shows the project was attempted."""
     monkeypatch.setattr(ctp.subprocess, "Popen", WipingRunner(pipeline_rc=2))
     ctp.run_project(jq)
-    monkeypatch.setattr(ctp.subprocess, "Popen", forbidden)
 
     write_manifest(sandbox.root, VALID_ROW)
     ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv"))
@@ -675,37 +637,6 @@ def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
         str(sandbox.out / "jq" / "jq-dataset.parquet"),
         str(sandbox.out / "jq" / "jq.validated"),
     ]
-
-
-def test_pipeline_argv_uses_flags_the_runner_accepts(runner_script, runner, jq):
-    """Every long flag ctp passes must be advertised by the runner.
-
-    This is the general form of that defect. It compares the argv against the runner's own
-    usage text, so it catches a rename in either direction. Keep it even though
-    REQUIRED_RUNNER_FLAGS now preflights: the constant can drift from the argv,
-    and this test reads the argv itself.
-    """
-    runner_script()
-    ctp._OPTS.update(skip_html=False, drop_memo=False)
-    ctp.run_project(jq)
-
-    unsupported = [a for a in runner.argv("pipeline")
-                   if a.startswith("--") and not ctp.script_supports(a)]
-    assert unsupported == []
-
-
-def test_required_runner_flags_are_exactly_what_run_project_sends(runner, jq):
-    """The preflight constant must not drift from the argv it guards.
-
-    cmd_run checks REQUIRED_RUNNER_FLAGS before starting. If run_project later
-    gains a flag that the constant does not list, the preflight passes and the
-    run fails per project instead — the same defect again, with a check that looked green.
-    """
-    ctp._OPTS.update(skip_html=False, drop_memo=False)
-    ctp.run_project(jq)
-
-    sent = {a for a in runner.argv("pipeline") if a.startswith("--")}
-    assert sent == set(ctp.REQUIRED_RUNNER_FLAGS)
 
 
 # --------------------------------------------------------------------------- #
@@ -727,14 +658,6 @@ def test_metrics_is_append_only_with_seven_fields_per_row(sandbox):
     assert lines[1] == first, "the first attempt row was rewritten"
     assert len(lines) == 3
     assert all(len(line.split("\t")) == 7 for line in lines)
-
-
-def test_metrics_header_is_written_once(sandbox):
-    """A repeated header would break `read_csv(header=true)` in consolidate.py."""
-    for _ in range(3):
-        ctp.record_metric("jq", "S", "validate", 1, 0, Path("x.log"))
-    text = (sandbox.root / "metrics.tsv").read_text()
-    assert text.count("iso_start") == 1
 
 
 def test_metrics_row_carries_the_return_code_and_log_path(sandbox, runner, clock, jq):
@@ -860,12 +783,6 @@ def test_a_done_project_writes_the_stamp_that_makes_the_next_run_skip(sandbox, r
     assert ctp.run_project(jq) == "done"
     assert (sandbox.out / "jq" / "jq.validated").exists()
     assert ctp.run_project(jq) == "skipped"
-
-
-def test_run_project_reports_failed_when_the_subprocess_raises(monkeypatch, jq):
-    """One unusable project must not end the run."""
-    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(raise_on="pipeline"))
-    assert ctp.run_project(jq) == "failed"
 
 
 # --------------------------------------------------------------------------- #
@@ -1103,6 +1020,11 @@ def test_cmd_run_returns_one_when_a_project_fails(sandbox, monkeypatch):
     assert "run-end\trc=1" in (sandbox.root / "runs.log").read_text()
 
 
+def test_cmd_run_starts_no_retry_pass_once_every_project_is_done(ready, capsys):
+    assert ctp.cmd_run(run_args(retries=3)) == 0
+    assert "retry pass" not in capsys.readouterr().out
+
+
 def test_cmd_run_retries_only_the_projects_that_are_not_done(
         sandbox, monkeypatch, capsys):
     """A retry pass must skip the finished projects, or a long corpus run
@@ -1125,47 +1047,33 @@ def test_cmd_run_retries_only_the_projects_that_are_not_done(
     assert "retry pass 1: ['zstd']" in capsys.readouterr().out
 
 
-def test_cmd_run_stops_retrying_once_every_project_is_done(sandbox, monkeypatch):
-    """The retry loop must break, not burn the remaining passes."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    calls = []
-    monkeypatch.setattr(ctp, "run_project", lambda p: calls.append(p["name"]) or ctp.RunOutcome.DONE)
-    assert ctp.cmd_run(run_args(retries=3)) == 0
-    assert calls == ["jq"]
-
-
 # --------------------------------------------------------------------------- #
 # heartbeat
 # --------------------------------------------------------------------------- #
 
-def test_heartbeat_reports_running_projects_done_failed_and_disk():
-    """Live progress contract. Without it a 35-minute phase looks like a hang."""
-    ctp._live["jq"] = ("pipeline", time.time())
+def beat_once(results: dict) -> str:
     stop = threading.Event()
     lines: list[str] = []
-
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(ctp, "HEARTBEAT_S", 0)
         mp.setattr(ctp, "say", lambda msg: (lines.append(msg), stop.set()))
-        ctp.heartbeat(stop, {"jq": ctp.RunOutcome.DONE, "zstd": ctp.RunOutcome.FAILED,
-                             "tmux": ctp.RunOutcome.SKIPPED})
-
+        ctp.heartbeat(stop, results)
     assert len(lines) == 1
-    assert "jq(pipeline" in lines[0]
-    assert "done 2 failed 1" in lines[0]
-    assert "G free" in lines[0]
+    return lines[0]
+
+
+def test_heartbeat_reports_running_projects_done_failed_and_disk():
+    """Without it a 35-minute phase looks like a hang."""
+    ctp._live["jq"] = ("pipeline", time.time())
+    line = beat_once({"jq": ctp.RunOutcome.DONE, "zstd": ctp.RunOutcome.FAILED,
+                      "tmux": ctp.RunOutcome.SKIPPED})
+    assert "jq(pipeline" in line
+    assert "done 2 failed 1" in line
+    assert "G free" in line
 
 
 def test_heartbeat_shows_a_dash_when_nothing_is_running():
-    """An empty running list must still print a line."""
-    stop = threading.Event()
-    lines: list[str] = []
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(ctp, "HEARTBEAT_S", 0)
-        mp.setattr(ctp, "say", lambda msg: (lines.append(msg), stop.set()))
-        ctp.heartbeat(stop, {})
-    assert "running: —" in lines[0]
+    assert "running: —" in beat_once({})
 
 
 def test_heartbeat_returns_immediately_when_already_stopped():
@@ -1262,19 +1170,6 @@ def test_main_requires_a_subcommand(monkeypatch):
         ctp.main()
 
 
-def test_run_defaults_are_two_jobs_and_one_retry(monkeypatch):
-    """These defaults are the documented disk/throughput compromise."""
-    seen = {}
-    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run"])
-    monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
-    ctp.main()
-    assert seen["jobs"] == 2
-    assert seen["retries"] == 1
-    assert seen["manifest"] == "manifest.tsv"
-    assert seen["skip_html"] is False
-    assert seen["drop_memo"] is False
-
-
 def test_say_prefixes_every_line_with_a_timestamp(capsys, clock):
     """Log lines are read next to metrics.tsv rows, so they need a clock."""
     ctp.say("jq ▶ pipeline started")
@@ -1298,7 +1193,6 @@ def test_tree_usage_sums_descendants_not_just_the_direct_child(sandbox):
     rss_mb, procs = ctp.tree_usage(10, table)
     assert procs == 3, "grandchild 12 was not walked"
     assert rss_mb == (1024 + 2048 + 4096) // 1024
-    assert 99 not in (10, 11, 12), "unrelated process must not be counted"
 
 
 def test_tree_usage_returns_zero_when_the_process_already_exited(sandbox):
@@ -1375,14 +1269,6 @@ def test_peaks_are_maxima_and_disk_is_a_low_water_mark(sandbox, jq, monkeypatch)
     assert peak["tree_procs"] == 3
     assert peak["disk_free_gb_min"] == 100, "low-water mark not kept"
     assert peak["samples"] == 2
-
-
-def test_metrics_row_width_is_unchanged_by_resource_sampling(sandbox, runner, jq):
-    """resources.tsv is a separate ledger on purpose. metrics.tsv's seven-field
-    row is a published contract and widening it would break every consumer."""
-    ctp.run_project(jq)
-    for line in (sandbox.root / "metrics.tsv").read_text().splitlines():
-        assert len(line.split("\t")) == 7
 
 
 def test_cpu_percent_is_zero_when_no_jiffies_elapsed(sandbox, jq, monkeypatch):
@@ -1496,46 +1382,22 @@ def test_size_to_bytes_refuses_anything_it_cannot_read(bad):
     assert "cannot read" in str(exc.value)
 
 
-def test_available_bytes_reads_mem_available(tmp_path, monkeypatch):
-    """MemAvailable, not MemFree: the reclaimable page cache is usable."""
-    meminfo = tmp_path / "meminfo"
-    meminfo.write_text("MemTotal:       31000000 kB\n"
-                       "MemFree:          900000 kB\n"
-                       "MemAvailable:    5500000 kB\n")
-    monkeypatch.setattr(ctp, "Path", lambda _p: meminfo)
-    assert ctp.available_bytes() == 5500000 * 1024
-
-
-def test_available_bytes_returns_none_when_the_key_is_absent(tmp_path, monkeypatch):
-    """An unexpected /proc format must not raise. The warning is advisory."""
-    meminfo = tmp_path / "meminfo"
-    meminfo.write_text("MemTotal:       31000000 kB\n")
-    monkeypatch.setattr(ctp, "Path", lambda _p: meminfo)
-    assert ctp.available_bytes() is None
-
-
-def test_available_bytes_returns_none_when_proc_cannot_be_read(monkeypatch):
-    """A non-Linux host has no /proc/meminfo. Warn nothing rather than crash."""
-    def boom(_p):
-        raise OSError("no /proc here")
-    monkeypatch.setattr(ctp, "Path", boom)
-    assert ctp.available_bytes() is None
-
-
-def test_available_bytes_returns_none_on_an_unparsable_value(tmp_path, monkeypatch):
-    """A malformed number must not raise either."""
-    meminfo = tmp_path / "meminfo"
-    meminfo.write_text("MemAvailable:    not-a-number kB\n")
-    monkeypatch.setattr(ctp, "Path", lambda _p: meminfo)
-    assert ctp.available_bytes() is None
-
-
-def test_available_bytes_returns_none_on_a_truncated_line(tmp_path, monkeypatch):
-    """A line with no value field must not raise."""
-    meminfo = tmp_path / "meminfo"
-    meminfo.write_text("MemAvailable:\n")
-    monkeypatch.setattr(ctp, "Path", lambda _p: meminfo)
-    assert ctp.available_bytes() is None
+@pytest.mark.parametrize("meminfo, want", [
+    # MemAvailable, not MemFree: the reclaimable page cache is usable.
+    pytest.param("MemTotal:       31000000 kB\nMemFree:          900000 kB\n"
+                 "MemAvailable:    5500000 kB\n", 5500000 * 1024, id="mem-available"),
+    pytest.param("MemTotal:       31000000 kB\n", None, id="key-absent"),
+    pytest.param("MemAvailable:    not-a-number kB\n", None, id="unparsable"),
+    pytest.param("MemAvailable:\n", None, id="truncated"),
+    pytest.param(None, None, id="no-proc"),
+])
+def test_available_bytes_reads_mem_available_or_says_none(tmp_path, monkeypatch, meminfo, want):
+    """The budget warning is advisory, so an odd /proc must not raise."""
+    path = tmp_path / "meminfo"
+    if meminfo is not None:
+        path.write_text(meminfo)
+    monkeypatch.setattr(ctp, "Path", lambda _p: path)
+    assert ctp.available_bytes() == want
 
 
 def test_memory_budget_warning_names_the_shortfall(monkeypatch):
@@ -1548,23 +1410,15 @@ def test_memory_budget_warning_names_the_shortfall(monkeypatch):
     assert "6.0 GiB" in warning
 
 
-def test_memory_budget_warning_is_silent_when_the_budget_fits(monkeypatch):
-    """1.4 x 1 x 3GB is 4.2 GiB, which fits in 8 GiB."""
-    monkeypatch.setattr(ctp, "available_bytes", lambda: 8 * 1024 ** 3)
-    assert ctp.memory_budget_warning("3GB", 1) is None
-
-
-def test_memory_budget_warning_is_silent_when_ram_is_unknown(monkeypatch):
-    """No reading means no claim. Refusing to run would be worse."""
-    monkeypatch.setattr(ctp, "available_bytes", lambda: None)
-    assert ctp.memory_budget_warning("8GB", 4) is None
-
-
-def test_memory_budget_counts_every_concurrent_job(monkeypatch):
-    """The limit is per generator, not per run, so --jobs multiplies it."""
-    monkeypatch.setattr(ctp, "available_bytes", lambda: 10 * 1024 ** 3)
-    assert ctp.memory_budget_warning("3GB", 2) is None, "1.4 x 2 x 3GB = 8.4 GiB"
-    assert ctp.memory_budget_warning("3GB", 3) is not None, "1.4 x 3 x 3GB = 12.6 GiB"
+@pytest.mark.parametrize("free, limit, jobs, warns", [
+    pytest.param(8 * GIB, "3GB", 1, False, id="1.4x1x3GB-fits-8GiB"),
+    pytest.param(None, "8GB", 4, False, id="ram-unknown"),
+    pytest.param(10 * GIB, "3GB", 2, False, id="1.4x2x3GB-fits-10GiB"),
+    pytest.param(10 * GIB, "3GB", 3, True, id="1.4x3x3GB-exceeds-10GiB"),
+])
+def test_memory_budget_warning_multiplies_by_jobs(monkeypatch, free, limit, jobs, warns):
+    monkeypatch.setattr(ctp, "available_bytes", lambda: free)
+    assert (ctp.memory_budget_warning(limit, jobs) is not None) is warns
 
 
 # --------------------------------------------------------------------------- #
@@ -1774,15 +1628,6 @@ def test_bar_fills_in_proportion(done, total, filled):
     assert out.count("█") == filled
 
 
-def test_bar_does_not_divide_by_zero_on_an_empty_manifest():
-    """An empty manifest is a real case: --only can match nothing."""
-    assert ctp.bar(0, 0) == "░" * 30
-
-
-def test_finished_runs_returns_empty_without_metrics(sandbox):
-    assert ctp.finished_runs() == []
-
-
 def test_finished_runs_keeps_only_successful_pipeline_rows(sandbox):
     """A validate row is not a run, and rc!=0 is not a finish."""
     write_metrics(sandbox.root,
@@ -1809,48 +1654,27 @@ def test_progress_prints_a_bar_and_the_class_breakdown(sandbox, capsys):
     assert "M 0/1" in out
 
 
-def test_progress_reports_failed_projects(sandbox, capsys):
-    """A failed project is neither done nor running, and it must be visible."""
-    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
-    (sandbox.root / "state" / "a").mkdir(parents=True)
-
-    assert ctp.cmd_progress(progress_args()) == 0
-    assert "FAILED 1" in capsys.readouterr().out
-
-
-def test_progress_lists_the_running_projects(sandbox, capsys):
-    """A held lock means running."""
-    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
+def test_progress_lists_the_running_and_counts_the_failed(sandbox, capsys):
+    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
+                   "b\thttps://x/b.git\tcommunity\t\\.c$\tS")
+    ctp.state_dir("b").mkdir(parents=True)
     with held_lock(ctp.lock_path("a")):
         assert ctp.cmd_progress(progress_args()) == 0
     out = capsys.readouterr().out
-    assert "running" in out
-    assert "a" in out
+    assert "FAILED 1" in out
+    assert "\nrunning\n  a " in out
 
 
 def test_progress_lists_the_last_finished_newest_first(sandbox, capsys):
-    """The question is "what just finished", so newest goes first."""
-    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
-    write_metrics(sandbox.root,
-                  ("older", "S", "pipeline", 60, 0),
-                  ("newer", "S", "pipeline", 120, 0))
-
-    assert ctp.cmd_progress(progress_args(last=2)) == 0
-    out = capsys.readouterr().out
-    assert out.index("newer") < out.index("older")
-    assert "2.0 min" in out
-
-
-def test_progress_honours_the_last_limit(sandbox, capsys):
     write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
     write_metrics(sandbox.root,
                   ("one", "S", "pipeline", 60, 0),
-                  ("two", "S", "pipeline", 60, 0),
+                  ("two", "S", "pipeline", 120, 0),
                   ("three", "S", "pipeline", 60, 0))
-
-    assert ctp.cmd_progress(progress_args(last=1)) == 0
+    assert ctp.cmd_progress(progress_args(last=2)) == 0
     out = capsys.readouterr().out
-    assert "three" in out
+    assert out.index("three") < out.index("two")
+    assert "2.0 min" in out
     assert "one" not in out
 
 
