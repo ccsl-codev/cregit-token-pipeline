@@ -191,7 +191,7 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
             n_rows = None
             rows_unreadable = False
             if validated:
-                kv = dict(l.split("=") for l in stamp.read_text().splitlines()
+                kv = dict(l.split("=", 1) for l in stamp.read_text().splitlines()
                           if "=" in l)
                 raw = kv.get("rows", 0)
                 try:

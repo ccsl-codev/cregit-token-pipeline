@@ -260,10 +260,10 @@ def test_project_rows_counts_zero_for_a_stamp_without_a_rows_key(sandbox):
 
 
 def test_project_rows_ignores_extra_stamp_keys(sandbox):
-    """The stamp is a key=value bag; unknown keys are tolerated."""
+    """The stamp is a key=value bag; unknown keys, even with a second =, are tolerated."""
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq",
-                 stamp="rows=5\nbytes=6\nvalidated_by=ctp\n", parquet=True)
+                 stamp="rows=5\nbytes=6\nnote=a=b\n", parquet=True)
     assert consolidate.project_rows()[0][5] == 5
 
 
