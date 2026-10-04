@@ -7,31 +7,18 @@ resources.tsv
 smoke-*.log
 corpus-*.log
 
-# Per-project run state: logs/ and the single-instance lock, one directory per
-# project. Derived from a run. It lives here rather than in the project workdir
-# because run_pipeline_process.sh deletes that workdir (see STATE in ctp.py).
+# Per-project logs and lock (retain.STATE), kept out of the workdir the runner deletes.
 state/
 
-# Test environment and coverage output. run_tests.sh rebuilds the first; the rest
-# are derived from a run.
+# Test environment, coverage and build output.
 .venv/
 .coverage
 .coverage.*
 htmlcov/
 .pytest_cache/
-
-# Left behind by `pip install -e '.[dev]'` and by CI's --junitxml. Both are
-# derived from pyproject.toml and a run.
 *.egg-info/
 junit-*.xml
 
-# Caches from any helper that fetches public data. Large, machine-specific and
-# reproducible rather than source.
-.corpus-cache/
-
-# Inputs a user supplies, and output derived from a run. Not source, and this
-# repository ships no script that produces them: write your own manifest, and
-# your own provenance sidecar in the format documented in validate_schema.py
-# above EXPECTED_COLUMNS.
+# Inputs a user supplies. The sidecar format is documented in validate_schema.py.
 manifest.generated.tsv
 project_meta.json
