@@ -475,44 +475,6 @@ def test_from_step_is_appended_last_because_it_is_positional(runner, jq):
     assert argv[-2] == "--skip-html"
 
 
-def test_run_accepts_gc_on_a_checkout_that_implements_it(
-        sandbox, monkeypatch, runner_script):
-    """The refusal must not fire on the patched runner."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(gc="plain")) == 0
-    assert ctp._OPTS["gc"] == "plain"
-
-
-def test_run_announces_a_resume_so_the_operator_sees_it(
-        sandbox, monkeypatch, runner_script, capsys):
-    """A resume keeps whatever is already on disk. Say so, because the
-    difference between step 1 and step 3 is 15.2 h of tokenizing."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(from_step=3)) == 0
-    assert "resuming at step 3" in capsys.readouterr().out
-
-
-def test_run_starts_when_the_runner_does_support_skip_html(
-        sandbox, monkeypatch, runner_script):
-    """The refusal must not fire on a checkout that does implement the flag."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    args = run_args(jobs=1, retries=0, skip_html=True, drop_memo=False)
-    assert ctp.cmd_run(args) == 0
-    assert ctp._OPTS["skip_html"] is True
-
-
 def test_no_memo_is_an_alias_for_drop_memo(monkeypatch):
     """The alias must set the same flag, or the disk-frugal run silently keeps
     memo/ and fills the disk."""
@@ -619,19 +581,6 @@ def test_a_memo_dir_inside_the_work_directory_is_refused(sandbox, runner, jq):
     ctp._OPTS.update(skip_html=False, drop_memo=False,
                      memo_dir=str(sandbox.out / "jq" / "inner"))
     assert ctp.run_project(jq) == "failed"
-
-
-def test_run_accepts_a_memo_dir_on_a_patched_runner(
-        sandbox, monkeypatch, runner_script):
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    memo_root = sandbox.root / "memos"
-    memo_root.mkdir()
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(memo_dir=str(memo_root))) == 0
-    assert ctp._OPTS["memo_dir"] == str(memo_root)
 
 
 # --------------------------------------------------------------------------- #
@@ -1057,6 +1006,70 @@ def test_run_refuses_before_anything_starts(must_not_start, runner_script, usage
     assert not (must_not_start.root / "runs.log").exists()
 
 
+def accepted(over, opts=None, said=(), unsaid=(), ram=None, *, id):
+    return pytest.param(over, opts or {}, said, unsaid, ram, id=id)
+
+
+GIB = 1024 ** 3
+
+# run_args overrides, the _OPTS they must produce, and what the log must and
+# must not say. ram patches available_bytes for the memory budget check.
+ACCEPTED = [
+    accepted(dict(gc="plain"), dict(gc="plain"), id="gc"),
+    accepted(dict(skip_html=True), dict(skip_html=True), id="skip-html"),
+    accepted(dict(memo_dir=memos), dict(memo_dir=lambda root: str(root / "memos")),
+             id="memo-dir"),
+    accepted(dict(blame_jobs=12), dict(blame_jobs=12), id="blame-jobs"),
+    accepted(dict(memory_limit="3GB", duckdb_threads=2, jobs=2),
+             dict(memory_limit="3GB", duckdb_threads=2), unsaid=["memory budget"],
+             ram=32 * GIB, id="memory-flags-that-fit"),
+    accepted(dict(memory_limit="8GB", jobs=2), said=["WARNING: memory budget"],
+             ram=6 * GIB, id="memory-budget-that-does-not-fit"),
+    accepted(dict(project_meta=sidecar),
+             dict(project_meta=lambda root: str(root / "project_meta.json")), id="sidecar"),
+    accepted(dict(shards=2, shard_classes=" L , M ,"), dict(shard_classes=("L", "M")),
+             id="shard-classes-parsed"),
+    accepted(dict(shards=6, shard_classes="L,M"), said=["sharding 6-way", "L, M"],
+             id="shard-plan-announced"),
+    accepted(dict(from_step=3), said=["resuming at step 3"], id="resume-announced"),
+    accepted(dict(mask_widened=True, from_step=2),
+             said=["REUSE", "identity rows are discarded", "raw source"],
+             id="mask-widened-announced"),
+    accepted(dict(from_step=2), unsaid=["--mask-widened"], id="no-mask-widened-no-notice"),
+    # The sidecar records the manifest's mask, so an override makes it wrong.
+    accepted(dict(mask=r"\.rs$"),
+             said=["--mask overrides the manifest", r"\.rs$", "will not match"],
+             id="mask-override-warned"),
+    accepted(dict(retokenize="rs", from_step=2), said=["DISCARD", "rs"],
+             id="retokenize-announced"),
+    accepted(dict(retokenize="   ", from_step=1), id="blank-retokenize-is-absent"),
+    accepted(dict(allow_empty_provenance=True), dict(project_meta="", firm_map=""),
+             said=["WARNING: --allow-empty-provenance", "--project-meta absent",
+                   "--firm-map absent", "stratum"], id="escape-hatch-itemised"),
+    # Step 10 is the last step, so --from-step 11 can publish no Parquet.
+    accepted(dict(allow_empty_provenance=False, from_step=11), unsaid=["refusing"],
+             id="past-step-10-not-gated"),
+]
+
+
+@pytest.mark.parametrize("over, opts, said, unsaid, ram", ACCEPTED)
+def test_run_accepts_and_announces(ready, monkeypatch, capsys, over, opts, said, unsaid, ram):
+    if ram is not None:
+        monkeypatch.setattr(ctp, "available_bytes", lambda: ram)
+
+    def resolve(value):
+        return value(ready.root) if callable(value) else value
+
+    assert ctp.cmd_run(run_args(**{k: resolve(v) for k, v in over.items()})) == 0
+    for key, value in opts.items():
+        assert ctp._OPTS[key] == resolve(value)
+    out = capsys.readouterr().out
+    for text in said:
+        assert text in out
+    for text in unsaid:
+        assert text not in out
+
+
 def test_cmd_run_with_an_empty_manifest_does_nothing(sandbox, monkeypatch, capsys):
     """No manifest rows means no devenv capture and no runs.log row."""
     write_manifest(sandbox.root)
@@ -1422,29 +1435,6 @@ def test_proc_scan_agrees_with_real_proc_for_our_own_process(sandbox):
 # sharding
 # --------------------------------------------------------------------------- #
 
-def test_run_announces_the_shard_plan(sandbox, monkeypatch, capsys):
-    """A run that silently changed tokenizer mode would be hard to explain later
-    from the logs alone."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(shards=6, shard_classes="L,M")) == 0
-    out = capsys.readouterr().out
-    assert "sharding 6-way" in out
-    assert "L, M" in out
-
-
-def test_shard_classes_are_parsed_into_a_tuple(sandbox, monkeypatch):
-    """Whitespace and a trailing comma are normal in a hand-typed flag."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    ctp.cmd_run(run_args(shards=2, shard_classes=" L , M ,"))
-    assert ctp._OPTS["shard_classes"] == ("L", "M")
-
-
 def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
     """The two conditions are independent, so both are checked here rather than
     inferred from run_project's argv."""
@@ -1458,18 +1448,6 @@ def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
     assert ctp.shard_class(L) is False
     ctp._OPTS.clear()
     assert ctp.shard_class(L) is False, "an unset _OPTS must not shard"
-
-
-def test_run_accepts_blame_jobs_on_a_patched_runner(
-        sandbox, monkeypatch, runner_script):
-    """The refusal must not fire on the patched runner."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(blame_jobs=12)) == 0
-    assert ctp._OPTS["blame_jobs"] == 12
 
 
 # --------------------------------------------------------------------------- #
@@ -1589,64 +1567,11 @@ def test_memory_budget_counts_every_concurrent_job(monkeypatch):
     assert ctp.memory_budget_warning("3GB", 3) is not None, "1.4 x 3 x 3GB = 12.6 GiB"
 
 
-def test_run_warns_when_the_memory_budget_does_not_fit(
-        sandbox, monkeypatch, runner_script, capsys):
-    """The warning is the guard whose absence killed the 2026-09-15 run."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-    monkeypatch.setattr(ctp, "available_bytes", lambda: 6 * 1024 ** 3)
-
-    assert ctp.cmd_run(run_args(memory_limit="8GB", jobs=2)) == 0
-    assert "WARNING: memory budget" in capsys.readouterr().out
-
-
-def test_run_does_not_warn_when_the_memory_budget_fits(
-        sandbox, monkeypatch, runner_script, capsys):
-    """A warning on a safe setting would train the operator to ignore it."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-    monkeypatch.setattr(ctp, "available_bytes", lambda: 32 * 1024 ** 3)
-
-    assert ctp.cmd_run(run_args(memory_limit="3GB", jobs=2)) == 0
-    assert "memory budget" not in capsys.readouterr().out
-
-
-def test_run_accepts_the_memory_flags_on_a_patched_runner(
-        sandbox, monkeypatch, runner_script):
-    """The refusals must not fire on the patched runner."""
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-    monkeypatch.setattr(ctp, "available_bytes", lambda: 32 * 1024 ** 3)
-
-    assert ctp.cmd_run(run_args(memory_limit="3GB", duckdb_threads=2)) == 0
-    assert ctp._OPTS["memory_limit"] == "3GB"
-    assert ctp._OPTS["duckdb_threads"] == 2
-
-
 # --------------------------------------------------------------------------- #
 # --project-meta: the per-project provenance sidecar. Every Parquet carries 29
 # metadata columns, and the sidecar is what fills them. Getting this wrong is
 # quiet: the run succeeds and the columns are blank.
 # --------------------------------------------------------------------------- #
-
-def test_run_accepts_a_sidecar_on_a_patched_runner(
-        sandbox, monkeypatch, runner_script):
-    runner_script()
-    write_manifest(sandbox.root, VALID_ROW)
-    meta = sandbox.root / "project_meta.json"
-    meta.write_text("{}")
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(project_meta=str(meta))) == 0
-    assert ctp._OPTS["project_meta"] == str(meta)
-
 
 def test_a_relative_sidecar_path_is_made_absolute(
         sandbox, monkeypatch, runner_script):
@@ -1746,26 +1671,6 @@ def test_the_refusal_names_every_missing_flag_and_the_columns_at_stake(
     assert "validate.py passes it" in message
 
 
-def test_the_escape_hatch_lets_a_deliberate_blank_run_proceed(ready):
-    """A blanket refusal would break a fixture, a one-project smoke run, and a
-    corpus whose sidecar does not exist yet."""
-    assert ctp.cmd_run(run_args(allow_empty_provenance=True)) == 0
-    assert ctp._OPTS["project_meta"] == ""
-    assert ctp._OPTS["firm_map"] == ""
-
-
-def test_the_escape_hatch_itemises_what_it_gave_up(ready, capsys):
-    """Opting out of the only check between this run and a quietly wrong dataset
-    must be legible in the log, per flag, without inferring it from the absence of
-    a refusal."""
-    assert ctp.cmd_run(run_args(allow_empty_provenance=True)) == 0
-    out = capsys.readouterr().out
-    assert "WARNING: --allow-empty-provenance" in out
-    assert "--project-meta absent" in out
-    assert "--firm-map absent" in out
-    assert "stratum" in out
-
-
 def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
     """It must never arrive by default. This is the difference between the guard
     and the note it replaces."""
@@ -1792,15 +1697,6 @@ def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start)
         ctp.cmd_run(run_args(allow_empty_provenance=True, **kwargs))
     assert "nothing to allow" in str(exc.value)
     assert "wrapper" in str(exc.value)
-
-
-def test_a_run_that_cannot_reach_step_10_is_not_gated(ready, capsys):
-    """Step 10 is the LAST step of run_pipeline_process.sh, so --from-step 11
-    reaches no step at all: every step guard evaluates false and the runner exits
-    0 having done nothing. Such a run writes no Parquet, so it cannot write a
-    blank one, and gating it would refuse a harmless no-op."""
-    assert ctp.cmd_run(run_args(allow_empty_provenance=False, from_step=11)) == 0
-    assert "refusing" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("absent, expected", [
@@ -2004,45 +1900,6 @@ def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq)
 # here are as much about what it refuses as about what it forwards.
 # --------------------------------------------------------------------------- #
 
-def test_mask_widened_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
-    """This is the one flag that reuses a cache the tool otherwise refuses. A log
-    a reader cannot tell that from is not good enough."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(mask_widened=True, from_step=2)) == 0
-    out = capsys.readouterr().out
-    assert "REUSE" in out
-    assert "identity rows are discarded" in out
-    assert "raw source" in out
-
-
-def test_no_mask_widened_announces_nothing(sandbox, monkeypatch, capsys):
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(from_step=2)) == 0
-    assert "--mask-widened" not in capsys.readouterr().out
-
-
-def test_an_override_warns_that_the_recorded_mask_will_not_match(sandbox, monkeypatch,
-                                                                capsys):
-    """file_mask in the Parquet comes from the sidecar, which reads the manifest.
-    An override therefore makes the recorded mask a lie about how those tokens
-    were produced, and the operator has to be told."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(mask=r"\.rs$")) == 0
-    out = capsys.readouterr().out
-    assert r"--mask overrides the manifest" in out
-    assert r"\.rs$" in out
-    assert "will not match" in out
-
-
 # ---------------------------------------------------------------------------
 # --retokenize: discard ONE extension's cached tokenizations after the
 # tokenizer that produced them was corrected.
@@ -2053,24 +1910,3 @@ def test_an_override_warns_that_the_recorded_mask_will_not_match(sandbox, monkey
 # changes neither — which is exactly how a 16-day-stale rust_tokenizer shipped
 # shifted token columns and the run exited 0.
 # ---------------------------------------------------------------------------
-
-def test_retokenize_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
-    """This flag DELETES cached work. A reader of the log must see which extensions
-    lost their tokenizations without inferring it from the absence of a refusal."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-
-    assert ctp.cmd_run(run_args(retokenize="rs", from_step=2)) == 0
-    out = capsys.readouterr().out
-    assert "DISCARD" in out
-    assert "rs" in out
-
-
-def test_a_blank_retokenize_is_treated_as_absent(sandbox, monkeypatch):
-    """Whitespace from a shell variable that expanded to nothing must not count as
-    a request, and must not trip the step-2 refusal on an ordinary run."""
-    write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
-    monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
-    assert ctp.cmd_run(run_args(retokenize="   ", from_step=1)) == 0
