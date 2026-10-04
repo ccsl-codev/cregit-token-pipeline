@@ -1,9 +1,6 @@
-"""The universal file mask: one regex every project is tokenized with.
-
-The authority is cregit's tokenize/CregitLanguages.pm; tests/test_mask_drift.py holds
-the two equal. Left out: .am .ac (broken m4 lexer), .go .md .yaml (no parser), and
-.ixx .inl .cppm .cxxm .ipp (srcML 1.1.0 writes an empty token file and exits 0).
-"""
+"""The universal file mask. Authority: cregit's tokenize/CregitLanguages.pm, held equal by
+tests/test_mask_drift.py. Left out: .am .ac (broken m4 lexer), .go .md .yaml (no parser),
+.ixx .inl .cppm .cxxm .ipp (srcML 1.1.0 writes an empty token file and exits 0)."""
 from __future__ import annotations
 
 import re
