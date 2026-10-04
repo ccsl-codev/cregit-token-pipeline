@@ -527,6 +527,8 @@ def run_project(project: dict) -> str:
         # stale tokens straight back.
         if _OPTS.get("retokenize"):
             pipeline_args += ["--retokenize", _OPTS["retokenize"]]
+            if _OPTS.get("no_memo_but_tokenized_repo"):
+                pipeline_args += ["--no-memo-but-tokenized-repo"]
         # Put the memo outside the work directory, which a FROM_STEP=1 run
         # deletes. It matters now because the mask changed corpus-wide and
         # blobExec refuses to resume against a different one (Mapping.open), so
@@ -797,6 +799,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     # than as a missing feature, which is the worst of the two failures: nothing in
     # the output says the corrected tokenizer never ran.
     retokenize = (getattr(args, "retokenize", "") or "").strip()
+    no_memo_but_tokenized_repo = getattr(args, "no_memo_but_tokenized_repo", False)
+    if no_memo_but_tokenized_repo and not retokenize:
+        sys.exit("--no-memo-but-tokenized-repo needs --retokenize. It only answers the\n"
+                 "refusal --retokenize raises when the memo held none of the affected blobs.")
+    if no_memo_but_tokenized_repo and not script_supports("--no-memo-but-tokenized-repo"):
+        sys.exit(f"--no-memo-but-tokenized-repo is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                 "Check pipeline.cfg points at a checkout that has it.")
     if retokenize:
         if not script_supports("--retokenize"):
             sys.exit(f"--retokenize is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
@@ -949,6 +958,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                  from_step=args.from_step, gc=args.gc,
                  mask_widened=mask_widened,
                  retokenize=retokenize,
+                 no_memo_but_tokenized_repo=no_memo_but_tokenized_repo,
                  blame_jobs=args.blame_jobs,
                  memory_limit=args.memory_limit,
                  duckdb_threads=args.duckdb_threads,
@@ -1261,6 +1271,12 @@ def main() -> int:
                             "matching blob_map rows and the memo entries together, in "
                             "one transaction with the tree, commit and ref maps, and "
                             "refuses the run rather than invalidating nothing.")
+    run_p.add_argument("--no-memo-but-tokenized-repo", action="store_true",
+                       help="with --retokenize: the project's memo was deleted on "
+                            "purpose (--drop-memo), and the tokenizations live only in "
+                            "the blob map and the cregit repo. blobExec then accepts a "
+                            "memo that holds none of the affected blobs, but only when "
+                            "--memo-dir is the memo the tokenizer reads.")
     run_p.add_argument("--mask-widened", action="store_true",
                        help="reuse each project's existing tokenizations across a "
                             "MASK CHANGE instead of rebuilding from cold. Needs "

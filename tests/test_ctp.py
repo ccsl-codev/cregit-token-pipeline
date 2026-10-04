@@ -64,6 +64,7 @@ REAL_RUNNER_USAGE = """\
 #   --firm-canonical PATH  forward the canonical firm-name table to step 10
 #   --mask-widened    resume across a mask change, reusing blob_map
 #   --retokenize EXTS re-tokenize only these extensions after a tokenizer fix
+#   --no-memo-but-tokenized-repo  accept a memo deleted on purpose
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
 #   --jobs N      concurrent blame/HTML processes
@@ -1061,7 +1062,8 @@ def run_args(**over):
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
                 firm_map="", firm_canonical="", allow_empty_provenance=True,
-                mask="", mask_widened=False, retokenize="", reblame=False)
+                mask="", mask_widened=False, retokenize="", reblame=False,
+                no_memo_but_tokenized_repo=False)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -2647,6 +2649,43 @@ def test_retokenize_is_announced_with_what_it_discards(sandbox, monkeypatch, cap
     out = capsys.readouterr().out
     assert "DISCARD" in out
     assert "rs" in out
+
+
+def test_no_memo_but_tokenized_repo_is_forwarded_after_retokenize(runner, jq):
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
+                     mask_widened=False, retokenize="rs", no_memo_but_tokenized_repo=True)
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert "--no-memo-but-tokenized-repo" in argv
+    assert argv.index("--no-memo-but-tokenized-repo") > argv.index("--retokenize")
+    assert argv[-1] == "2"
+
+
+def test_no_memo_but_tokenized_repo_is_not_sent_unless_asked(runner, jq):
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
+                     mask_widened=False, retokenize="rs")
+    ctp.run_project(jq)
+    assert "--no-memo-but-tokenized-repo" not in runner.argv("pipeline")
+
+
+def test_no_memo_but_tokenized_repo_needs_retokenize(sandbox, monkeypatch):
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(no_memo_but_tokenized_repo=True, from_step=2))
+    assert "needs --retokenize" in str(exc.value)
+
+
+def test_no_memo_but_tokenized_repo_is_refused_on_a_runner_without_it(
+        sandbox, monkeypatch, runner_script):
+    runner_script(REAL_RUNNER_USAGE.replace("--no-memo-but-tokenized-repo", "--nope"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(retokenize="rs", no_memo_but_tokenized_repo=True, from_step=2))
+    assert "--no-memo-but-tokenized-repo is not implemented" in str(exc.value)
 
 
 def test_a_blank_retokenize_is_treated_as_absent(sandbox, monkeypatch):
