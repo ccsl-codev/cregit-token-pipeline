@@ -346,6 +346,37 @@ def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
     return reclaimed, not skipped
 
 
+def sweep(names: list[str], apply: bool) -> tuple[int, list[str], list[str]]:
+    """(bytes, skipped, live) over names."""
+    total = 0
+    skipped: list[str] = []
+    running: list[str] = []
+    for name in names:
+        got, ok = prune(name, apply=apply)
+        total += got
+        if not ok:
+            # Live needs only a later sweep; a skip needs looking at. prune() stays the guard.
+            (running if live(name) else skipped).append(name)
+    return total, skipped, running
+
+
+def print_sweep_summary(names: list[str], total: int, skipped: list[str],
+                        running: list[str], apply: bool, free_before: int) -> None:
+    verb = "reclaimed" if apply else "reclaimable"
+    say(f"TOTAL {verb} {human(total)} over "
+        f"{len(names) - len(skipped) - len(running)} project(s)")
+    if apply:
+        free_after = shutil.disk_usage(OUT).free
+        say(f"disk free {human(free_before)} -> {human(free_after)}")
+    else:
+        say("nothing was deleted — re-run with --apply to reclaim it")
+    if running:
+        say(f"LIVE {len(running)} project(s), a running pipeline holds the lock, "
+            f"left untouched: {' '.join(running)}")
+    if skipped:
+        say(f"SKIPPED {len(skipped)} project(s), not pruned: {' '.join(skipped)}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -373,32 +404,9 @@ def main() -> int:
     say(f"projects    {len(names)}: {' '.join(names)}")
     free_before = shutil.disk_usage(OUT).free
 
-    total = 0
-    skipped: list[str] = []
-    running: list[str] = []
-    for name in names:
-        got, ok = prune(name, apply=args.apply)
-        total += got
-        if not ok:
-            # Live needs only a later sweep; a skip needs looking at. prune() stays the guard.
-            (running if live(name) else skipped).append(name)
-
-    verb = "reclaimed" if args.apply else "reclaimable"
-    say(f"TOTAL {verb} {human(total)} over "
-        f"{len(names) - len(skipped) - len(running)} project(s)")
-    if args.apply:
-        free_after = shutil.disk_usage(OUT).free
-        say(f"disk free {human(free_before)} -> {human(free_after)}")
-    else:
-        say("nothing was deleted — re-run with --apply to reclaim it")
-    if running:
-        say(f"LIVE {len(running)} project(s), a running pipeline holds the lock, "
-            f"left untouched: {' '.join(running)}")
-    if skipped:
-        say(f"SKIPPED {len(skipped)} project(s), not pruned: {' '.join(skipped)}")
-    if skipped or running:
-        return 1
-    return 0
+    total, skipped, running = sweep(names, args.apply)
+    print_sweep_summary(names, total, skipped, running, args.apply, free_before)
+    return 1 if skipped or running else 0
 
 
 if __name__ == "__main__":
