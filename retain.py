@@ -10,6 +10,7 @@ import fcntl
 import os
 import shutil
 import sys
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -232,81 +233,59 @@ def remove_tree(target: Path) -> list[str]:
     return errors
 
 
-def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
-          *, apply: bool = False) -> tuple[int, bool]:
-    """(bytes, ok); ok=False means not pruned. ctp.py calls prune(name, ("memo",),
-    apply=True). A dry run measures past a refusal so the total stays complete; apply
-    fails closed: one refused subtree deletes nothing for the project."""
+def _prune_keeper(name: str) -> str | None:
+    """finished()'s note on what is kept, or None after saying why name may not be pruned."""
     refusal = output_dir_refusal()
     if refusal:
         say(f"{name} — SKIP: refusing to operate on output_dir {OUT}, {refusal}")
-        return 0, False
+        return None
 
     try:
         check_name(name)
     except ValueError as exc:
         say(f"SKIP: {exc}")
-        return 0, False
+        return None
 
     # Before finished() and any stat, so a live run is spared the I/O.
     if live(name):
         say(f"{name} — SKIP: LIVE, another run holds {lock_path(name)}. memo/ is "
             f"blobExec's cache while it runs, so nothing was measured or deleted")
-        return 0, False
+        return None
 
     ok, why = finished(name)
     if not ok:
         say(f"{name} — SKIP: not finished ({why})")
-        return 0, False
+        return None
+    return why
 
-    workdir = OUT / name
-    plan: list[tuple[Path, str, int]] = []
-    refused: list[str] = []
-    skipped: list[str] = []
-    measured = 0
 
-    for subtree in subtrees:
-        try:
-            target = check_target(workdir, subtree)
-        except ValueError as exc:
-            say(f"{name} — REFUSE {subtree}/: {exc}")
-            refused.append(subtree)
-            continue
-        if not target.exists():
-            say(f"{name}    {subtree}/ absent, nothing to do")
-            continue
-        if not target.is_dir():
-            # A stray file says nothing about the sibling subtrees, so only it is skipped.
-            say(f"{name} — SKIP {subtree}/: exists but is not a directory, "
-                f"leaving it alone")
-            skipped.append(subtree)
-            continue
-        size, entries, violations = scan(target)
-        if violations:
-            for violation in violations[:5]:
-                say(f"{name} — REFUSE {subtree}/: {violation}")
-            refused.append(subtree)
-            continue
-        say(f"{name}    {'measured' if apply else 'would delete'} "
-            f"{subtree}/ — {human(size)} in {entries} entries")
-        plan.append((target, subtree, size))
-        measured += size
+def _measure_subtree(name: str, workdir: Path, subtree: str, apply: bool):
+    """(kind, subtree), or ("measured", (target, subtree, size)) for a clean subtree."""
+    try:
+        target = check_target(workdir, subtree)
+    except ValueError as exc:
+        say(f"{name} — REFUSE {subtree}/: {exc}")
+        return "refused", subtree
+    if not target.exists():
+        say(f"{name}    {subtree}/ absent, nothing to do")
+        return "absent", subtree
+    if not target.is_dir():
+        # A stray file says nothing about the sibling subtrees, so only it is skipped.
+        say(f"{name} — SKIP {subtree}/: exists but is not a directory, "
+            f"leaving it alone")
+        return "skipped", subtree
+    size, entries, violations = scan(target)
+    if violations:
+        for violation in violations[:5]:
+            say(f"{name} — REFUSE {subtree}/: {violation}")
+        return "refused", subtree
+    say(f"{name}    {'measured' if apply else 'would delete'} "
+        f"{subtree}/ — {human(size)} in {entries} entries")
+    return "measured", (target, subtree, size)
 
-    if refused:
-        blocked = ", ".join(f"{s}/" for s in refused)
-        if apply:
-            say(f"{name} — SKIP: {len(refused)} refused subtree(s) ({blocked}),"
-                f" so nothing was deleted for this project")
-            return 0, False
-        say(f"{name} — reclaimable {human(measured)} over the subtrees that "
-            f"passed, {len(refused)} refused ({blocked}) | keeping {why}")
-        return measured, False
 
-    if not apply:
-        say(f"{name} — reclaimable {human(measured)}{_note(skipped)}"
-            f" | keeping {why}")
-        return measured, not skipped
-
+def _delete_plan(name: str, plan: list[tuple[Path, str, int]]) -> tuple[int, bool]:
+    """(bytes reclaimed, ok). Stops at the first subtree that cannot be fully removed."""
     reclaimed = 0
     for target, subtree, size in plan:
         errors = remove_tree(target)
@@ -320,7 +299,48 @@ def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
             return reclaimed, False
         say(f"{name}    deleted {subtree}/ — {human(size)}")
         reclaimed += size
+    return reclaimed, True
 
+
+def _report_refused(name: str, refused: list[str], measured: int, why: str,
+                    apply: bool) -> tuple[int, bool]:
+    blocked = ", ".join(f"{s}/" for s in refused)
+    if apply:
+        say(f"{name} — SKIP: {len(refused)} refused subtree(s) ({blocked}),"
+            f" so nothing was deleted for this project")
+        return 0, False
+    say(f"{name} — reclaimable {human(measured)} over the subtrees that "
+        f"passed, {len(refused)} refused ({blocked}) | keeping {why}")
+    return measured, False
+
+
+def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
+          *, apply: bool = False) -> tuple[int, bool]:
+    """(bytes, ok); ok=False means not pruned. ctp.py calls prune(name, ("memo",),
+    apply=True). A dry run measures past a refusal so the total stays complete; apply
+    fails closed: one refused subtree deletes nothing for the project."""
+    why = _prune_keeper(name)
+    if why is None:
+        return 0, False
+
+    by_kind = defaultdict(list)
+    for subtree in subtrees:
+        kind, payload = _measure_subtree(name, OUT / name, subtree, apply)
+        by_kind[kind].append(payload)
+    refused, skipped, plan = by_kind["refused"], by_kind["skipped"], by_kind["measured"]
+    measured = sum(size for _, _, size in plan)
+
+    if refused:
+        return _report_refused(name, refused, measured, why, apply)
+
+    if not apply:
+        say(f"{name} — reclaimable {human(measured)}{_note(skipped)}"
+            f" | keeping {why}")
+        return measured, not skipped
+
+    reclaimed, ok = _delete_plan(name, plan)
+    if not ok:
+        return reclaimed, False
     say(f"{name} — reclaimed {human(reclaimed)}{_note(skipped)}"
         f" | keeping {why}")
     return reclaimed, not skipped
