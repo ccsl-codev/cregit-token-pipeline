@@ -726,42 +726,44 @@ def provenance_gaps(project_meta: str, firm_map: str, firm_canonical: str) -> li
     return gaps
 
 
+PROVENANCE_REFUSAL_TAIL = (
+    "This does not fail anything. The file keeps all 70 columns in the "
+    "right order, so validate.py passes it and no consumer can tell a "
+    "blank column from provenance that is genuinely unknown, which is "
+    "why a long, expensive run can finish and publish silently "
+    "inconsistent with the rest of the corpus.\n"
+    "Pass the flags this run is missing:\n"
+    "  --project-meta <your-project-meta>.json \\\n"
+    "  --firm-map <your-firm-map>.csv \\\n"
+    "  --firm-canonical <your-firm-canonical>.csv\n"
+    "If blank columns are genuinely what you want — a fixture, a "
+    "one-project smoke run, a corpus whose sidecar does not exist yet — "
+    "say so with --allow-empty-provenance.")
+
+
 def enforce_provenance(gaps: list[tuple[str, str]], args: argparse.Namespace) -> None:
     """Exit when a run reaching step 10 has a provenance gap, unless
     --allow-empty-provenance. Refuses rather than warns: nothing later can tell
     a blank column from provenance that is genuinely unknown."""
     allow_empty = bool(args.allow_empty_provenance)
-    reaches_dataset = args.from_step <= DATASET_STEP
-    if gaps and reaches_dataset and not allow_empty:
-        sys.exit(
-            f"refusing this run: it reaches step {DATASET_STEP} and would publish a "
-            "Parquet with blank provenance.\n"
-            + "".join(f"  {flag} absent — {cost}\n" for flag, cost in gaps)
-            + "This does not fail anything. The file keeps all 70 columns in the "
-              "right order, so validate.py passes it and no consumer can tell a "
-              "blank column from provenance that is genuinely unknown, which is "
-              "why a long, expensive run can finish and publish silently "
-              "inconsistent with the rest of the corpus.\n"
-              "Pass the flags this run is missing:\n"
-              "  --project-meta <your-project-meta>.json \\\n"
-              "  --firm-map <your-firm-map>.csv \\\n"
-              "  --firm-canonical <your-firm-canonical>.csv\n"
-              "If blank columns are genuinely what you want — a fixture, a "
-              "one-project smoke run, a corpus whose sidecar does not exist yet — "
-              "say so with --allow-empty-provenance.")
     if allow_empty and not gaps:
         sys.exit("--allow-empty-provenance has nothing to allow: --project-meta, "
                  "--firm-map and --firm-canonical are all present, so no column "
                  "would be blank. Drop the flag — left in a wrapper it would "
                  "silence the guard on the next run that does omit one.")
-    if allow_empty and gaps and reaches_dataset:
-        say("WARNING: --allow-empty-provenance: this run will publish a Parquet "
-            "with blank provenance, on purpose.")
-        for flag, cost in gaps:
-            say(f"         {flag} absent — {cost}")
-        say("         Do not mix these rows into the corpus: they are "
-            "schema-valid and indistinguishable from rows whose provenance is "
-            "genuinely unknown.")
+    if not gaps or args.from_step > DATASET_STEP:
+        return
+    itemised = "".join(f"  {flag} absent — {cost}\n" for flag, cost in gaps)
+    if not allow_empty:
+        sys.exit(f"refusing this run: it reaches step {DATASET_STEP} and would publish a "
+                 f"Parquet with blank provenance.\n{itemised}{PROVENANCE_REFUSAL_TAIL}")
+    say("WARNING: --allow-empty-provenance: this run will publish a Parquet "
+        "with blank provenance, on purpose.")
+    for flag, cost in gaps:
+        say(f"         {flag} absent — {cost}")
+    say("         Do not mix these rows into the corpus: they are "
+        "schema-valid and indistinguishable from rows whose provenance is "
+        "genuinely unknown.")
 
 
 def announce_run(opts: dict, jobs: int) -> None:
