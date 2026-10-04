@@ -78,50 +78,57 @@ def default_manifests() -> list[Path]:
     return [CORPUS / DEFAULT_MANIFEST]
 
 
-def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
-    """None means default_manifests(). A project named twice is indexed once, from the
-    first manifest. Broken projects are flagged, not raised, so the rest stay indexed."""
-    if manifests is None:
-        manifests = default_manifests()
-    rows = []
+def manifest_entries(manifests: Sequence[Path]):
+    """(name, url, category, size_class) per row, the first row wins for a repeated name."""
     seen: set[str] = set()
     for manifest in manifests:
         for line in Path(manifest).read_text().splitlines():
             if not line.strip() or line.startswith("#"):
                 continue
-            name, url, category, file_filter, size_class = line.split("\t")
+            name, url, category, _file_filter, size_class = line.split("\t")
             if name in seen:
                 print(f"  ! {name} is named twice, "
                       f"the later row in {Path(manifest).name} is ignored",
                       file=sys.stderr)
                 continue
             seen.add(name)
-            workdir = OUT / name
-            stamp = workdir / f"{name}.validated"
-            parquet = workdir / f"{name}-dataset.parquet"
-            validated = stamp.exists()
-            state = project_state(name, workdir)
-            n_rows = None
-            rows_unreadable = False
-            if validated:
-                kv = dict(l.split("=", 1) for l in stamp.read_text().splitlines()
-                          if "=" in l)
-                raw = kv.get("rows", 0)
-                try:
-                    n_rows = int(raw)
-                except ValueError:
-                    print(f"  ! {name}: stamp rows={raw!r} is not an integer, "
-                          "token_rows left null", file=sys.stderr)
-                    rows_unreadable = True
-            has_parquet = parquet.exists()
-            rows.append(ProjectRow(
-                name=name, url=url, category=category, size_class=size_class,
-                state=state, token_rows=n_rows,
-                parquet_path=str(parquet) if has_parquet else None,
-                rows_unreadable=rows_unreadable,
-                parquet_missing=validated and not has_parquet,
-                excluded_because=PUBLICATION_EXCLUSIONS.get(name)))
-    return rows
+            yield name, url, category, size_class
+
+
+def stamp_rows(name: str, stamp: Path) -> tuple[int | None, bool]:
+    """(token_rows, rows_unreadable) from a validated stamp."""
+    kv = dict(l.split("=", 1) for l in stamp.read_text().splitlines() if "=" in l)
+    raw = kv.get("rows", 0)
+    try:
+        return int(raw), False
+    except ValueError:
+        print(f"  ! {name}: stamp rows={raw!r} is not an integer, "
+              "token_rows left null", file=sys.stderr)
+        return None, True
+
+
+def project_row(name: str, url: str, category: str, size_class: str) -> ProjectRow:
+    workdir = OUT / name
+    stamp = workdir / f"{name}.validated"
+    parquet = workdir / f"{name}-dataset.parquet"
+    validated = stamp.exists()
+    n_rows, rows_unreadable = stamp_rows(name, stamp) if validated else (None, False)
+    has_parquet = parquet.exists()
+    return ProjectRow(
+        name=name, url=url, category=category, size_class=size_class,
+        state=project_state(name, workdir), token_rows=n_rows,
+        parquet_path=str(parquet) if has_parquet else None,
+        rows_unreadable=rows_unreadable,
+        parquet_missing=validated and not has_parquet,
+        excluded_because=PUBLICATION_EXCLUSIONS.get(name))
+
+
+def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
+    """None means default_manifests(). A project named twice is indexed once, from the
+    first manifest. Broken projects are flagged, not raised, so the rest stay indexed."""
+    if manifests is None:
+        manifests = default_manifests()
+    return [project_row(*entry) for entry in manifest_entries(manifests)]
 
 
 def schema_split(paths: Sequence[str]) -> tuple[list[str], list, list]:
