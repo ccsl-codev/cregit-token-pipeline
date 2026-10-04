@@ -29,13 +29,14 @@ import sys
 
 import duckdb
 
+from validate_schema import compare_schema, read_schema
+
 USAGE = "usage: validate.py <dataset.parquet> <stamp-file>"
 MIN_BYTES = 10_000
 EXIT_REJECTED = 1
 EXIT_USAGE = 2
 
 COUNT_SQL = "select count(*) from read_parquet(?)"
-SCHEMA_SQL = "describe select * from read_parquet(?)"
 
 
 def reject(reason: str) -> None:
@@ -58,9 +59,10 @@ def main() -> None:
     if n <= 0:
         reject("parquet has zero rows")
 
-    cols = [r[0] for r in duckdb.sql(SCHEMA_SQL, params=[parquet]).fetchall()]
+    drifts = compare_schema(read_schema(parquet))
+    if drifts:
+        reject(f"schema drift ({len(drifts)}): " + "; ".join(map(str, drifts[:3])))
     print(f"OK rows={n} bytes={size}")
-    print(f"cols={cols}")
 
     with open(stamp, "w") as f:
         f.write(f"rows={n}\nbytes={size}\n")

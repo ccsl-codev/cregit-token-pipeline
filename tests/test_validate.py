@@ -42,13 +42,13 @@ if "duckdb" not in sys.modules:  # pragma: no cover - import plumbing
         sys.modules["duckdb"] = _stub
 
 import validate  # noqa: E402
+from validate_schema import EXPECTED_COLUMNS  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
 
-COLUMNS = ("repo_name", "commit_id", "token", "token_type", "author")
 
 SCRIPT = Path(validate.__file__).resolve()
 
@@ -86,7 +86,7 @@ class FakeResult:
 class FakeSql:
     """Recording stand-in for duckdb.sql. Reads nothing."""
 
-    def __init__(self, count=4321, columns=COLUMNS):
+    def __init__(self, count=4321, columns=EXPECTED_COLUMNS):
         self.queries: list[str] = []
         self.params: list[list] = []
         self.count = count
@@ -98,7 +98,7 @@ class FakeSql:
         if query.startswith("select count(*)"):
             return FakeResult(row=(self.count,))
         if query.startswith("describe"):
-            return FakeResult(rows=[(c, "VARCHAR", None) for c in self.columns])
+            return FakeResult(rows=[(c, t, None) for c, t in self.columns])
         raise AssertionError(f"unexpected query: {query}")
 
 
@@ -149,13 +149,20 @@ def test_a_good_parquet_writes_the_completion_stamp(invoke, parquet, stamp):
     assert stamp.read_text() == f"rows=4321\nbytes={parquet.stat().st_size}\n"
 
 
-def test_the_gate_reports_rows_bytes_and_columns(invoke, parquet, stamp, capsys):
-    """The phase log is the record of what was accepted, so it must name the
-    row count and the schema."""
+def test_the_gate_reports_rows_and_bytes(invoke, parquet, stamp, capsys):
+    """The phase log is the record of what was accepted."""
     invoke(parquet, stamp)
-    out = capsys.readouterr().out
-    assert f"OK rows=4321 bytes={parquet.stat().st_size}" in out
-    assert "cols=['repo_name', 'commit_id', 'token', 'token_type', 'author']" in out
+    assert f"OK rows=4321 bytes={parquet.stat().st_size}" in capsys.readouterr().out
+
+
+def test_a_parquet_that_drifts_from_the_contract_is_rejected(invoke, parquet, stamp, capsys):
+    """A stamp lets --drop-memo delete memo/, so a drifted file must not get one."""
+    drifted = (*EXPECTED_COLUMNS[:-1], (EXPECTED_COLUMNS[-1][0], "BLOB"))
+    with pytest.raises(SystemExit) as exc:
+        invoke(parquet, stamp, sql=FakeSql(columns=drifted))
+    assert exc.value.code == validate.EXIT_REJECTED
+    assert "schema drift (1)" in capsys.readouterr().err
+    assert not stamp.exists()
 
 
 def test_the_gate_counts_rows_and_describes_the_named_parquet(invoke, parquet, stamp):
