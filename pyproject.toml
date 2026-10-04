@@ -15,7 +15,7 @@
 [project]
 name = "cregit-token-pipeline"
 version = "0.1.0"
-description = "Corpus selection, orchestration and validation for the cregit token pipeline"
+description = "Orchestration and validation for the cregit token pipeline"
 readme = "README.md"
 
 # 3.12, measured, not chosen. The floor is set by two standard-library calls in

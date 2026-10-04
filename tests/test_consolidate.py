@@ -268,7 +268,7 @@ def test_project_rows_ignores_extra_stamp_keys(sandbox):
 
 
 def test_project_rows_survives_a_non_numeric_rows_value(sandbox, capsys):
-    """One bad stamp must not stop the derived index for 1,423 projects.
+    """One bad stamp must not stop the derived index for every other project.
 
     This was an expected failure. Before the fix int(kv.get('rows', 0)) was
     unguarded, so a stamp reading rows=many raised ValueError and ended

@@ -121,12 +121,8 @@ def test_the_contract_has_no_duplicate_columns():
 
 
 def test_the_contract_records_the_measured_column_count():
-    """70: the 38 measured from the updated cregit on 2026-09-13, plus the 29
-    per-project provenance columns injected from project_meta.json on 2026-09-19,
-    plus the 3 firm columns joined from a domain-to-firm CSV the caller supplies,
-    on 2026-09-20.
-    The earlier kernel snapshot had 23; 15 of the additions to that are
-    commit-trailer footers."""
+    """70: 38 from cregit, 29 per-project provenance columns and 3 firm columns.
+    15 of them are commit-trailer footers."""
     assert len(CONTRACT) == 70
     assert sum(1 for n, _ in CONTRACT if n.startswith("footer_")) == 15
 

@@ -36,7 +36,6 @@ Benchmarking/visibility contract (shared with the previous shell runner):
 from __future__ import annotations
 
 import argparse
-import csv
 import fcntl
 import functools
 import os
@@ -47,7 +46,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
@@ -841,10 +840,8 @@ def resolve_provenance_paths(args: argparse.Namespace) -> tuple[str, str, str]:
         # made the runner reject its own sidecar (rc=2) on the first real run.
         project_meta = str(Path(args.project_meta).resolve())
 
-    # The firm map, under the same rules and for a sharper reason: a map that
-    # never arrives does not fail the run, it publishes blank firm columns across
-    # the whole corpus, and firm attribution is the measurement this corpus
-    # exists for.
+    # A firm map that never arrives does not fail the run: it publishes blank
+    # firm columns across the whole corpus.
     firm_map = firm_canonical = ""
     if args.firm_map:
         if not Path(args.firm_map).is_file():
@@ -886,17 +883,11 @@ def provenance_gaps(project_meta: str, firm_map: str, firm_canonical: str) -> li
                      "file_mask"))
     if not firm_map:
         gaps.append(("--firm-map",
-                     "3 firm columns empty on every row: firm_raw, firm, "
-                     "firm_source — and firm attribution is the measurement this "
-                     "corpus exists for"))
+                     "3 firm columns empty on every row: firm_raw, firm, firm_source"))
     elif not firm_canonical:
-        # Not an empty column, a wrong one, which is why it is listed separately:
-        # `firm` gets firm_raw's value verbatim, so the 48 split spellings stay
-        # split and every firm's share is understated.
+        # Not an empty column, a wrong one: `firm` gets firm_raw's value verbatim.
         gaps.append(("--firm-canonical",
-                     "`firm` repeats `firm_raw` instead of the reviewed canonical "
-                     "name, so the 48 split spellings stay split and every firm's "
-                     "share is understated"))
+                     "`firm` repeats `firm_raw` instead of the reviewed canonical name"))
     return gaps
 
 
@@ -925,7 +916,7 @@ def enforce_provenance(gaps: list[tuple[str, str]], args: argparse.Namespace) ->
               "why a long, expensive run can finish and publish silently "
               "inconsistent with the rest of the corpus.\n"
               "Pass the flags this run is missing:\n"
-              "  --project-meta project_meta.json \\\n"
+              "  --project-meta <your-project-meta>.json \\\n"
               "  --firm-map <your-firm-map>.csv \\\n"
               "  --firm-canonical <your-firm-canonical>.csv\n"
               "If blank columns are genuinely what you want — a fixture, a "
@@ -963,7 +954,7 @@ def announce_run(opts: dict, jobs: int) -> None:
         # mask a lie unless the operator updates the manifest too.
         say(f"WARNING: --mask overrides the manifest for every project in this "
             f"run: {opts['mask']}")
-        say("         project_meta.json records the MANIFEST's mask, so the "
+        say("         the --project-meta sidecar records the MANIFEST's mask, so the "
             "Parquet's file_mask column will not match this run.")
     if opts["memory_limit"]:
         warning = memory_budget_warning(opts["memory_limit"], jobs)
@@ -1084,35 +1075,12 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 BAR_WIDTH = 30
-# Only a full run measures the rate. metrics.tsv cannot tell a full run from a
-# --from-step resume, and a resume looks impossibly fast since it skips
-# already-finished steps. The median over projects rejects those outliers.
-MIN_RATE_SAMPLES = 2
 
 
 def bar(done: int, total: int, width: int = BAR_WIDTH) -> str:
     """A fixed-width progress bar. Never divides by zero on an empty manifest."""
     filled = round(width * done / total) if total else 0
     return "█" * filled + "░" * (width - filled)
-
-
-def commit_counts(projects: list[dict]) -> dict:
-    """Commits per project name, read from candidates.csv.
-
-    Joins on `clone_url`, NOT on name: the manifest name is a slug that
-    lowercases and maps `_` and `.` to `-`, so four of the 200 drawn projects do
-    not match by name. Returns {} when the file is absent, so progress still
-    prints without an ETA.
-    """
-    path = CORPUS / "candidates.csv"
-    if not path.exists():
-        return {}
-    by_url = {}
-    with path.open(newline="") as fh:
-        for row in csv.DictReader(fh):
-            if row.get("commits"):
-                by_url[row["clone_url"]] = int(row["commits"])
-    return {p["name"]: by_url[p["url"]] for p in projects if p["url"] in by_url}
 
 
 def finished_runs() -> list[tuple]:
@@ -1127,25 +1095,8 @@ def finished_runs() -> list[tuple]:
     return runs
 
 
-def measured_rate(commits: dict) -> tuple[float, int] | None:
-    """Median seconds per 1000 commits over the finished runs, and the sample size.
-
-    None when too few projects have finished to say anything.
-    """
-    rates = []
-    for name, _cls, dur in finished_runs():
-        if commits.get(name):
-            rates.append(dur / commits[name] * 1000)
-    if len(rates) < MIN_RATE_SAMPLES:
-        return None
-    rates.sort()
-    mid = len(rates) // 2
-    median = rates[mid] if len(rates) % 2 else (rates[mid - 1] + rates[mid]) / 2
-    return median, len(rates)
-
-
 def cmd_progress(args: argparse.Namespace) -> int:
-    """A one-screen progress bar, the last finished projects, and an ETA."""
+    """A one-screen progress bar and the last finished projects."""
     projects = read_manifest(CORPUS / args.manifest, None)
     states = {p["name"]: retain.project_state(p["name"], OUT / p["name"]) for p in projects}
     done = [p for p in projects if states[p["name"]] == "DONE"]
@@ -1163,22 +1114,6 @@ def cmd_progress(args: argparse.Namespace) -> int:
             per_class.append(f"{cls} {hits}/{len(members)}")
     print(f"        {'  '.join(per_class)}"
           f"{'  |  FAILED ' + str(len(failed)) if failed else ''}")
-
-    commits = commit_counts(projects)
-    rate = measured_rate(commits)
-    if rate and commits:
-        median, samples = rate
-        left = sum(commits[p["name"]] for p in projects
-                   if states[p["name"]] != "DONE" and p["name"] in commits)
-        seconds = left / 1000 * median / max(args.jobs, 1)
-        finish = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-        print(f"rate    {median:.1f} s per 1k commits (median of {samples} projects)")
-        print(f"eta     {seconds / 3600:.1f} h at --jobs {args.jobs}"
-              f"  ->  {finish.strftime('%Y-%m-%d %H:%M')} UTC"
-              f"  ({left:,} commits left)")
-    else:
-        print(f"rate    not enough finished projects yet "
-              f"(need {MIN_RATE_SAMPLES}, and candidates.csv for commit counts)")
 
     if running:
         print("\nrunning")
@@ -1232,9 +1167,9 @@ def main() -> int:
                             "Cannot be combined with --drop-memo")
     run_p.add_argument("--shards", type=int, default=0,
                        help="tokenize in N shards (needs >1 to take effect). "
-                            "Measured: --mode pipeline leaves ~14 of 16 cores idle "
-                            "on an L-class project. Costs transient disk, so it is "
-                            "opt-in and limited to --shard-classes")
+                            "One L-class project leaves most cores idle. Costs "
+                            "transient disk, so it is opt-in and limited to "
+                            "--shard-classes")
     run_p.add_argument("--shard-classes", default="L",
                        help="comma-separated size classes to shard (default L). "
                             "S and M gain nothing: three concurrent projects "
@@ -1287,9 +1222,8 @@ def main() -> int:
                             "this is not a per-project constant: it is a real "
                             "join, so the map stays an external auditable file. "
                             "OMITTING THIS SILENTLY EMPTIES 3 COLUMNS on every "
-                            "row — firm_raw, firm and firm_source — and firm "
-                            "attribution is the measurement this corpus exists "
-                            "for. The run still succeeds and still validates, so "
+                            "row — firm_raw, firm and firm_source. The run still "
+                            "succeeds and still validates, so "
                             "ctp REFUSES a run that reaches step 10 without it, "
                             "unless you pass --allow-empty-provenance")
     run_p.add_argument("--firm-canonical", default="", metavar="PATH",
@@ -1297,8 +1231,7 @@ def main() -> int:
                             "fills the `firm` column. Needs --firm-map. "
                             "OMITTING THIS DOES NOT "
                             "EMPTY `firm`, it fills it WRONGLY: `firm` repeats "
-                            "`firm_raw` verbatim, so the 48 split spellings stay "
-                            "split and every firm's share is understated. ctp "
+                            "`firm_raw` verbatim instead of the canonical name. ctp "
                             "REFUSES a run that reaches step 10 with --firm-map "
                             "but without this, unless you pass "
                             "--allow-empty-provenance")
@@ -1324,10 +1257,9 @@ def main() -> int:
                             "generated manifests fill with the universal mask")
     run_p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
                        help="run the blame step with N parallel workers. Blame is "
-                            "the bottleneck: measured serially on Linux it managed "
-                            "3 files per minute against 64,536 files, which is 14 "
-                            "days. Each file is independent, so N does not change "
-                            "the output. Omit to accept the runner's default of 1")
+                            "the bottleneck, and each file is independent, so N "
+                            "does not change the output. Omit to accept the "
+                            "runner's default of 1")
     run_p.set_defaults(fn=cmd_run)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
@@ -1335,13 +1267,10 @@ def main() -> int:
     st_p.set_defaults(fn=cmd_status)
 
     pr_p = sub.add_parser("progress",
-                          help="progress bar, last finished projects and an ETA")
+                          help="progress bar and last finished projects")
     pr_p.add_argument("--manifest", default="manifest.tsv")
     pr_p.add_argument("--last", type=int, default=5, metavar="N",
                       help="how many finished projects to list (default 5)")
-    pr_p.add_argument("--jobs", type=int, default=2,
-                      help="concurrency to assume for the ETA (default 2). Set it "
-                           "to the --jobs the run actually uses")
     pr_p.set_defaults(fn=cmd_progress)
 
     db_p = sub.add_parser("db", help="rebuild ctp.duckdb (tracking table + unified tokens view)")

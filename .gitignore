@@ -33,6 +33,5 @@ junit-*.xml
 # repository ships no script that produces them: write your own manifest, and
 # your own provenance sidecar in the format documented in validate_schema.py
 # above EXPECTED_COLUMNS.
-candidates.csv
 manifest.generated.tsv
 project_meta.json

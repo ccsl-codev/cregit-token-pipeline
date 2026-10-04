@@ -240,8 +240,8 @@ def _held_by_this_process(lockfile: Path) -> bool:
     reaches prune() from `run --drop-memo` while still holding the project's own
     lock — the call sits inside the try whose finally closes the lockfile. A
     liveness guard that did not except the caller's own lock would therefore
-    refuse every single --drop-memo prune, memo/ would survive for all 1,423
-    projects, and the disk-frugal corpus run would fill the disk instead. The
+    refuse every single --drop-memo prune, memo/ would survive for every
+    project, and the disk-frugal corpus run would fill the disk instead. The
     guard has to distinguish "another run owns this workdir" from "the run asking
     owns it", and this is that distinction.
 

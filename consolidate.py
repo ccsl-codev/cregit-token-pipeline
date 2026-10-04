@@ -36,10 +36,8 @@ flagged parquet_missing = true, counted, and named in the printed summary, so
 `select name from projects where parquet_missing` finds it.
 
 PUBLICATION EXCLUSIONS. A project can be validly drawn, run, and validated, and
-still not belong in the published dataset. The near-duplicate fork pair is the
-case that forced this: two Tencent repos share 505,056 of their ~507,000 source
-blobs and 134,715 commits, so publishing both counts the same authorship twice.
-Deleting the manifest row would hide the decision and break the sampling record,
+still not belong in the published dataset: two near-duplicate forks would count
+the same authorship twice. Deleting the manifest row would hide the decision and break the sampling record,
 so the row stays and the project is named in PUBLICATION_EXCLUSIONS with its
 reason. The effect is the schema gate's: the parquet is left out of the tokens
 view, the project keeps its row in `projects`, and the reason is recorded in
