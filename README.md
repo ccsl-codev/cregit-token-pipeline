@@ -138,7 +138,3 @@ CI deselects nothing. Tests that assert facts about the cregit checkout named in
 `pipeline.cfg` self-skip when that checkout is absent, which it is on any runner.
 Tests that read a real Parquet need DuckDB and self-skip without it, so install
 the `dev` extra to run the whole suite.
-
-`run_tests.sh` passes `-m "not network"`. No test carries that marker today; it
-is kept so a test that needs the network can be added and stay out of the
-default run.
