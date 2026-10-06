@@ -1,6 +1,0 @@
-# Corpus manifest (TSV): name	url	category	file_filter	size_class
-scrcpy	https://github.com/Genymobile/scrcpy.git	community	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	S
-terminal	https://github.com/microsoft/terminal.git	company-owned	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	S
-redis	https://github.com/redis/redis.git	company-owned	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	S
-rustlings	https://github.com/rust-lang/rustlings.git	foundation	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	S
-dubbo	https://github.com/apache/dubbo.git	foundation	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	S

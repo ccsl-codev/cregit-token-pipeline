@@ -1,5 +1,5 @@
 # Corpus manifest (TSV): name  url  category  file_filter  size_class
-# size_class: S < 30k commits | M 30k-150k | L > 150k  (drives --jobs mix, see run_corpus.sh)
+# size_class: S < 30k commits | M 30k-150k | L > 150k
 # Lines starting with # are ignored.
 jq	https://github.com/jqlang/jq.git	community	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	S
 zstd	https://github.com/facebook/zstd.git	enterprise	(?i)\.(c|c\+\+|cc|cp|cpp|cxx|h|h\+\+|hh|hpp|hxx|java|rs|tcc)$	S

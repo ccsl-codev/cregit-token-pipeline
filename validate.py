@@ -1,41 +1,23 @@
 #!/usr/bin/env python3
-"""Post-run gate: a project is only DONE if its parquet passes these checks.
-
-Usage: validate.py <dataset.parquet> <stamp-file>
-Run inside `devenv shell` (needs duckdb).
-
-Exit status is the whole interface ctp.py sees:
-
-  0  accepted. The stamp is written, so the next ctp pass skips the project.
-  1  rejected. No stamp, so the next ctp pass retries the project.
-  2  wrong invocation. Usage is printed and nothing else is touched.
-
-The checks are plain `if` statements on purpose. `assert` vanishes under
-`python -O`, and a gate that an interpreter flag can delete is not a gate: any
-parquet would then be stamped DONE.
-
-The parquet path is bound as a query parameter and is never pasted into the SQL
-text. Project names come from the manifest, so a name holding a single quote
-would otherwise unbalance the string literal and break the gate, and a crafted
-name could inject SQL.
-"""
+"""Post-run gate. Usage: validate.py <dataset.parquet> <stamp-file>
+Exit 0 writes the stamp (ctp skips the project), 1 rejects, 2 is a usage error.
+Plain `if`s, not `assert` (gone under `python -O`); the path is a bound SQL parameter."""
 import os
 import sys
 
 import duckdb
+
+from validate_schema import compare_schema, read_schema
 
 USAGE = "usage: validate.py <dataset.parquet> <stamp-file>"
 MIN_BYTES = 10_000
 EXIT_REJECTED = 1
 EXIT_USAGE = 2
 
-# `?` is a bound parameter, filled in by duckdb, not by string formatting.
 COUNT_SQL = "select count(*) from read_parquet(?)"
-SCHEMA_SQL = "describe select * from read_parquet(?)"
 
 
 def reject(reason: str) -> None:
-    """Report a rejected parquet and exit. Writes no stamp."""
     print(f"FAIL {reason}", file=sys.stderr)
     sys.exit(EXIT_REJECTED)
 
@@ -54,13 +36,14 @@ def main() -> None:
     if n <= 0:
         reject("parquet has zero rows")
 
-    cols = [r[0] for r in duckdb.sql(SCHEMA_SQL, params=[parquet]).fetchall()]
+    drifts = compare_schema(read_schema(parquet))
+    if drifts:
+        reject(f"schema drift ({len(drifts)}): " + "; ".join(map(str, drifts[:3])))
     print(f"OK rows={n} bytes={size}")
-    print(f"cols={cols}")
 
     with open(stamp, "w") as f:
         f.write(f"rows={n}\nbytes={size}\n")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

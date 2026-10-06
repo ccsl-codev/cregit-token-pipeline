@@ -1,12 +1,11 @@
 # Design
 
 Why the pipeline is built the way it is. For what it produces, read
-[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md); for how a project is labelled, read
-[`CODEBOOK.md`](CODEBOOK.md).
+[`../README.md`](../README.md); the schema itself is authoritative in
+`validate_schema.py`.
 
-**Goal.** Run cregit end-to-end over a stratified corpus of FLOSS projects and
-produce per-project token-authorship datasets that share one schema, on a single
-workstation (16 cores, 30 GB RAM, one NVMe).
+**Goal.** Run cregit end-to-end over a corpus of FLOSS projects and produce
+per-project token-authorship datasets that share one schema, on one machine.
 
 ## 1. Two layers
 
@@ -16,9 +15,9 @@ for forwarded flags (§4).
 
 1. **Per-project layer** — cregit's `run_pipeline_process.sh`, one work directory
    per project, embarrassingly parallel across projects.
-2. **Corpus layer** — selection, provenance, validation, retention and
-   anonymization. Pure functions over committed inputs or finished artefacts, so
-   each is cheap and re-runnable at any time.
+2. **Corpus layer** — the provenance guard, validation, retention and the index. Pure
+   functions over committed inputs or finished artefacts, so each is cheap and
+   re-runnable at any time.
 
 What already existed and is reused rather than rebuilt:
 
@@ -35,37 +34,36 @@ manifest.*.tsv ──► ctp.py run ──► run_pipeline_process.sh ──► 
                         validate.py ──► .validated stamp ◄──────────┤
                         retain.py   ──► delete memo/ and html/  ◄────┤
                         consolidate.py ──► ctp.duckdb (derived index)
-                        anonymize_parquet.py ──► verify_anon.py ──► release
 ```
 
 ## 2. The manifest is a five-field contract
 
 ```
-name	url	category	file_mask	size_class
+name	url	category	file_filter	size_class
 ```
 
-Three parsers unpack exactly those five positions and four tests assert them.
-That rigidity has two consequences:
+`ctp.py` refuses a row without exactly those five fields, naming its line, and
+requires `size_class` to be S, M or L. That rigidity has two consequences:
 
 - The 29 per-project provenance fields could not be added as manifest columns.
   They live in `project_meta.json`, a **sidecar keyed by manifest name and joined
   on `clone_url`**, passed to the generator with `--project-meta`.
 - A sixth `pinned_commit` field cannot be added either, so runs are not pinned to
-  a revision. This is a known limitation, not a decision; see
-  `DATASET-SCHEMA.md` §5.
+  a revision. This is a known limitation, not a decision: nothing in this
+  repository records which commit a run cloned, beyond what git itself keeps in
+  the per-project clone.
 
 `file_mask` is the **same universal mask for every project**: the union of every
 extension the tokenizer can parse, derived in `file_mask.py` from one extension
 list rather than typed out, because a mask and an extension list maintained
-separately drift in both directions and both directions are silent. It used to
-come from a per-language matrix keyed on GitHub's primary language, which dropped
-a polyglot project's other languages; `data/mask-impact.csv` measures what that
-cost. The column stays because it records which mask a Parquet was built with.
-Projects whose primary language has no tokenizer are still excluded at selection
-time.
+separately drift in both directions and both directions are silent. The
+column stays because it records which mask a Parquet was built with. A project
+whose language has no tokenizer still fails to produce useful rows; nothing in
+this repository screens for that before a run.
 
-Selection heuristics are a separate concern: `select_corpus.py` emits candidate
-rows for curation, and the runner only consumes a curated manifest.
+Choosing which repositories to run is a separate concern, and out of scope for
+this tool: it consumes a manifest you write; it does not draft, sample or
+curate one.
 
 ## 3. Per-project pipeline: the delta
 
@@ -73,7 +71,7 @@ Three flags forwarded to `run_pipeline_process.sh`:
 
 | Flag | What it really does |
 | --- | --- |
-| `--skip-html` | **Prevention.** The HTML view step is guarded, so `html/` (94–255 MB per project) is never created. Nothing downstream reads it. |
+| `--skip-html` | **Prevention.** The HTML view step is guarded, so `html/` is never created. Nothing downstream reads it. |
 | `--drop-memo` | **Cleanup, not prevention.** The tokenizer dies without a memo directory, so `memo/` is always written, then deleted once the project validates. `--no-memo` is an alias and warns about this. |
 | `--mask-widened` | Lets a resume accept a wider mask instead of rebuilding. Needs `--from-step 2`, because a step-1 run deletes the work directory first. |
 
@@ -81,9 +79,7 @@ Blame **cannot** be skipped: the generator consumes `--blame-dir`.
 
 ## 4. Runner: files are the ground truth
 
-Stdlib Python, no SQLite state authority. Snakemake was evaluated and rejected as
-not a tool this research community reads; GNU Parallel was built, validated, then
-superseded by Python for transparency.
+Stdlib Python, no SQLite state authority.
 
 State lives in files:
 
@@ -115,9 +111,8 @@ project work directory, which a from-scratch run deletes.
 
 ## 5. Disk lifecycle
 
-`memo/` plus `html/` is 68–96% of a work directory. Measured on four pilots,
-`memo/` alone was 45–88%. Keeping both across a large corpus does not fit on the
-disk; dropping both is what makes the corpus feasible.
+`memo/` plus `html/` is most of a work directory. Keeping both across a large
+corpus does not fit on the disk; dropping both is what makes the corpus feasible.
 
 | Artefact | Keep? | Why |
 | --- | --- | --- |
@@ -138,66 +133,81 @@ validated project is not re-run.
 
 ## 6. Validation
 
-Two gates, deliberately separate:
+- `validate.py` is the per-project gate the run invokes: file size, row count,
+  and every column name, type and position against `EXPECTED_COLUMNS`. It writes
+  the `.validated` stamp only when all of them pass, so `--drop-memo` never
+  deletes the `memo/` of a drifted file.
+- `validate_schema.py` runs the same contract check over many files at once and
+  reports every drift rather than the first. A corpus is unusable if one project
+  has 38 columns and another 70, or if `token_index` is BIGINT in one file and
+  VARCHAR in another: a consumer would union them and get silent nulls.
+  `consolidate.py` applies it again when it builds the `tokens` view.
 
-- `validate.py` asks *did this project produce data* — file size and row count.
-  It writes the `.validated` stamp, and it does **not** check columns.
-- `validate_schema.py` asks *do all projects agree* — every column name, type and
-  position against `EXPECTED_COLUMNS`, reporting every drift rather than the
-  first. A corpus is unusable if one project has 38 columns and another 70, or if
-  `token_index` is BIGINT in one file and VARCHAR in another: a consumer would
-  union them and get silent nulls.
-
-The run invokes only the first, so the schema gate has to be run over the corpus
-explicitly. Both keep the parquet path as a bound query parameter rather than
-pasting it into SQL, because project names come from a manifest.
+Both keep the parquet path as a bound query parameter rather than pasting it
+into SQL, because project names come from a manifest.
 
 The checks are plain `if` statements rather than `assert`, because `assert`
 vanishes under `python -O` and a gate an interpreter flag can delete is not a
 gate.
 
-## 7. Corpus-level stages
+## 7. The provenance guard
+
+`ctp.py run` refuses to reach the Parquet-writing step with a provenance gap —
+a missing `--project-meta`, a missing `--firm-map`, or a `--firm-map` given
+without `--firm-canonical` — unless `--allow-empty-provenance` says otherwise.
+
+It refuses rather than warns. Nothing downstream can tell a blank column from
+provenance that is genuinely unknown: the file still carries all 70 columns in
+the right order, so both validation gates pass it, and a long run can finish and
+publish a Parquet that is silently inconsistent with the rest of a corpus. A
+warning is easy to miss at the end of a long log; a refusal is not.
+
+The escape hatch takes no default, so it can only arrive by being typed, and it
+prints exactly which columns it gave up. It is refused in turn when nothing
+would actually be blank, so it cannot sit unused in a launcher script and
+silence a real gap on a later run that does have one.
+
+`--firm-canonical` is checked separately from `--firm-map` because the two fail
+differently. Omitting `--firm-map` leaves three columns empty, which the guard
+reports as a blank. Omitting `--firm-canonical` alone does not blank anything:
+`firm` silently repeats `firm_raw` instead of the canonical name. A wrong column is a different failure
+from a blank one, so the guard reports it as its own gap rather than folding it
+into the same message.
+
+## 8. Corpus-level stages
 
 Built:
 
-1. **`select_corpus.py`** — rosters and searches → control facts → `candidates.csv`
-   → a stratified `manifest.sample.tsv`. See `CODEBOOK.md`.
-2. **`shared_history.py`** — finds projects that carry another project's history,
-   which GitHub's fork flag does not. They are flagged, not excluded.
-3. **`project_meta.py`** — the 29-field provenance sidecar.
-4. **`build_domain_map.py`** — the domain→firm map, from public affiliation data
-   plus a curated overlay applied last, so a rebuild keeps the corrections.
-5. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
+1. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
    and a `tokens` view over every Parquet whose schema matches the contract. The
-   manifests indexed are selectable and default to the corpus run set; a
+   manifests indexed are selectable and default to `manifest.tsv`; a
    non-conforming file is excluded **by name, counted in the summary**, because a
    silent exclusion is worse than the crash it replaces — the row count then
    looks plausible.
-6. **`anonymize_parquet.py`** / **`verify_anon.py`** — the release path. The
-   e-mail local part becomes `author_NNNN` and names become `Author N`, through a
-   single registry so one person has one pseudonym everywhere, including inside
-   the trailer arrays. **The e-mail domain is preserved on purpose**: firm
-   attribution resolves from the domain, so replacing it would collapse every
-   firm to unknown and destroy the analysis the dataset exists to support. Column
-   handling is fail-closed. There is no salt and no key — ids come from sorting
-   the distinct values, so output is reproducible and two releases diff cleanly,
-   and the protection is simply not publishing the registry. `verify_anon.py`
-   checks the published files alone, needs no secrets, and is therefore the check
-   worth putting in a release script.
 
 Not built. Each is a gap, not a plan:
 
+- **Choosing which repositories to run.** No script here drafts a manifest,
+  draws a sample, or assigns a project's stratum or history cluster. Those
+  choices, and the 29 provenance columns that record them, are entirely on the
+  person who writes the manifest and the optional sidecar.
+- **Building the domain-to-firm map or the canonical-name table.** `ctp.py run`
+  forwards `--firm-map` and `--firm-canonical` to cregit; building those two
+  CSVs is on the person who supplies them.
 - **A corpus-level firm or organisation rollup.** Attribution is per token only.
 - **A per-project metadata table / dataset card** — name, category, URL, pinned
   sha, commit count, token rows, file count, languages, run duration, and the
   cregit and tokenizer versions.
 - **A packaging step** emitting per-stratum trees with checksums and a schema
   document.
+- **Anonymizing or pseudonymizing the output.** Names and e-mail addresses are
+  published as cregit writes them; anonymizing them, if wanted, happens outside
+  this repository.
 - **Provenance pinning.** No `provenance.json` per run, so a published Parquet
   cannot cite the cregit revision, tool versions and pinned commit it was built
   from. This is the single largest reproducibility gap.
 
-## 8. Failure modes and how they are handled
+## 9. Failure modes and how they are handled
 
 | Failure | Handling |
 | --- | --- |
