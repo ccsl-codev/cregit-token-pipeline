@@ -2237,3 +2237,399 @@ def test_drop_html_and_anonymize_are_off_by_default_on_the_cli(monkeypatch):
     monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run"])
     ctp.main()
     assert seen["drop_html"] is False and seen["anonymize"] == "" and seen["cleanup"] is False
+
+
+# --------------------------------------------------------------------------- #
+# census: order, gates, stop, resume, retries
+# --------------------------------------------------------------------------- #
+
+def census_args(**over):
+    base = vars(run_args())
+    base.update(workers=1, min_free_mem_gb=0, disk_floor_gb=0, stop_file="", poll=0.01)
+    base.pop("jobs")
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def manifest_rows(*names):
+    return [f"{n}\thttps://example.org/{n}.git\tcommunity\t\\.[ch]$\tS\t{PINNED_SHA}"
+            for n in names]
+
+
+def projects_of(sandbox, *names):
+    return ctp.read_manifest(write_manifest(sandbox.root, *manifest_rows(*names)), None)
+
+
+class FakeProjects:
+    """Stand-in for run_project: records each call, returns scripted outcomes,
+    and can run a hook inside the call."""
+
+    def __init__(self, outcomes=None, hook=None):
+        self.calls: list[tuple] = []
+        self.outcomes = {k: list(v) for k, v in (outcomes or {}).items()}
+        self.hook = hook
+        self.lock = threading.Lock()
+
+    def __call__(self, project, pos=None, total=None, attempt=1, post=False):
+        with self.lock:
+            self.calls.append((project["name"], pos, total, attempt, post))
+        if self.hook:
+            self.hook(project["name"])
+        queue = self.outcomes.get(project["name"])
+        return queue.pop(0) if queue else ctp.RunOutcome.DONE
+
+    def names(self):
+        return [c[0] for c in self.calls]
+
+
+@pytest.fixture
+def fake_projects(monkeypatch):
+    def install(**kw):
+        fake = FakeProjects(**kw)
+        monkeypatch.setattr(ctp, "run_project", fake)
+        return fake
+    return install
+
+
+@pytest.fixture
+def no_gates(monkeypatch):
+    monkeypatch.setattr(ctp, "gate_reason", lambda opts: None)
+
+
+def stamp(sandbox, name):
+    (sandbox.out / name).mkdir(parents=True, exist_ok=True)
+    (sandbox.out / name / f"{name}.validated").write_text("rows=1\n")
+
+
+def history_row(name, state, **extra):
+    return {"project": name, "step": "project", "state": state, **extra}
+
+
+def test_census_runs_in_manifest_order_and_records_the_queue_position(
+        sandbox, fake_projects, no_gates):
+    fake = fake_projects()
+    projects = projects_of(sandbox, "c", "a", "b")
+    results = ctp.schedule(projects, 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.calls == [("c", 1, 3, 1, False), ("a", 2, 3, 1, False), ("b", 3, 3, 1, False)]
+    assert all(v == ctp.RunOutcome.DONE for v in results.values())
+
+
+def test_census_skips_done_projects_and_resumes_the_rest(sandbox, fake_projects, no_gates):
+    log = sandbox.root / "ledger.jsonl"
+    stamp(sandbox, "a")
+    ledger.append(log, history_row("a", "done"))
+    ledger.append(log, history_row("b", "failed", failed_step="pipeline"))
+    stamp(sandbox, "c")
+    ledger.append(log, history_row("c", "done-dirty"))
+    fake = fake_projects()
+    results = ctp.schedule(projects_of(sandbox, "a", "b", "c", "d"), 1, 1,
+                           sandbox.root / "STOP", poll=0.01)
+    assert results["a"] == ctp.RunOutcome.SKIPPED
+    # b failed once: its second attempt. c validated but is dirty: only the later steps.
+    assert fake.calls == [("b", 2, 4, 2, False), ("c", 3, 4, 2, True), ("d", 4, 4, 1, False)]
+
+
+def test_census_gives_up_after_the_retries_across_restarts(
+        sandbox, fake_projects, no_gates, capsys):
+    log = sandbox.root / "ledger.jsonl"
+    for _ in range(2):
+        ledger.append(log, history_row("a", "failed", failed_step="clone"))
+    fake = fake_projects()
+    results = ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
+    assert fake.calls == [] and results["a"] == ctp.RunOutcome.FAILED
+    assert "failed 2 times (last at clone)" in capsys.readouterr().out
+
+
+def test_census_retries_a_failure_within_the_run(sandbox, fake_projects, no_gates):
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED, ctp.RunOutcome.DONE]})
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 1, sandbox.root / "STOP",
+                           poll=0.01)
+    assert fake.names() == ["a", "b", "a"]
+    assert fake.calls[2][3] == 2 and results["a"] == ctp.RunOutcome.DONE
+
+
+def test_census_without_retries_runs_a_failure_once(sandbox, fake_projects, no_gates):
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED] * 3})
+    results = ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.names() == ["a"] and results["a"] == ctp.RunOutcome.FAILED
+
+
+def test_a_retry_after_validation_resumes_at_the_later_steps(sandbox, fake_projects, no_gates):
+    def failed_after_validating(name):
+        stamp(sandbox, name)
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED, ctp.RunOutcome.DONE]},
+                         hook=failed_after_validating)
+    ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
+    assert [c[4] for c in fake.calls] == [False, True]
+
+
+def test_the_stop_file_lets_the_running_project_finish_and_starts_no_other(
+        sandbox, fake_projects, no_gates, capsys):
+    stop = sandbox.root / "STOP"
+    fake = fake_projects(hook=lambda name: stop.touch())
+    results = ctp.schedule(projects_of(sandbox, "a", "b", "c"), 1, 0, stop, poll=0.01)
+    assert fake.names() == ["a"] and results == {"a": ctp.RunOutcome.DONE}
+    assert f"{stop} exists" in ctp._RUN["stop_reason"]
+    assert "No new project starts" in capsys.readouterr().out
+
+
+def test_a_restart_after_a_stop_continues_with_the_next_project(sandbox, monkeypatch, no_gates):
+    """The real run_project, so the ledger the second census reads is real."""
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
+    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner())
+    stop = sandbox.root / "STOP"
+    projects = projects_of(sandbox, "a", "b")
+    real = ctp.run_project
+
+    def run_then_stop(*a, **k):
+        outcome = real(*a, **k)
+        stop.touch()
+        return outcome
+    monkeypatch.setattr(ctp, "run_project", run_then_stop)
+    first = ctp.schedule(projects, 1, 0, stop, poll=0.01)
+    assert set(first) == {"a"}
+
+    stop.unlink()
+    ctp._RUN.clear()
+    monkeypatch.setattr(ctp, "run_project", real)
+    second = ctp.schedule(projects, 1, 0, stop, poll=0.01)
+    assert second == {"a": ctp.RunOutcome.SKIPPED, "b": ctp.RunOutcome.DONE}
+    finals = [(r["project"], r["state"]) for r in ledger_rows(sandbox, step="project")]
+    assert finals == [("a", "done"), ("b", "done")]
+
+
+def test_a_stop_signal_stops_dispatch(sandbox, fake_projects, no_gates):
+    def signal_during(name):
+        ctp._RUN["stop_reason"] = "signal SIGTERM"
+        ctp._STOP.set()
+    fake = fake_projects(hook=signal_during)
+    try:
+        ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    finally:
+        ctp._STOP.clear()
+    assert fake.names() == ["a"] and ctp._RUN["stop_reason"] == "signal SIGTERM"
+
+
+def test_a_broken_ledger_stops_dispatch(sandbox, fake_projects, no_gates):
+    def break_ledger(name):
+        ctp._RUN["ledger_broken"] = "OSError: disk full"
+    fake = fake_projects(hook=break_ledger)
+    ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.names() == ["a"] and "disk full" in ctp._RUN["stop_reason"]
+
+
+def test_a_closed_gate_waits_then_starts(sandbox, fake_projects, monkeypatch, capsys):
+    answers = iter(["memory 1.0G available, below the 8G floor"] * 3)
+    monkeypatch.setattr(ctp, "gate_reason", lambda opts: next(answers, None))
+    fake = fake_projects()
+    ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.names() == ["a"]
+    out = capsys.readouterr().out
+    assert out.count("waiting to start a: memory 1.0G available") == 1
+
+
+def test_a_closed_gate_and_a_stop_end_the_census_without_starting(
+        sandbox, fake_projects, monkeypatch):
+    stop = sandbox.root / "STOP"
+    calls = []
+
+    def gate(opts):
+        calls.append(1)
+        stop.touch()
+        return "disk 1G free, below the 150G floor"
+    monkeypatch.setattr(ctp, "gate_reason", gate)
+    fake = fake_projects()
+    assert ctp.schedule(projects_of(sandbox, "a"), 1, 0, stop, poll=0.01) == {}
+    assert fake.calls == [] and calls
+
+
+def test_a_deferred_project_is_tried_again_after_the_rest(sandbox, fake_projects, no_gates):
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP",
+                           poll=0.01)
+    assert fake.names() == ["a", "b", "a"] and results["a"] == ctp.RunOutcome.DONE
+
+
+def test_a_lone_deferred_project_waits_a_poll_before_its_next_try(
+        sandbox, fake_projects, no_gates, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(ctp.time, "sleep", lambda s: sleeps.append(s))
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
+    ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.5)
+    assert fake.names() == ["a", "a"] and 0.5 in sleeps
+
+
+def test_a_crashing_worker_fails_only_its_project(sandbox, fake_projects, no_gates, capsys):
+    def crash(name):
+        if name == "a":
+            raise RuntimeError("boom")
+    fake = fake_projects(hook=crash)
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP",
+                           poll=0.01)
+    assert results == {"a": ctp.RunOutcome.FAILED, "b": ctp.RunOutcome.DONE}
+    assert "crashed the worker: RuntimeError: boom" in capsys.readouterr().out
+
+
+def test_census_runs_up_to_workers_projects_at_once(sandbox, fake_projects, no_gates):
+    barrier = threading.Barrier(2, timeout=10)
+    fake = fake_projects(hook=lambda name: barrier.wait())
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 2, 0, sandbox.root / "STOP",
+                           poll=0.01)
+    assert sorted(fake.names()) == ["a", "b"] and not barrier.broken
+    assert set(results.values()) == {ctp.RunOutcome.DONE}
+
+
+@pytest.mark.parametrize("state, failures, stamped, expected", [
+    ("done", 0, True, "skip"),
+    ("done", 0, False, "run"),        # done once, but the outputs are gone
+    ("done-dirty", 0, True, "post"),
+    ("failed", 1, True, "post"),
+    ("failed", 1, False, "run"),
+    ("failed", 2, False, "give-up"),
+    ("", 0, False, "run"),
+])
+def test_plan(sandbox, state, failures, stamped, expected):
+    if stamped:
+        stamp(sandbox, "a")
+    h = ledger.History(state=state, failures=failures)
+    assert ctp.plan({"name": "a"}, h, retries=1) == expected
+
+
+def test_mem_available_reads_proc_meminfo(tmp_path):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal: 32000000 kB\nMemAvailable: 8388608 kB\n")
+    assert ctp.mem_available_gb(meminfo) == 8.0
+    meminfo.write_text("MemTotal: 1 kB\n")
+    assert ctp.mem_available_gb(meminfo) is None
+    assert ctp.mem_available_gb(tmp_path / "absent") is None
+
+
+def test_gate_reason_names_disk_then_memory(sandbox, monkeypatch):
+    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    assert ctp.gate_reason({}).startswith("disk")
+    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 0)
+    monkeypatch.setattr(ctp, "mem_available_gb", lambda: 2.0)
+    assert ctp.gate_reason({"min_free_mem_gb": 4}).startswith("memory 2.0G")
+    assert ctp.gate_reason({"min_free_mem_gb": 1}) is None
+    monkeypatch.setattr(ctp, "mem_available_gb", lambda: None)
+    assert ctp.gate_reason({"min_free_mem_gb": 4}) is None
+
+
+@pytest.fixture
+def census_ready(ready, monkeypatch):
+    write_manifest(ready.root, *manifest_rows("a", "b"))
+    monkeypatch.setattr(ctp, "install_signal_handlers", lambda: None)
+    return ready
+
+
+def test_cmd_census_runs_end_to_end_options(census_ready, fake_projects, no_gates):
+    fake = fake_projects()
+    assert ctp.cmd_census(census_args()) == 0
+    assert fake.names() == ["a", "b"]
+    assert ctp._OPTS["join"] and ctp._OPTS["cleanup"] and ctp._OPTS["own_session"]
+    rows = ledger.read(census_ready.root / "ledger.jsonl")
+    assert rows[0]["command"] == "census" and rows[-1]["step"] == "run-end"
+
+
+def test_cmd_census_exits_3_when_stopped_cleanly(census_ready, fake_projects, no_gates):
+    stop = census_ready.root / "STOP"
+    fake_projects(hook=lambda name: stop.touch())
+    assert ctp.cmd_census(census_args()) == 3
+    assert ledger.read(census_ready.root / "ledger.jsonl")[-1]["stop_reason"]
+
+
+def test_cmd_census_exits_1_on_a_failure(census_ready, fake_projects, no_gates):
+    fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED]})
+    assert ctp.cmd_census(census_args(retries=0)) == 1
+
+
+def test_cmd_census_refuses_to_start_with_a_stop_file(census_ready):
+    (census_ready.root / "STOP").touch()
+    with pytest.raises(SystemExit, match="Remove it to start"):
+        ctp.cmd_census(census_args())
+
+
+def test_cmd_census_takes_a_custom_stop_file(census_ready, fake_projects, no_gates):
+    stop = census_ready.root / "my-stop"
+    stop.touch()
+    with pytest.raises(SystemExit, match="my-stop exists"):
+        ctp.cmd_census(census_args(stop_file=str(stop)))
+
+
+def test_cmd_census_needs_a_worker(census_ready):
+    with pytest.raises(SystemExit, match="--workers"):
+        ctp.cmd_census(census_args(workers=0))
+
+
+def test_cmd_census_sets_the_disk_floor(census_ready, fake_projects, no_gates, monkeypatch):
+    fake_projects()
+    ctp.cmd_census(census_args(disk_floor_gb=77))
+    assert ctp.DISK_FLOOR_GB == 77
+
+
+def test_cmd_census_warns_about_unpinned_projects(census_ready, fake_projects, no_gates, capsys):
+    write_manifest(census_ready.root, VALID_ROW)
+    fake_projects()
+    ctp.cmd_census(census_args())
+    assert "1 of 1 projects are unpinned" in capsys.readouterr().out
+
+
+def test_cmd_census_with_nothing_to_run(census_ready):
+    write_manifest(census_ready.root)
+    assert ctp.cmd_census(census_args()) == 0
+
+
+def test_cmd_census_needs_commit_url_for_a_pinned_manifest(census_ready, runner_script):
+    runner_script(REAL_RUNNER_USAGE.replace("--commit-url", "--commit-link"))
+    with pytest.raises(SystemExit, match="--commit-url"):
+        ctp.cmd_census(census_args())
+
+
+def test_the_first_signal_stops_dispatch_and_the_second_terminates(monkeypatch):
+    handlers = {}
+    monkeypatch.setattr(ctp.signal, "signal", lambda sig, h: handlers.setdefault(sig, h))
+    killed = []
+    monkeypatch.setattr(ctp.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    ctp.install_signal_handlers()
+    ctp._procs["a"] = SimpleNamespace(pid=4242)
+    try:
+        handlers[ctp.signal.SIGTERM](ctp.signal.SIGTERM, None)
+        assert ctp._STOP.is_set() and killed == []
+        assert ctp._RUN["stop_reason"] == "signal SIGTERM"
+        handlers[ctp.signal.SIGINT](ctp.signal.SIGINT, None)
+        assert killed == [(4242, ctp.signal.SIGTERM)]
+    finally:
+        ctp._STOP.clear()
+        ctp._procs.clear()
+
+
+def test_a_vanished_process_group_is_ignored(monkeypatch):
+    handlers = {}
+    monkeypatch.setattr(ctp.signal, "signal", lambda sig, h: handlers.setdefault(sig, h))
+
+    def gone(pid, sig):
+        raise ProcessLookupError(pid)
+    monkeypatch.setattr(ctp.os, "killpg", gone)
+    ctp.install_signal_handlers()
+    ctp._procs["a"] = SimpleNamespace(pid=1)
+    ctp._STOP.set()
+    try:
+        handlers[ctp.signal.SIGTERM](ctp.signal.SIGTERM, None)
+    finally:
+        ctp._STOP.clear()
+        ctp._procs.clear()
+
+
+def test_a_census_child_gets_its_own_session(sandbox, runner, jq):
+    ctp._OPTS.update(own_session=True)
+    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    assert runner.calls[0].kwargs["start_new_session"] is True
+
+
+def test_main_dispatches_census(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ctp, "cmd_census", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "census", "--workers", "3"])
+    assert ctp.main() == 0
+    assert seen["workers"] == 3 and seen["min_free_mem_gb"] == ctp.MIN_FREE_MEM_GB
+    assert seen["drop_html"] is False and seen["anonymize"] == ""

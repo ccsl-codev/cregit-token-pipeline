@@ -13,11 +13,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -382,13 +384,19 @@ def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) 
     with logfile.open("wb") as lf:
         # keep_fds hands the project's flock to the child, so a process tree that
         # outlives this runner still holds the lock, and no second run can start.
+        # A census child gets its own session: Ctrl-C reaches only ctp, which
+        # then lets the running projects finish instead of killing them mid-step.
+        extra = {"pass_fds": keep_fds} if keep_fds else {}
+        if _OPTS.get("own_session"):
+            extra["start_new_session"] = True
         proc = subprocess.Popen(args, cwd=CREGIT, env=_ENV,
-                                stdout=lf, stderr=subprocess.STDOUT,
-                                **({"pass_fds": keep_fds} if keep_fds else {}))
+                                stdout=lf, stderr=subprocess.STDOUT, **extra)
+        _procs[name] = proc
         sampler.start(proc.pid)
         try:
             rc = proc.wait()
         finally:
+            _procs.pop(name, None)
             peak = sampler.stop()
     duration = int(time.time() - start)
 
@@ -1304,6 +1312,223 @@ def cmd_run(args: argparse.Namespace) -> int:
     return rc
 
 
+# --------------------------------------------------------------------------- #
+# census: the scheduler for a long end-to-end run
+# --------------------------------------------------------------------------- #
+
+STOP_NAME = "STOP"
+MIN_FREE_MEM_GB = 8
+POLL_S = 15
+# Set by a signal or a broken ledger: no new project starts, running ones finish.
+_STOP = threading.Event()
+# name -> the Popen of its running phase, for the second signal.
+_procs: dict = {}
+
+
+def mem_available_gb(meminfo: Path = Path("/proc/meminfo")) -> float | None:
+    """MemAvailable in GiB, or None where the kernel does not say."""
+    try:
+        for line in meminfo.read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 2**20
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def gate_reason(opts: dict) -> str | None:
+    """Why a new project may not start now, or None."""
+    free_gb = shutil.disk_usage(OUT).free / 2**30
+    if free_gb < DISK_FLOOR_GB:
+        return f"disk {free_gb:.0f}G free, below the {DISK_FLOOR_GB}G floor"
+    mem = mem_available_gb()
+    floor = opts.get("min_free_mem_gb", MIN_FREE_MEM_GB)
+    if mem is not None and mem < floor:
+        return f"memory {mem:.1f}G available, below the {floor}G floor"
+    return None
+
+
+def stop_reason(stop_file: Path) -> str | None:
+    if _STOP.is_set():
+        return _RUN.get("stop_reason") or "stop requested"
+    if _RUN.get("ledger_broken"):
+        return f"the ledger cannot be written: {_RUN['ledger_broken']}"
+    if stop_file.exists():
+        return f"{stop_file} exists"
+    return None
+
+
+# What the scheduler does with a project, from its ledger history and its stamp.
+SKIP, POST, RUN, GIVE_UP = "skip", "post", "run", "give-up"
+
+
+def plan(project: dict, history: ledger.History, retries: int) -> str:
+    name = project["name"]
+    stamped = (OUT / name / f"{name}.validated").exists()
+    if history.state == ledger.DONE and stamped:
+        return SKIP
+    if history.failures > retries:
+        return GIVE_UP
+    # Validated but not done: a crash after validation, a done-dirty cleanup, or
+    # a project an earlier `ctp.py run` validated. Only the later steps run.
+    return POST if stamped else RUN
+
+
+def schedule(projects: list[dict], workers: int, retries: int, stop_file: Path,
+             poll: float = POLL_S) -> dict:
+    """Run projects in manifest order with up to `workers` at once. Returns name -> outcome."""
+    total = len(projects)
+    histories = ledger.histories(ledger.read(LEDGER))
+    results: dict = {}
+    queue: deque = deque()
+    for pos, project in enumerate(projects, 1):
+        name = project["name"]
+        h = histories.get(name, ledger.History())
+        decision = plan(project, h, retries)
+        if decision == SKIP:
+            results[name] = RunOutcome.SKIPPED
+        elif decision == GIVE_UP:
+            say(f"{name} — failed {h.failures} times (last at {h.last_failed_step or '?'}), "
+                f"more than --retries {retries}; not retried")
+            results[name] = RunOutcome.FAILED
+        else:
+            queue.append((pos, project, h.attempts + 1, h.failures, decision == POST))
+    skipped = sum(1 for v in results.values() if v == RunOutcome.SKIPPED)
+    say(f"census: {total} projects, {skipped} already done, {len(queue)} to run, "
+        f"{workers} workers")
+
+    stop_heartbeat = threading.Event()
+    threading.Thread(target=heartbeat, args=(stop_heartbeat, results), daemon=True).start()
+    running: dict = {}
+    waiting_since: float | None = None
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while queue or running:
+                reason = stop_reason(stop_file)
+                if reason and not _RUN.get("stop_reason"):
+                    _RUN["stop_reason"] = reason
+                    say(f"stopping: {reason}. No new project starts; "
+                        f"{len(running)} running will finish")
+                if not reason and queue and len(running) < workers:
+                    gate = gate_reason(_OPTS)
+                    if gate is None:
+                        waiting_since = None
+                        pos, project, attempt, failures, post = queue.popleft()
+                        fut = pool.submit(run_project, project, pos, total, attempt, post)
+                        running[fut] = (pos, project, attempt, failures, post)
+                        continue
+                    if waiting_since is None:
+                        waiting_since = time.time()
+                        say(f"waiting to start {queue[0][1]['name']}: {gate}")
+                if not running:
+                    if reason or not queue:
+                        break
+                    time.sleep(poll)
+                    continue
+                done, _ = wait(list(running), timeout=poll, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    pos, project, attempt, failures, post = running.pop(fut)
+                    name = project["name"]
+                    try:
+                        outcome = fut.result()
+                    except Exception as exc:              # one project must not end the run
+                        say(f"{name} ✗ crashed the worker: {type(exc).__name__}: {exc}")
+                        outcome = RunOutcome.FAILED
+                    results[name] = outcome
+                    if outcome == RunOutcome.FAILED:
+                        failures += 1
+                        if failures <= retries:
+                            say(f"{name} — failed, retry {failures} of {retries} queued")
+                            queue.append((pos, project, attempt + 1, failures,
+                                          (OUT / name / f"{name}.validated").exists()))
+                    elif outcome == RunOutcome.DEFERRED:
+                        # Another process holds it: try again after the rest.
+                        queue.append((pos, project, attempt, failures, post))
+                        if len(queue) == 1 and not running:
+                            time.sleep(poll)
+    finally:
+        stop_heartbeat.set()
+    return results
+
+
+def install_signal_handlers() -> None:
+    """First SIGINT or SIGTERM: stop starting projects. Second: also terminate the
+    running ones, whose rows then record the failure."""
+    def handler(signum, _frame):
+        if not _STOP.is_set():
+            _RUN["stop_reason"] = f"signal {signal.Signals(signum).name}"
+            _STOP.set()
+            say(f"{signal.Signals(signum).name}: finishing the running projects; "
+                "send it again to terminate them")
+            return
+        for name, proc in list(_procs.items()):
+            say(f"terminating {name} (process group {proc.pid})")
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+
+
+def cmd_census(args: argparse.Namespace) -> int:
+    """Every project of the manifest, end to end, in manifest order."""
+    global DISK_FLOOR_GB
+    stop_file = Path(args.stop_file).resolve() if args.stop_file else CORPUS / STOP_NAME
+    if stop_file.exists():
+        sys.exit(f"{stop_file} exists, so the census would stop at once. Remove it to start.")
+    if args.workers < 1:
+        sys.exit("--workers must be at least 1")
+    OUT.mkdir(parents=True, exist_ok=True)
+    manifest = CORPUS / args.manifest
+    projects = read_manifest(manifest, set(args.only.split(",")) if args.only else None)
+    if not projects:
+        say("nothing to run (empty manifest / --only filter matched nothing)")
+        return 0
+    unpinned = sum(1 for p in projects if not p.get(PINNED_FIELD))
+    if unpinned:
+        say(f"WARNING: {unpinned} of {len(projects)} projects are unpinned: each runs the "
+            "remote HEAD of its clone day, and the ledger says so")
+
+    args.join, args.cleanup = True, True
+    _OPTS.update(run_options(args))
+    _OPTS.update(own_session=True, min_free_mem_gb=args.min_free_mem_gb)
+    DISK_FLOOR_GB = args.disk_floor_gb
+    if len(projects) > unpinned:
+        refuse_unless_runner_accepts(
+            "a pinned manifest", ("--commit-url",),
+            " Pinned projects run from a local staging clone, so the runner needs "
+            "--commit-url to keep the real commit links.")
+    announce_run(_OPTS, args.workers)
+    say(f"stop file: {stop_file} (touch it to stop after the running projects)")
+
+    run_start = time.time()
+    say("capturing devenv environment (once)...")
+    _ENV.update(capture_devenv_env())
+    _ENV.setdefault("GIT_TERMINAL_PROMPT", "0")
+    start_ledger_run(args, manifest, "census")
+    install_signal_handlers()
+    with RUNS_LOG.open("a") as f:
+        f.write(f"{now_iso()}\tcensus-start\tworkers={args.workers}\tprojects={len(projects)}\n")
+
+    results = schedule(projects, args.workers, args.retries, stop_file, args.poll)
+
+    stopped = bool(_RUN.get("stop_reason"))
+    rc = 0 if all(v.is_success for v in results.values()) and not stopped else 1
+    if stopped and all(v.is_success for v in results.values()):
+        rc = 3
+    end_ledger_run(rc, run_start, results)
+    with RUNS_LOG.open("a") as f:
+        f.write(f"{now_iso()}\tcensus-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
+    counts: dict = {}
+    for v in results.values():
+        counts[str(v)] = counts.get(str(v), 0) + 1
+    say(f"census finished rc={rc}: " + ", ".join(f"{k} {n}" for k, n in sorted(counts.items()))
+        + (f" (stopped: {_RUN['stop_reason']})" if stopped else ""))
+    return rc
+
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     projects = read_manifest(CORPUS / args.manifest, None)
     last: dict = {}
@@ -1432,6 +1657,68 @@ def cmd_db(args: argparse.Namespace) -> int:
                           cwd=CREGIT, env=_ENV).returncode
 
 
+def add_project_options(p: argparse.ArgumentParser) -> None:
+    """The options of one project run, shared by run and census."""
+    p.add_argument("--skip-html", action="store_true",
+                       help="never generate the HTML views (94-255 MB per project)")
+    p.add_argument("--reblame", action="store_true",
+                       help="re-blame every file in step 7 instead of skipping those "
+                            "with .blame output, after the blame itself changed. "
+                            "Not for resuming an interrupted run")
+    p.add_argument("--drop-memo", "--no-memo", action="store_true",
+                       help="delete memo/ (45-88%% of the workdir) once a project "
+                            "validates. The tokenizer still writes it first")
+    p.add_argument("--memo-dir", default="", metavar="DIR",
+                       help="keep each project's memo in DIR/<project>, outside the "
+                            "workdir a step-1 run deletes. DIR must exist. "
+                            "Cannot be combined with --drop-memo")
+    p.add_argument("--shards", type=int, default=0,
+                       help="tokenize in N shards (needs >1). Costs transient disk, "
+                            "so it is limited to --shard-classes")
+    p.add_argument("--shard-classes", default="L",
+                       help="comma-separated size classes to shard (default L)")
+    p.add_argument("--from-step", type=int, default=1, metavar="N",
+                       help="resume the runner at step N. Only step 1 wipes the "
+                            "workdir, so N>1 keeps finished work")
+    p.add_argument("--retokenize", metavar="EXTS", default="",
+                       help="re-tokenize only these extensions (comma separated, no "
+                            "dots), after a tokenizer fix. Needs --from-step 2 "
+                            "exactly; not with --mask-widened or sharding")
+    p.add_argument("--mask-widened", action="store_true",
+                       help="reuse existing tokenizations across a mask change. "
+                            "Needs --from-step 2 or more; blobExec verifies each project")
+    p.add_argument("--gc", choices=("none", "plain", "aggressive"),
+                       help="how the runner packs the generated repo. Omit for "
+                            "the runner's default")
+    p.add_argument("--memory-limit", metavar="SIZE",
+                       help="DuckDB memory limit for step 10, an absolute size such "
+                            "as 3GB. The process settles at about 1.4x, so budget "
+                            "1.4 x --jobs x SIZE. Omit for the generator's 8GB")
+    p.add_argument("--duckdb-threads", type=int, default=0, metavar="N",
+                       help="DuckDB threads for step 10; fewer lower the peak. "
+                            "Omit for the generator's default")
+    p.add_argument("--project-meta", default="", metavar="PATH",
+                       help="JSON provenance sidecar keyed by project name (format: "
+                            "validate_schema.py, above CREGIT_COLUMNS). Without it "
+                            "29 columns are blank and ctp refuses the run")
+    p.add_argument("--allow-empty-provenance", action="store_true",
+                       help="publish with blank provenance columns, e.g. "
+                            "for a fixture or a smoke run. Refused when nothing "
+                            "would be blank")
+    p.add_argument("--mask", default="", metavar="REGEX",
+                       help="tokenize these files instead of the manifest's mask. "
+                            "Use with --only: a changed mask forces a full rebuild")
+    p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
+                       help="parallel blame workers; the output does not depend "
+                            "on N. Omit for the runner's default of 1")
+    p.add_argument("--drop-html", action="store_true",
+                       help="with --cleanup, delete html/ too. Off by default: an open "
+                            "decision")
+    p.add_argument("--anonymize", metavar="SCRIPT", default="",
+                       help="run `python3 SCRIPT <workdir>/anon <parquet>` after the "
+                            "schema check. Off by default: an open decision")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1441,71 +1728,37 @@ def main() -> int:
     run_p.add_argument("--retries", type=int, default=1, help="extra passes over failed projects")
     run_p.add_argument("--only", help="comma-separated project names to restrict to")
     run_p.add_argument("--manifest", default="manifest.tsv")
-    run_p.add_argument("--skip-html", action="store_true",
-                       help="never generate the HTML views (94-255 MB per project)")
-    run_p.add_argument("--reblame", action="store_true",
-                       help="re-blame every file in step 7 instead of skipping those "
-                            "with .blame output, after the blame itself changed. "
-                            "Not for resuming an interrupted run")
-    run_p.add_argument("--drop-memo", "--no-memo", action="store_true",
-                       help="delete memo/ (45-88%% of the workdir) once a project "
-                            "validates. The tokenizer still writes it first")
-    run_p.add_argument("--memo-dir", default="", metavar="DIR",
-                       help="keep each project's memo in DIR/<project>, outside the "
-                            "workdir a step-1 run deletes. DIR must exist. "
-                            "Cannot be combined with --drop-memo")
-    run_p.add_argument("--shards", type=int, default=0,
-                       help="tokenize in N shards (needs >1). Costs transient disk, "
-                            "so it is limited to --shard-classes")
-    run_p.add_argument("--shard-classes", default="L",
-                       help="comma-separated size classes to shard (default L)")
-    run_p.add_argument("--from-step", type=int, default=1, metavar="N",
-                       help="resume the runner at step N. Only step 1 wipes the "
-                            "workdir, so N>1 keeps finished work")
-    run_p.add_argument("--retokenize", metavar="EXTS", default="",
-                       help="re-tokenize only these extensions (comma separated, no "
-                            "dots), after a tokenizer fix. Needs --from-step 2 "
-                            "exactly; not with --mask-widened or sharding")
-    run_p.add_argument("--mask-widened", action="store_true",
-                       help="reuse existing tokenizations across a mask change. "
-                            "Needs --from-step 2 or more; blobExec verifies each project")
-    run_p.add_argument("--gc", choices=("none", "plain", "aggressive"),
-                       help="how the runner packs the generated repo. Omit for "
-                            "the runner's default")
-    run_p.add_argument("--memory-limit", metavar="SIZE",
-                       help="DuckDB memory limit for step 10, an absolute size such "
-                            "as 3GB. The process settles at about 1.4x, so budget "
-                            "1.4 x --jobs x SIZE. Omit for the generator's 8GB")
-    run_p.add_argument("--duckdb-threads", type=int, default=0, metavar="N",
-                       help="DuckDB threads for step 10; fewer lower the peak. "
-                            "Omit for the generator's default")
-    run_p.add_argument("--project-meta", default="", metavar="PATH",
-                       help="JSON provenance sidecar keyed by project name (format: "
-                            "validate_schema.py, above CREGIT_COLUMNS). Without it "
-                            "29 columns are blank and ctp refuses the run")
-    run_p.add_argument("--allow-empty-provenance", action="store_true",
-                       help="publish with blank provenance columns, e.g. "
-                            "for a fixture or a smoke run. Refused when nothing "
-                            "would be blank")
-    run_p.add_argument("--mask", default="", metavar="REGEX",
-                       help="tokenize these files instead of the manifest's mask. "
-                            "Use with --only: a changed mask forces a full rebuild")
-    run_p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
-                       help="parallel blame workers; the output does not depend "
-                            "on N. Omit for the runner's default of 1")
+    add_project_options(run_p)
     run_p.add_argument("--join", action="store_true",
                        help="after each validated project, check its schema with "
                             "validate_schema.py and join it into ctp.duckdb")
     run_p.add_argument("--cleanup", action="store_true",
                        help="after each validated project, delete the clones, memo/, "
                             "blame/ and work databases; keep the Parquet, stamp and logs")
-    run_p.add_argument("--drop-html", action="store_true",
-                       help="with --cleanup, delete html/ too. Off by default: an open "
-                            "decision")
-    run_p.add_argument("--anonymize", metavar="SCRIPT", default="",
-                       help="run `python3 SCRIPT <workdir>/anon <parquet>` after the "
-                            "schema check. Off by default: an open decision")
     run_p.set_defaults(fn=cmd_run)
+
+    ce_p = sub.add_parser(
+        "census", help="every project end to end: clone at the pinned commit, pipeline, "
+                       "validate, schema, join, cleanup; resumable")
+    ce_p.add_argument("--manifest", default="manifest.tsv")
+    ce_p.add_argument("--workers", "--jobs", dest="workers", type=int, default=2,
+                      help="projects at once (default 2)")
+    ce_p.add_argument("--retries", type=int, default=1,
+                      help="retries per failed project, counted across restarts (default 1)")
+    ce_p.add_argument("--only", help="comma-separated project names to restrict to")
+    ce_p.add_argument("--min-free-mem-gb", type=float, default=MIN_FREE_MEM_GB, metavar="G",
+                      help=f"start a project only with this much MemAvailable "
+                           f"(default {MIN_FREE_MEM_GB})")
+    ce_p.add_argument("--disk-floor-gb", type=int, default=DISK_FLOOR_GB, metavar="G",
+                      help=f"start a project only with this much free disk in the output "
+                           f"directory (default {DISK_FLOOR_GB})")
+    ce_p.add_argument("--stop-file", default="", metavar="PATH",
+                      help="touch this file to stop after the running projects "
+                           "(default: STOP in this repository)")
+    ce_p.add_argument("--poll", type=float, default=POLL_S, metavar="S",
+                      help=f"seconds between gate and stop checks (default {POLL_S:g})")
+    add_project_options(ce_p)
+    ce_p.set_defaults(fn=cmd_census)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
     st_p.add_argument("--manifest", default="manifest.tsv")
