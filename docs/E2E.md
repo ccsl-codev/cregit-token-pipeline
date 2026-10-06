@@ -55,3 +55,126 @@ The tests use `tests/fixtures/frame.sample.csv` as a small example.
 - The order file maps each queue position to `slug`, `host`, `u`, `head_oid`
   and `labels`.
 - `--limit N` keeps the first N projects in `u` order, for an early batch.
+
+## 2. One command for the whole run
+
+```sh
+export CTP_CONFIG=/path/to/census.cfg      # optional: cregit_dir and output_dir
+./ctp.py census --manifest manifest.census.tsv \
+    --project-meta project_meta.census.json \
+    --workers 3 --retries 1 --skip-html
+```
+
+For each project, in manifest order, `census` runs these steps:
+
+1. `clone`: `pin.py` fetches the pinned commit into
+   `<output_dir>/.ctp-pinned/<name>.git` and keeps only that commit's history.
+   It fetches by SHA first. When the host refuses that, it fetches every
+   branch and tag. A commit that is on neither stops with exit 3.
+2. `pipeline`: cregit's `run_pipeline_process.sh`, cloning the staging clone.
+   Then ctp reads HEAD of the runner's working clone. A checkout that is not
+   the pinned commit fails the project.
+3. `validate`: `validate.py`, which writes the `.validated` stamp.
+4. `schema`: `validate_schema.py` on the Parquet.
+5. `anonymize`: only with `--anonymize SCRIPT`. See below.
+6. `join`: `consolidate.py --join`, which adds the project to `ctp.duckdb`.
+7. `cleanup`: deletes the clones, `memo/`, `blame/` and the work databases.
+   It keeps the Parquet, the stamp, the two small persons files, `html/` and
+   `anon/`. The logs in `state/` and the ledger are outside the workdir.
+
+A five-column manifest still works. Such a project runs the remote HEAD on the
+day of its clone, and the ledger says `"pinned_sha": "unpinned"`.
+
+`CTP_CONFIG` names a config file to use instead of the tracked
+`pipeline.cfg`, so a census can use another cregit checkout or output
+directory without editing it.
+
+### Gates, stop and resume
+
+- A project starts only with `--disk-floor-gb` free disk (default 150) and
+  `--min-free-mem-gb` of MemAvailable (default 8). While a gate is closed, the
+  census waits and says why.
+- To stop cleanly, `touch STOP` in this repository (or the `--stop-file`
+  path). The running projects finish, and no new one starts. The first
+  SIGINT or SIGTERM does the same. A second one terminates the running
+  projects. The census refuses to start while the stop file exists.
+- To resume, run the same command again. A project whose last state is
+  `done` is skipped. A validated project that is not `done` runs only the
+  steps after validation. A project that crashed mid-pipeline restarts the
+  runner at step 2 when its clone and blob map survive, so its
+  tokenizations are kept.
+- A failed project runs at most `1 + --retries` times, counted across
+  restarts.
+- Each phase holds the project's lock, and so does every process it starts.
+  If ctp dies with `kill -9`, its runner tree keeps the lock, and a new
+  census waits for it rather than racing it.
+- Exit codes: 0 when every project succeeded, 3 when a stop left the run
+  incomplete without a failure, 1 otherwise.
+
+### Open decisions: HTML and anonymization
+
+Both are off by default, until the decision is made.
+
+- `--drop-html` deletes `html/` in the cleanup. `--skip-html` does not write
+  it at all.
+- `--anonymize SCRIPT` runs `python3 SCRIPT <workdir>/anon <parquet>` after the
+  schema check, the interface of `anonymize_parquet.py`. The ledger records the
+  sha256 of each output. The raw Parquet is still the one joined into
+  `ctp.duckdb`. No anonymizer for the 67-column schema ships here.
+
+## 3. Audit a project
+
+Every step appends rows to `ledger.jsonl` in this repository. The file is only
+appended to: each row is written whole under a lock and fsynced.
+
+```sh
+./ctp.py audit DaveGamble__cJSON          # one line per step
+./ctp.py audit DaveGamble__cJSON --json   # every row, whole
+```
+
+Each step writes a `started` row before it runs and a row when it ends.
+`audit` hides a started row once its step has ended, and shows one that never
+ended as `interrupted`. The last row of an attempt has `"step": "project"` and
+a `state`:
+
+| State | Meaning |
+|---|---|
+| `done` | Validated, joined and cleaned. |
+| `done-dirty` | The Parquet is valid, but the cleanup did not finish. The next census retries the steps after validation. |
+| `failed` | `failed_step` names the step. |
+| `deferred` | Another process held the project's lock, or the disk was below the floor. |
+
+Every row carries `run_id`, `queue_pos`, `queue_total`, `attempt`, the
+`manifest_row`, `pinned_sha`, `checked_out_sha`, `file_mask_sha256`, `tools`
+and `flags`. A step row adds `start_utc`, `end_utc`, `duration_s`,
+`exit_code`, `argv` and `log`. Some steps add more:
+
+- `clone`: `pin`, with the fetch method, the remote's default branch and its
+  HEAD at clone time.
+- `pipeline`: `resume`, when the census restarted the runner at step 2.
+- `validate` and the final row: `parquet`, with path, bytes, sha256 and rows.
+- `anonymize`: `anonymized`, with path, bytes and sha256 per output.
+- `cleanup`: `cleanup`, with what was removed, the bytes freed, what was kept,
+  and the errors.
+
+`tools` holds the ctp and cregit commits (with `-dirty` when a tracked file
+differs), the srcML version line and binary path, the blobExec jar sha256, and
+the git version. `flags` holds every option as typed and as checked, the
+manifest and config paths with their sha256, and the cregit and output
+directories. The run-start and run-end rows bracket each run.
+
+To check one project by hand:
+
+```sh
+jq -c 'select(.project == "antirez__kilo" and .step == "project")' ledger.jsonl
+sha256sum <output_dir>/antirez__kilo/antirez__kilo-dataset.parquet   # equals parquet.sha256
+./validate_schema.py <output_dir>/antirez__kilo/antirez__kilo-dataset.parquet
+```
+
+## 4. ctp.duckdb during a census
+
+Each join holds `ctp.duckdb.lock` and writes `ctp.duckdb`. DuckDB lets one
+process write, so do not keep the file open in another process during a
+census: a join retries for a minute, then fails the project. Query a copy, or
+the Parquets. `./ctp.py db --manifest manifest.census.tsv` rebuilds the whole
+file from the stamps, and gives the same tables.

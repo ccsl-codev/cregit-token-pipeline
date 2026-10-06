@@ -81,6 +81,28 @@ gate, then a `.validated` stamp. Runs are idempotent: validated projects are
 skipped, interrupted ones resume from the blob map, failed ones are retried on the
 next pass.
 
+## End-to-end run
+
+For a long run over a projects dataset, build the manifest from the selection
+frame, then run `census`. Each project is cloned at its pinned commit,
+tokenized, blamed, validated, schema-checked, joined into `ctp.duckdb` and
+cleaned down to its Parquet. Every step appends a row to `ledger.jsonl`.
+
+```sh
+./build_manifest.py frame.csv --manifest manifest.census.tsv \
+    --project-meta project_meta.census.json
+./ctp.py census --manifest manifest.census.tsv \
+    --project-meta project_meta.census.json --workers 3 --skip-html
+touch STOP                                # stop after the running projects
+./ctp.py census ...                       # the same command resumes
+./ctp.py audit antirez__kilo              # one project's ledger, one line per step
+```
+
+[`docs/E2E.md`](docs/E2E.md) gives the frame contract, the steps, the gates,
+the stop and resume rules, and the ledger fields. HTML deletion
+(`--drop-html`) and anonymization (`--anonymize SCRIPT`) are open decisions,
+so both are off by default.
+
 ## Architecture
 
 ```
@@ -118,6 +140,9 @@ state.
   beside `metrics.tsv` rather than in the project work directory, because a
   from-scratch run deletes that directory.
 - `metrics.tsv`: `iso_start  project  class  phase  duration_s  rc  log`.
+- `ledger.jsonl`: the audit ledger, one JSON row per project and step, with the
+  pinned and checked-out commit, the tool versions, the flags and the Parquet
+  sha256. Append-only. `./ctp.py audit NAME` prints a project's rows.
 
 ## Operational notes
 
