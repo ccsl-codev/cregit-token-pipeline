@@ -81,9 +81,15 @@ def test_a_caller_may_pass_its_own_contract():
 # the contract itself
 # --------------------------------------------------------------------------- #
 
-def test_the_contract_has_70_unique_columns():
+def test_the_contract_has_67_unique_columns():
     names = [n for n, _ in CONTRACT]
-    assert len(set(names)) == len(names) == 70
+    assert len(set(names)) == len(names) == 67
+
+
+def test_the_contract_has_no_firm_columns():
+    """Firm attribution is not on cregit master; a run there emits none of them."""
+    names = {n for n, _ in CONTRACT}
+    assert not names & {"firm_raw", "firm", "firm_source"}
 
 
 # --------------------------------------------------------------------------- #

@@ -44,8 +44,6 @@ REAL_RUNNER_USAGE = """\
 #   --duckdb-threads N     forward the DuckDB sorting thread count to step 10
 #   --project-meta PATH    forward the provenance sidecar to step 10
 #   --project-key NAME     which key of the sidecar this project is
-#   --firm-map PATH        forward the domain->firm CSV to step 10
-#   --firm-canonical PATH  forward the canonical firm-name table to step 10
 #   --mask-widened    resume across a mask change, reusing blob_map
 #   --retokenize EXTS re-tokenize only these extensions after a tokenizer fix
 #   --mode MODE       tokenizer mode
@@ -187,21 +185,6 @@ def runner_script(sandbox):
         path.write_text(text)
         return path
     return _write
-
-
-def provenance_kwargs(root: Path, **override) -> dict:
-    """Real files for the three provenance flags; pass e.g. project_meta="" to
-    leave one out. A path that is not a file hits a different refusal."""
-    meta = root / "project_meta.json"
-    meta.write_text('{"jq": {}}')
-    firm = root / "affiliation.merged.csv"
-    firm.write_text("domain,company,source\nredhat.com,Red Hat,gitdm\n")
-    canonical = root / "firm_canonical.csv"
-    canonical.write_text("firm_raw,firm\nRed Hat,Red Hat\n")
-    kwargs = dict(project_meta=str(meta), firm_map=str(firm),
-                  firm_canonical=str(canonical))
-    kwargs.update(override)
-    return kwargs
 
 
 @pytest.fixture
@@ -750,7 +733,7 @@ def run_args(**over):
                 shards=0, shard_classes="L",
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
-                firm_map="", firm_canonical="", allow_empty_provenance=True,
+                allow_empty_provenance=True,
                 mask="", mask_widened=False, retokenize="", reblame=False)
     base.update(over)
     return argparse.Namespace(**base)
@@ -861,8 +844,9 @@ ACCEPTED = [
              ram=32 * GIB, id="memory-flags-that-fit"),
     accepted(dict(memory_limit="8GB", jobs=2), said=["WARNING: memory budget"],
              ram=6 * GIB, id="memory-budget-that-does-not-fit"),
-    accepted(dict(project_meta=sidecar),
-             dict(project_meta=lambda root: str(root / "project_meta.json")), id="sidecar"),
+    accepted(dict(project_meta=sidecar, allow_empty_provenance=False),
+             dict(project_meta=lambda root: str(root / "project_meta.json")),
+             unsaid=["--allow-empty-provenance"], id="sidecar-needs-no-escape-hatch"),
     accepted(dict(shards=2, shard_classes=" L , M ,"), dict(shard_classes=("L", "M")),
              id="shard-classes-parsed"),
     accepted(dict(shards=6, shard_classes="L,M"), said=["sharding 6-way", "L, M"],
@@ -879,9 +863,9 @@ ACCEPTED = [
     accepted(dict(retokenize="rs", from_step=2), said=["DISCARD", "rs"],
              id="retokenize-announced"),
     accepted(dict(retokenize="   ", from_step=1), id="blank-retokenize-is-absent"),
-    accepted(dict(allow_empty_provenance=True), dict(project_meta="", firm_map=""),
+    accepted(dict(allow_empty_provenance=True), dict(project_meta=""),
              said=["WARNING: --allow-empty-provenance", "--project-meta absent",
-                   "--firm-map absent", "stratum"], id="escape-hatch-itemised"),
+                   "stratum"], id="escape-hatch-itemised"),
     # Step 10 is the last step, so --from-step 11 can publish no Parquet.
     accepted(dict(allow_empty_provenance=False, from_step=11), unsaid=["refusing"],
              id="past-step-10-not-gated"),
@@ -1352,7 +1336,8 @@ def test_a_relative_sidecar_path_is_made_absolute(
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
-    assert ctp.cmd_run(run_args(project_meta="project_meta.json")) == 0
+    assert ctp.cmd_run(run_args(project_meta="project_meta.json",
+                                allow_empty_provenance=False)) == 0
     assert Path(ctp._OPTS["project_meta"]).is_absolute()
     assert Path(ctp._OPTS["project_meta"]) == meta.resolve()
 
@@ -1361,52 +1346,17 @@ def test_a_relative_sidecar_path_is_made_absolute(
 # the provenance guard
 # --------------------------------------------------------------------------- #
 
-def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
-    """The full invocation passes the guard at the CLI default, False."""
-    args = run_args(allow_empty_provenance=False,
-                    **provenance_kwargs(ready.root))
-    assert ctp.cmd_run(args) == 0
-    assert ctp._OPTS["project_meta"].endswith("project_meta.json")
-    assert ctp._OPTS["firm_map"].endswith("affiliation.merged.csv")
-    assert ctp._OPTS["firm_canonical"].endswith("firm_canonical.csv")
-
-
-@pytest.mark.parametrize("absent, expected", [
-    pytest.param({"project_meta": ""}, "--project-meta", id="no-sidecar"),
-    # --firm-canonical without --firm-map has a refusal of its own.
-    pytest.param({"firm_map": "", "firm_canonical": ""}, "--firm-map",
-                 id="no-firm-map"),
-    pytest.param({"firm_canonical": ""}, "--firm-canonical",
-                 id="no-canonical-table"),
-])
-def test_each_provenance_flag_missing_on_its_own_is_refused(
-        must_not_start, absent, expected):
-    """Each flag owns a different slice of the columns, so one omission is enough."""
-    kwargs = provenance_kwargs(must_not_start.root, **absent)
-    with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(allow_empty_provenance=False, **kwargs))
-    message = str(exc.value)
-    assert "refusing this run" in message
-    assert expected in message
-    assert "--allow-empty-provenance" in message, (
-        "a refusal that does not name its escape hatch sends the operator to "
-        "read the source")
-    assert not (must_not_start.root / "runs.log").exists()
-
-
-def test_the_refusal_names_every_missing_flag_and_the_columns_at_stake(
-        must_not_start):
-    """All missing flags and the columns at stake in one message: one per re-run
-    would cost round trips, and "provenance" alone does not say what is blank."""
+def test_a_run_without_the_sidecar_is_refused_and_names_the_columns(must_not_start):
+    """"provenance" alone does not say what is blank, and a refusal that does not
+    name its escape hatch sends the operator to read the source."""
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(allow_empty_provenance=False))
     message = str(exc.value)
-    for flag in ("--project-meta", "--firm-map"):
-        assert flag in message
-    for column in ("stratum", "history_cluster", "firm_raw", "firm_source"):
-        assert column in message, f"{column} is blanked but is not named"
-    assert "29" in message and "3 firm columns" in message
-    assert "validate.py passes it" in message
+    for text in ("refusing this run", "--project-meta", "--allow-empty-provenance",
+                 "stratum", "history_cluster", "29", "validate.py passes it"):
+        assert text in message
+    assert "firm" not in message
+    assert not (must_not_start.root / "runs.log").exists()
 
 
 def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
@@ -1428,36 +1378,29 @@ def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
 def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start):
     """Left in a launcher script, the hatch would silence the guard on the next
     run that does omit a flag."""
-    kwargs = provenance_kwargs(must_not_start.root)
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(allow_empty_provenance=True, **kwargs))
+        ctp.cmd_run(run_args(allow_empty_provenance=True,
+                             project_meta=sidecar(must_not_start.root)))
     assert "nothing to allow" in str(exc.value)
     assert "wrapper" in str(exc.value)
 
 
-@pytest.mark.parametrize("absent, expected", [
-    pytest.param("project_meta", "--project-meta", id="sidecar"),
-    pytest.param("firm_canonical", "--firm-canonical", id="canonical-table"),
-])
-def test_a_provenance_path_that_is_not_a_file_is_refused_by_its_own_check(
-        must_not_start, absent, expected):
-    """The sharper per-flag "is not a file" message must win over the guard's,
-    which would send the operator looking for a flag they did pass."""
-    kwargs = provenance_kwargs(must_not_start.root,
-                               **{absent: str(must_not_start.root / "typo")})
+def test_a_sidecar_path_that_is_not_a_file_is_refused_by_its_own_check(must_not_start):
+    """The sharper "does not exist" message must win over the guard's, which
+    would send the operator looking for a flag they did pass."""
+    typo = str(must_not_start.root / "typo")
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(allow_empty_provenance=False, **kwargs))
+        ctp.cmd_run(run_args(allow_empty_provenance=False, project_meta=typo))
     message = str(exc.value)
-    assert expected in message
-    assert "does not exist" in message or "is not a file" in message
+    assert "--project-meta" in message and "does not exist" in message
     assert "refusing this run" not in message
 
 
-def test_project_key_is_not_an_operator_flag(monkeypatch, capsys):
-    """ctp has no --project-key: run_project derives the key from the manifest
-    name and always sends it with the sidecar, so it needs no guard."""
-    monkeypatch.setattr(ctp.sys, "argv",
-                        ["ctp.py", "run", "--project-key", "jq"])
+@pytest.mark.parametrize("flag", ["--project-key", "--firm-map", "--firm-canonical"])
+def test_ctp_run_refuses_a_flag_it_does_not_own(monkeypatch, capsys, flag):
+    """run_project derives --project-key from the manifest name. cregit master
+    has no firm columns, so ctp takes no firm flags."""
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run", flag, "x"])
     monkeypatch.setattr(ctp, "cmd_run", forbidden)
     with pytest.raises(SystemExit) as exc:
         ctp.main()
