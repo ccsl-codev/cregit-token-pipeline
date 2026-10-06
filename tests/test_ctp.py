@@ -64,7 +64,8 @@ PINNED_ROW = VALID_ROW + "\t" + PINNED_SHA
 
 # The script each python3 step runs, by phase.
 STEP_SCRIPTS = {"pin.py": "clone", "firm_attribution.py": "firm", "validate.py": "validate",
-                "validate_schema.py": "schema", "consolidate.py": "join"}
+                "validate_schema.py": "schema", "consolidate.py": "join",
+                "anonymize_parquet.py": "anonymize"}
 
 
 class FakeRunner:
@@ -74,7 +75,8 @@ class FakeRunner:
     `checkout` is the HEAD that `git rev-parse` reports for the runner's clone."""
 
     def __init__(self, *, pipeline_rc=0, firm_rc=0, validate_rc=0, raise_on=None,
-                 payload=b"", rcs=None, checkout=PINNED_SHA, pin_result=True):
+                 payload=b"", rcs=None, checkout=PINNED_SHA, pin_result=True,
+                 anon_output=True):
         self.calls: list[SimpleNamespace] = []
         self.rcs = {"pipeline": pipeline_rc, "firm": firm_rc, "validate": validate_rc,
                     **(rcs or {})}
@@ -82,6 +84,7 @@ class FakeRunner:
         self.payload = payload
         self.checkout = checkout
         self.pin_result = pin_result
+        self.anon_output = anon_output
 
     @staticmethod
     def phase_of(args) -> str:
@@ -111,6 +114,10 @@ class FakeRunner:
             work = Path(args[args.index("--work") + 1])
             name = args[args.index("--repo-name") + 1]
             (work / f"{name}-original").mkdir(parents=True, exist_ok=True)
+        if phase == "anonymize" and rc == 0 and self.anon_output:
+            outdir = Path(args[2])
+            outdir.mkdir(parents=True, exist_ok=True)
+            (outdir / Path(args[3]).name).write_bytes(b"PAR1 anon PAR1")
         if phase == "clone" and rc == 0 and self.pin_result:
             commit = args[args.index("--commit") + 1]
             Path(args[args.index("--result") + 1]).write_text(
@@ -184,6 +191,7 @@ def sandbox(tmp_path, monkeypatch):
     # tool_versions starts git and srcml; its own tests call REAL_TOOL_VERSIONS.
     monkeypatch.setattr(ctp, "tool_versions", lambda: {"ctp_commit": "test"})
     monkeypatch.setattr(retain, "STATE", tmp_path / "state")
+    monkeypatch.setattr(retain, "OUT", out)
     # A real disk_usage call stays, but the floor can never trip by accident.
     monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 0)
     monkeypatch.setattr(ctp.time, "sleep", lambda *a, **k: None)
@@ -2106,3 +2114,126 @@ def test_cmd_db_forwards_each_manifest_as_an_absolute_path(sandbox, monkeypatch)
     assert ctp.cmd_db(argparse.Namespace(manifest=["a.tsv", "b.tsv"])) == 0
     assert seen["args"][2:] == ["--manifest", str(sandbox.root / "a.tsv"),
                                 "--manifest", str(sandbox.root / "b.tsv")]
+
+
+# --------------------------------------------------------------------------- #
+# cleanup, --drop-html and --anonymize
+# --------------------------------------------------------------------------- #
+
+def runner_leftovers(sandbox, name="jq") -> Path:
+    """The work files a real runner leaves beside the Parquet."""
+    workdir = sandbox.out / name
+    for d in (f"{name}-original.git", f"{name}-cregit", "memo", "blame", "html"):
+        (workdir / d).mkdir(parents=True, exist_ok=True)
+        (workdir / d / "f").write_bytes(b"x" * 4096)
+    (workdir / f"{name}-blobmap.db").write_bytes(b"d" * 4096)
+    (workdir / "pipeline.log").write_text("log\n")
+    return workdir
+
+
+def test_cleanup_removes_the_work_files_and_keeps_the_parquet(sandbox, runner, jq):
+    fake_parquet(sandbox)
+    workdir = runner_leftovers(sandbox)
+    ctp._OPTS.update(cleanup=True)
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE
+    assert sorted(p.name for p in workdir.iterdir()) == [
+        "html", "jq-dataset.parquet", "jq.validated"]
+    [row] = ledger_rows(sandbox, "jq", "cleanup")
+    assert row["status"] == "ok"
+    assert set(row["cleanup"]["removed"]) == {
+        "jq-original.git", "jq-cregit", "memo", "blame", "jq-blobmap.db", "pipeline.log"}
+    assert row["cleanup"]["bytes_freed"] > 0
+    assert sorted(row["cleanup"]["kept"]) == ["html", "jq-dataset.parquet", "jq.validated"]
+    # The logs and the ledger live outside the workdir and stay.
+    assert list((sandbox.root / "state" / "jq" / "logs").glob("pipeline-*.log"))
+
+
+def test_drop_html_removes_html_in_the_cleanup(sandbox, runner, jq):
+    fake_parquet(sandbox)
+    workdir = runner_leftovers(sandbox)
+    ctp._OPTS.update(cleanup=True, drop_html=True)
+    ctp.run_project(jq)
+    assert not (workdir / "html").exists()
+
+
+def test_a_failed_cleanup_makes_the_project_done_dirty(monkeypatch, sandbox, runner, jq):
+    fake_parquet(sandbox)
+    runner_leftovers(sandbox)
+    ctp._OPTS.update(cleanup=True)
+    monkeypatch.setattr(ctp.retain, "clean_workdir", lambda name, drop_html: {
+        "removed": [], "kept": [], "errors": ["memo (Permission denied)"], "bytes_freed": 0})
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE_DIRTY
+    [row] = ledger_rows(sandbox, "jq", "cleanup")
+    assert row["status"] == "failed" and row["cleanup"]["errors"] == ["memo (Permission denied)"]
+    assert ledger_rows(sandbox, "jq", "project")[0]["state"] == "done-dirty"
+
+
+def test_without_cleanup_the_work_files_stay(sandbox, runner, jq):
+    fake_parquet(sandbox)
+    workdir = runner_leftovers(sandbox)
+    ctp.run_project(jq)
+    assert (workdir / "memo").exists() and (workdir / "jq-original.git").exists()
+
+
+@pytest.fixture
+def anonymizer(sandbox):
+    script = sandbox.root / "anonymize_parquet.py"
+    script.write_text("# stand-in\n")
+    ctp._OPTS.update(anonymize=str(script))
+    return script
+
+
+def test_anonymize_runs_after_the_schema_check_and_before_the_join(
+        sandbox, runner, jq, joining, anonymizer):
+    ctp.run_project(jq)
+    assert [c.phase for c in runner.calls] == [
+        "pipeline", "firm", "validate", "schema", "anonymize", "join"]
+    workdir = sandbox.out / "jq"
+    assert runner.argv("anonymize") == ["python3", str(anonymizer), str(workdir / "anon"),
+                                        str(workdir / "jq-dataset.parquet")]
+    [row] = ledger_rows(sandbox, "jq", "anonymize")
+    [out] = row["anonymized"]
+    assert out["path"] == str(workdir / "anon" / "jq-dataset.parquet")
+    assert out["sha256"] == hashlib.sha256(b"PAR1 anon PAR1").hexdigest()
+
+
+def test_anonymize_without_join_still_runs(sandbox, runner, jq, anonymizer):
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate", "anonymize"]
+
+
+def test_an_anonymizer_that_writes_nothing_fails_the_project(
+        monkeypatch, sandbox, jq, anonymizer):
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(anon_output=False))
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    [row] = ledger_rows(sandbox, "jq", "anonymize")
+    assert row["exit_code"] == 1 and "wrote no Parquet" in row["detail"]
+
+
+def test_drop_html_needs_cleanup(must_not_start):
+    with pytest.raises(SystemExit, match="--drop-html deletes html/ in the cleanup"):
+        ctp.cmd_run(run_args(drop_html=True))
+
+
+def test_anonymize_needs_an_existing_script(must_not_start):
+    with pytest.raises(SystemExit, match="is not a file"):
+        ctp.cmd_run(run_args(anonymize="/nonexistent/anon.py"))
+
+
+def test_run_options_carry_cleanup_drop_html_and_the_anonymizer(sandbox, runner_script):
+    runner_script()
+    script = sandbox.root / "anon.py"
+    script.write_text("")
+    opts = ctp.run_options(run_args(cleanup=True, drop_html=True, anonymize=str(script)))
+    assert opts["cleanup"] is True and opts["drop_html"] is True
+    assert opts["anonymize"] == str(script.resolve())
+    defaults = ctp.run_options(run_args())
+    assert (defaults["cleanup"], defaults["drop_html"], defaults["anonymize"]) == (False, False, "")
+
+
+def test_drop_html_and_anonymize_are_off_by_default_on_the_cli(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run"])
+    ctp.main()
+    assert seen["drop_html"] is False and seen["anonymize"] == "" and seen["cleanup"] is False

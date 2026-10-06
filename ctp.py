@@ -729,26 +729,63 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     return run_step(ctx, "validate", later["validate"], after_validate) == 0
 
 
+def anon_outputs(name: str) -> list[dict]:
+    anon = OUT / name / retain.ANON_DIR
+    if not anon.is_dir():
+        return []
+    return [{"path": str(f), "bytes": f.stat().st_size, "sha256": sha256_file(f)}
+            for f in sorted(anon.glob("*.parquet"))]
+
+
 def publish_steps(ctx: ProjectRun) -> bool:
-    """schema (validate_schema.py), then join (an incremental consolidate into
-    ctp.duckdb). True when both pass."""
+    """schema (validate_schema.py), anonymize (only with --anonymize), then join
+    (an incremental consolidate into ctp.duckdb). True when every step passes."""
     name = ctx.name
     parquet = OUT / name / f"{name}-dataset.parquet"
-    if run_step(ctx, "schema", ["python3", str(CORPUS / "validate_schema.py"),
-                                str(parquet)]) != 0:
+    if _OPTS.get("join") and run_step(ctx, "schema", [
+            "python3", str(CORPUS / "validate_schema.py"), str(parquet)]) != 0:
         return False
+    if _OPTS.get("anonymize"):
+        def after_anonymize(rc: int):
+            outputs = anon_outputs(name)
+            if rc == 0 and not outputs:
+                return 1, {"detail": f"the anonymizer wrote no Parquet to {retain.ANON_DIR}/"}
+            return rc, {"anonymized": outputs}
+        # The interface of anonymize_parquet.py: an output directory, then the inputs.
+        if run_step(ctx, "anonymize", ["python3", _OPTS["anonymize"],
+                                       str(OUT / name / retain.ANON_DIR), str(parquet)],
+                    after_anonymize) != 0:
+            return False
+    if not _OPTS.get("join"):
+        return True
     return run_step(ctx, "join", ["python3", str(CORPUS / "consolidate.py"),
                                   "--join", name, "--manifest", _OPTS["manifest"]]) == 0
 
 
 def cleanup_step(ctx: ProjectRun) -> bool:
-    """Remove the staging clone, and memo/ under --drop-memo. True when clean."""
+    """Remove the staging clone; then, with --cleanup, every bulky work file (the
+    clones, memo/, blame/, the work databases), or only memo/ under --drop-memo.
+    The Parquet, its stamp, the logs and the ledger stay. True when clean."""
     name = ctx.name
     start = time.time()
     errors = drop_pinned_clone(name)
     removed = [] if errors else ([str(pinned_clone_path(name))] if ctx.pinned else [])
     for err in errors:
         say(f"{name} — staging clone not fully removed: {err}")
+    if _OPTS.get("cleanup"):
+        result = retain.clean_workdir(name, drop_html=bool(_OPTS.get("drop_html")))
+        removed += [r["entry"] for r in result["removed"]]
+        errors += result["errors"]
+        for err in result["errors"]:
+            say(f"{name} — cleanup could not remove: {err}")
+        say(f"{name} — cleanup freed {retain.human(result['bytes_freed'])}, kept "
+            f"{', '.join(result['kept']) or 'nothing'}")
+        ctx.record("cleanup", "ok" if not errors else "failed", start, time.time(),
+                   cleanup={"removed": removed, "errors": errors, "kept": result["kept"],
+                            "bytes_freed": result["bytes_freed"],
+                            "removed_bytes": {r["entry"]: r["bytes"]
+                                              for r in result["removed"]}})
+        return not errors
     if _OPTS.get("drop_memo"):
         # prune checks the keepers itself.
         _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
@@ -804,7 +841,7 @@ def run_project(project: dict, queue_pos: int | None = None,
                     ctx.checked_out_sha = runner_checkout(name, workdir)
                 elif not build_steps(ctx, workdir, stamp):
                     return ctx.finish(ledger.FAILED)
-                if _OPTS.get("join") and not publish_steps(ctx):
+                if (_OPTS.get("join") or _OPTS.get("anonymize")) and not publish_steps(ctx):
                     return ctx.finish(ledger.FAILED)
             except OSError as exc:
                 say(f"{name} ✗ a phase could not start: {exc}")
@@ -1078,8 +1115,26 @@ def announce_run(opts: dict, jobs: int) -> None:
             f"{'es' if len(opts['shard_classes']) > 1 else ''} {', '.join(opts['shard_classes'])}")
 
 
+def resolve_anonymizer(path: str) -> str:
+    if not path:
+        return ""
+    if not Path(path).is_file():
+        sys.exit(f"--anonymize {path} is not a file. It is run as "
+                 "`python3 SCRIPT <outdir> <dataset.parquet>`, the interface of "
+                 "anonymize_parquet.py.")
+    return str(Path(path).resolve())
+
+
+def refuse_cleanup_conflicts(args: argparse.Namespace) -> None:
+    if getattr(args, "drop_html", False) and not getattr(args, "cleanup", False):
+        sys.exit("--drop-html deletes html/ in the cleanup step. Add --cleanup, or use "
+                 "--skip-html to not write the HTML at all.")
+
+
 def run_options(args: argparse.Namespace) -> dict:
     """The checked options run_project reads through _OPTS. Exits on a refusal."""
+    refuse_cleanup_conflicts(args)
+    anonymize = resolve_anonymizer(getattr(args, "anonymize", "") or "")
     mask_widened, retokenize = preflight_runner_flags(args)
     project_meta = resolve_project_meta(args.project_meta) if args.project_meta else ""
     enforce_provenance(provenance_gaps(project_meta), args)
@@ -1097,7 +1152,10 @@ def run_options(args: argparse.Namespace) -> dict:
                 mask=args.mask,
                 project_meta=project_meta,
                 join=bool(getattr(args, "join", False)),
-                manifest=str((CORPUS / args.manifest).resolve()))
+                manifest=str((CORPUS / args.manifest).resolve()),
+                cleanup=bool(getattr(args, "cleanup", False)),
+                drop_html=bool(getattr(args, "drop_html", False)),
+                anonymize=anonymize)
 
 
 BLOBEXEC_JAR = Path("blobExec/target/scala-2.13/blobExec-0.1.0-assembly.jar")
@@ -1438,6 +1496,15 @@ def main() -> int:
     run_p.add_argument("--join", action="store_true",
                        help="after each validated project, check its schema with "
                             "validate_schema.py and join it into ctp.duckdb")
+    run_p.add_argument("--cleanup", action="store_true",
+                       help="after each validated project, delete the clones, memo/, "
+                            "blame/ and work databases; keep the Parquet, stamp and logs")
+    run_p.add_argument("--drop-html", action="store_true",
+                       help="with --cleanup, delete html/ too. Off by default: an open "
+                            "decision")
+    run_p.add_argument("--anonymize", metavar="SCRIPT", default="",
+                       help="run `python3 SCRIPT <workdir>/anon <parquet>` after the "
+                            "schema check. Off by default: an open decision")
     run_p.set_defaults(fn=cmd_run)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
