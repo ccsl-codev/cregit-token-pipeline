@@ -2664,3 +2664,73 @@ def test_run_flags_name_the_config_and_the_directories(sandbox, monkeypatch):
     assert flags["cregit_dir"] == str(sandbox.cregit) and flags["output_dir"] == str(sandbox.out)
     monkeypatch.setattr(ctp.retain, "CONFIG", sandbox.root / "absent.cfg")
     assert ctp.run_flags(run_args(), sandbox.root / "manifest.tsv")["config_sha256"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# census resumes an interrupted project at step 2
+# --------------------------------------------------------------------------- #
+
+def leftover_attempt(sandbox, name="jq"):
+    workdir = sandbox.out / name
+    (workdir / f"{name}-original.git").mkdir(parents=True)
+    (workdir / f"{name}-blobmap.db").write_bytes(b"map")
+    return workdir
+
+
+def test_an_interrupted_pinned_project_resumes_at_step_2(monkeypatch, sandbox, pinned_jq):
+    leftover_attempt(sandbox)
+    r = FakeRunner()
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp._OPTS.update(auto_resume=True, from_step=1)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert runner_argv_tail(r) == "2"
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert row["argv"][-1] == "2"
+
+
+def runner_argv_tail(r):
+    return r.argv("pipeline")[-1]
+
+
+def test_a_clone_of_another_commit_restarts_at_step_1(monkeypatch, sandbox, pinned_jq):
+    leftover_attempt(sandbox)
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    assert ctp.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
+
+
+def test_no_blob_map_means_step_1(sandbox):
+    (sandbox.out / "jq" / "jq-original.git").mkdir(parents=True)
+    assert ctp.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
+
+
+def test_an_unreadable_clone_means_step_1(sandbox, monkeypatch):
+    leftover_attempt(sandbox)
+    monkeypatch.setattr(ctp, "git_head", lambda repo: "")
+    assert ctp.resume_step("jq", sandbox.out / "jq", "") == 1
+
+
+def test_an_unpinned_leftover_resumes_at_step_2(sandbox, monkeypatch):
+    leftover_attempt(sandbox)
+    monkeypatch.setattr(ctp, "git_head", lambda repo: OTHER_SHA)
+    assert ctp.resume_step("jq", sandbox.out / "jq", "") == 2
+
+
+def test_run_without_auto_resume_keeps_step_1(monkeypatch, sandbox, pinned_jq):
+    leftover_attempt(sandbox)
+    r = FakeRunner()
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp.run_project(pinned_jq)
+    assert "2" not in r.argv("pipeline")[-1:]
+
+
+def test_an_explicit_from_step_wins_over_auto_resume(monkeypatch, sandbox, pinned_jq):
+    leftover_attempt(sandbox)
+    r = FakeRunner()
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp._OPTS.update(auto_resume=True, from_step=7)
+    ctp.run_project(pinned_jq)
+    assert r.argv("pipeline")[-1] == "7"

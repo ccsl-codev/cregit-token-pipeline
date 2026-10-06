@@ -697,6 +697,18 @@ def _held_fds(name: str) -> tuple:
     return (fd,) if fd is not None else ()
 
 
+def resume_step(name: str, workdir: Path, pinned: str) -> int:
+    """2 when an earlier attempt left a clone of the right commit and a blob map, so
+    the runner can resume tokenizing instead of refusing to wipe a big memo; else 1."""
+    bare = workdir / f"{name}-original.git"
+    if not (workdir / f"{name}-blobmap.db").is_file() or not bare.is_dir():
+        return 1
+    head = git_head(bare)
+    if not head or (pinned and head != pinned):
+        return 1
+    return 2
+
+
 def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     """clone (when pinned), pipeline, firm, validate. True when the project validated."""
     name = ctx.name
@@ -728,7 +740,14 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
 
     if ctx.pinned and run_step(ctx, "clone", pin_args(ctx.project), after_clone) != 0:
         return False
-    if run_step(ctx, "pipeline", build_pipeline_args(ctx.project, _OPTS, workdir),
+    opts = _OPTS
+    if _OPTS.get("auto_resume") and _OPTS.get("from_step", 1) == 1:
+        step = resume_step(name, workdir, ctx.pinned)
+        if step > 1:
+            say(f"{name} — an earlier attempt left its clone and blob map; "
+                f"resuming the runner at step {step}")
+            opts = {**_OPTS, "from_step": step}
+    if run_step(ctx, "pipeline", build_pipeline_args(ctx.project, opts, workdir),
                 after_pipeline) != 0:
         return False
     # firm adds the 3 firm columns to cregit's 67; validate gates the 70.
@@ -1504,7 +1523,7 @@ def cmd_census(args: argparse.Namespace) -> int:
 
     args.join, args.cleanup = True, True
     _OPTS.update(run_options(args))
-    _OPTS.update(own_session=True, min_free_mem_gb=args.min_free_mem_gb)
+    _OPTS.update(own_session=True, min_free_mem_gb=args.min_free_mem_gb, auto_resume=True)
     DISK_FLOOR_GB = args.disk_floor_gb
     if len(projects) > unpinned:
         refuse_unless_runner_accepts(
