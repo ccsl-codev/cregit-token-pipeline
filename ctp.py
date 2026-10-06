@@ -923,6 +923,11 @@ def run_project(project: dict, queue_pos: int | None = None,
 
             clean = cleanup_step(ctx)
             return ctx.finish(ledger.DONE if clean else ledger.DONE_DIRTY)
+        except Exception as exc:
+            # A bug here must not leave the attempt without its final row.
+            say(f"{name} ✗ internal error: {type(exc).__name__}: {exc}")
+            ctx.failed_step = ctx.failed_step or "internal"
+            return ctx.finish(ledger.FAILED, detail=f"internal error: {type(exc).__name__}: {exc}")
         finally:
             _lock_fds.pop(name, None)
             _live.pop(name, None)

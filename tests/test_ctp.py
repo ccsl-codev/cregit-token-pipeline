@@ -1754,6 +1754,15 @@ def ledger_rows(sandbox, project=None, step=None, started=False):
             and (started or r.get("status") != "started")]
 
 
+def test_an_internal_error_still_writes_the_final_row(monkeypatch, sandbox, runner, jq):
+    def boom(ctx):
+        raise KeyError("surprise")
+    monkeypatch.setattr(ctp, "cleanup_step", boom)
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    [final] = ledger_rows(sandbox, "jq", "project")
+    assert final["failed_step"] == "internal" and "KeyError" in final["detail"]
+
+
 def test_each_step_writes_a_started_row_before_it_runs(sandbox, runner, jq):
     ctp.run_project(jq)
     rows = ledger_rows(sandbox, "jq", started=True)
