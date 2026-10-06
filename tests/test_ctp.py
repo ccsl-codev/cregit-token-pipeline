@@ -2734,3 +2734,28 @@ def test_an_explicit_from_step_wins_over_auto_resume(monkeypatch, sandbox, pinne
     ctp._OPTS.update(auto_resume=True, from_step=7)
     ctp.run_project(pinned_jq)
     assert r.argv("pipeline")[-1] == "7"
+
+
+def test_next_job_takes_the_first_job_whose_wait_is_over():
+    from collections import deque
+    late = ctp.Job(1, {"name": "a"}, 1, 0, False, not_before=100.0)
+    ready = ctp.Job(2, {"name": "b"}, 1, 0, False)
+    queue = deque([late, ready])
+    assert ctp.next_job(queue, now=50.0) is ready and list(queue) == [late]
+    assert ctp.next_job(queue, now=50.0) is None
+    assert ctp.next_job(queue, now=100.0) is late and not queue
+
+
+def test_a_deferred_project_backs_off(sandbox, fake_projects, no_gates, capsys):
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED] * 2 + [ctp.RunOutcome.DONE]})
+    ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.names() == ["a", "a", "a"]
+    out = capsys.readouterr().out
+    assert "deferred; next try in 0s" in out
+
+
+def test_the_deferral_wait_is_capped(monkeypatch, sandbox, fake_projects, no_gates, capsys):
+    monkeypatch.setattr(ctp, "DEFER_MAX_S", 0.05)
+    fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
+    ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=10)
+    assert "deferred; next try in 0s" in capsys.readouterr().out

@@ -1405,6 +1405,31 @@ def plan(project: dict, history: ledger.History, retries: int) -> str:
     return POST if stamped else RUN
 
 
+@dataclass
+class Job:
+    """One queued project of a census."""
+    pos: int
+    project: dict
+    attempt: int
+    failures: int
+    post: bool
+    defers: int = 0
+    not_before: float = 0.0
+
+
+# A deferred project (its lock is held elsewhere) waits poll * 2**defers, up to this.
+DEFER_MAX_S = 600
+
+
+def next_job(queue: deque, now: float) -> Job | None:
+    """The first job whose wait is over, taken out of the queue; None if all wait."""
+    for i, job in enumerate(queue):
+        if job.not_before <= now:
+            del queue[i]
+            return job
+    return None
+
+
 def schedule(projects: list[dict], workers: int, retries: int, stop_file: Path,
              poll: float = POLL_S) -> dict:
     """Run projects in manifest order with up to `workers` at once. Returns name -> outcome."""
@@ -1423,7 +1448,7 @@ def schedule(projects: list[dict], workers: int, retries: int, stop_file: Path,
                 f"more than --retries {retries}; not retried")
             results[name] = RunOutcome.FAILED
         else:
-            queue.append((pos, project, h.attempts + 1, h.failures, decision == POST))
+            queue.append(Job(pos, project, h.attempts + 1, h.failures, decision == POST))
     skipped = sum(1 for v in results.values() if v == RunOutcome.SKIPPED)
     say(f"census: {total} projects, {skipped} already done, {len(queue)} to run, "
         f"{workers} workers")
@@ -1442,15 +1467,16 @@ def schedule(projects: list[dict], workers: int, retries: int, stop_file: Path,
                         f"{len(running)} running will finish")
                 if not reason and queue and len(running) < workers:
                     gate = gate_reason(_OPTS)
-                    if gate is None:
+                    job = next_job(queue, time.time()) if gate is None else None
+                    if job is not None:
                         waiting_since = None
-                        pos, project, attempt, failures, post = queue.popleft()
-                        fut = pool.submit(run_project, project, pos, total, attempt, post)
-                        running[fut] = (pos, project, attempt, failures, post)
+                        fut = pool.submit(run_project, job.project, job.pos, total,
+                                          job.attempt, job.post)
+                        running[fut] = job
                         continue
-                    if waiting_since is None:
+                    if gate is not None and waiting_since is None:
                         waiting_since = time.time()
-                        say(f"waiting to start {queue[0][1]['name']}: {gate}")
+                        say(f"waiting to start {queue[0].project['name']}: {gate}")
                 if not running:
                     if reason or not queue:
                         break
@@ -1458,8 +1484,8 @@ def schedule(projects: list[dict], workers: int, retries: int, stop_file: Path,
                     continue
                 done, _ = wait(list(running), timeout=poll, return_when=FIRST_COMPLETED)
                 for fut in done:
-                    pos, project, attempt, failures, post = running.pop(fut)
-                    name = project["name"]
+                    job = running.pop(fut)
+                    name = job.project["name"]
                     try:
                         outcome = fut.result()
                     except Exception as exc:              # one project must not end the run
@@ -1467,16 +1493,19 @@ def schedule(projects: list[dict], workers: int, retries: int, stop_file: Path,
                         outcome = RunOutcome.FAILED
                     results[name] = outcome
                     if outcome == RunOutcome.FAILED:
-                        failures += 1
-                        if failures <= retries:
-                            say(f"{name} — failed, retry {failures} of {retries} queued")
-                            queue.append((pos, project, attempt + 1, failures,
-                                          (OUT / name / f"{name}.validated").exists()))
+                        job.failures += 1
+                        if job.failures <= retries:
+                            say(f"{name} — failed, retry {job.failures} of {retries} queued")
+                            job.attempt += 1
+                            job.post = (OUT / name / f"{name}.validated").exists()
+                            queue.append(job)
                     elif outcome == RunOutcome.DEFERRED:
-                        # Another process holds it: try again after the rest.
-                        queue.append((pos, project, attempt, failures, post))
-                        if len(queue) == 1 and not running:
-                            time.sleep(poll)
+                        # Another process holds it: try again later, waiting longer each time.
+                        job.defers += 1
+                        wait_s = min(poll * 2 ** job.defers, DEFER_MAX_S)
+                        job.not_before = time.time() + wait_s
+                        say(f"{name} — deferred; next try in {wait_s:.0f}s")
+                        queue.append(job)
     finally:
         stop_heartbeat.set()
     return results
