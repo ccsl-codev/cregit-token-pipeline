@@ -3,6 +3,8 @@ __pycache__/
 ctp.duckdb
 runs.log
 metrics.tsv
+ledger.jsonl
+STOP
 resources.tsv
 smoke-*.log
 corpus-*.log
