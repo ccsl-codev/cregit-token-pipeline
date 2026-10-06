@@ -88,6 +88,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(consolidate, "CORPUS", tmp_path)
     monkeypatch.setattr(consolidate, "OUT", out)
     monkeypatch.setattr(consolidate, "DB", tmp_path / "ctp.duckdb")
+    monkeypatch.setattr(consolidate, "DB_LOCK", tmp_path / "ctp.duckdb.lock")
     monkeypatch.setattr(retain, "STATE", tmp_path / "state")
     return SimpleNamespace(root=tmp_path, out=out)
 
@@ -648,3 +649,182 @@ def test_project_rows_rejects_seven_fields(sandbox):
     write_manifest(sandbox.root, ROW + "\t" + "a" * 40 + "\textra")
     with pytest.raises(ValueError, match="5 or 6"):
         consolidate.project_rows()
+
+
+# --------------------------------------------------------------------------- #
+# --join: the incremental join a census makes after each project
+# --------------------------------------------------------------------------- #
+
+needs_duckdb = pytest.mark.skipif(DUCKDB_IS_STUBBED, reason="needs real duckdb")
+
+KILO_ROW = "kilo\thttps://github.com/antirez/kilo.git\tcommunity\t\tS\t" + "a" * 40
+
+
+def validated(sandbox, name, columns=None, rows="1"):
+    workdir = make_project(sandbox.out, name, stamp=f"rows={rows}\nbytes=2\n")
+    return write_parquet(workdir / f"{name}-dataset.parquet",
+                         columns or consolidate.EXPECTED_COLUMNS)
+
+
+def db_rows(sandbox, sql):
+    import duckdb as real_duckdb
+    con = real_duckdb.connect(str(sandbox.root / "ctp.duckdb"), read_only=True)
+    try:
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
+
+
+@needs_duckdb
+def test_join_adds_a_project_to_an_empty_database(sandbox, capsys):
+    write_manifest(sandbox.root, ROW)
+    validated(sandbox, "jq")
+    assert consolidate.join("jq", [sandbox.root / "manifest.tsv"]) == 0
+    assert db_rows(sandbox, "select name, state, token_rows from projects") == [("jq", "DONE", 1)]
+    assert db_rows(sandbox, "select name from joined") == [("jq",)]
+    assert db_rows(sandbox, "select repo_name, category from tokens") == [("jq", "community")]
+    assert "OK joined jq: 1 rows; the tokens view now spans 1 projects" in capsys.readouterr().out
+
+
+@needs_duckdb
+def test_join_widens_the_view_and_keeps_the_projects_already_there(sandbox):
+    write_manifest(sandbox.root, ROW, SM_ROW)
+    validated(sandbox, "jq")
+    validated(sandbox, "dpdk__dpdk")
+    manifests = [sandbox.root / "manifest.tsv"]
+    assert consolidate.join("jq", manifests) == 0
+    assert consolidate.join("dpdk__dpdk", manifests) == 0
+    # A second join of one project replaces its rows rather than doubling them.
+    assert consolidate.join("jq", manifests) == 0
+    assert db_rows(sandbox, "select count(*) from projects") == [(2,)]
+    assert sorted(db_rows(sandbox, "select repo_name from tokens")) == [("dpdk__dpdk",), ("jq",)]
+
+
+@needs_duckdb
+def test_join_matches_a_full_rebuild(sandbox):
+    write_manifest(sandbox.root, ROW, SM_ROW)
+    validated(sandbox, "jq")
+    validated(sandbox, "dpdk__dpdk")
+    (sandbox.root / "metrics.tsv").write_text("iso_start\tproject\n")
+    for name in ("jq", "dpdk__dpdk"):
+        consolidate.join(name, [sandbox.root / "manifest.tsv"])
+    joined = db_rows(sandbox, "select * from projects order by name")
+    consolidate.main(["--manifest", "manifest.tsv"])
+    assert db_rows(sandbox, "select * from projects order by name") == joined
+    assert sorted(db_rows(sandbox, "select name from joined")) == [("dpdk__dpdk",), ("jq",)]
+
+
+@needs_duckdb
+def test_join_reads_a_pinned_manifest(sandbox):
+    write_manifest(sandbox.root, KILO_ROW)
+    validated(sandbox, "kilo")
+    assert consolidate.join("kilo", [sandbox.root / "manifest.tsv"]) == 0
+
+
+@needs_duckdb
+def test_join_refuses_a_drifted_parquet(sandbox, capsys):
+    write_manifest(sandbox.root, ROW)
+    validated(sandbox, "jq", columns=LEGACY_23_COLUMNS)
+    assert consolidate.join("jq", [sandbox.root / "manifest.tsv"]) == 1
+    assert "schema drift" in capsys.readouterr().err
+    assert not (sandbox.root / "ctp.duckdb").exists()
+
+
+@needs_duckdb
+def test_join_keeps_an_excluded_project_out_of_the_view(sandbox, monkeypatch, capsys):
+    monkeypatch.setitem(consolidate.PUBLICATION_EXCLUSIONS, "jq", "near-duplicate")
+    write_manifest(sandbox.root, ROW)
+    validated(sandbox, "jq")
+    assert consolidate.join("jq", [sandbox.root / "manifest.tsv"]) == 0
+    assert db_rows(sandbox, "select excluded_because from projects") == [("near-duplicate",)]
+    assert db_rows(sandbox, "select count(*) from joined") == [(0,)]
+    assert "row only, excluded from publication" in capsys.readouterr().out
+
+
+def test_join_refuses_an_unknown_project(sandbox, capsys):
+    write_manifest(sandbox.root, ROW)
+    assert consolidate.join("nope", [sandbox.root / "manifest.tsv"]) == 2
+    assert "nope is not in" in capsys.readouterr().err
+
+
+def test_join_refuses_a_project_that_is_not_validated(sandbox, capsys):
+    write_manifest(sandbox.root, ROW)
+    make_project(sandbox.out, "jq", parquet=True)
+    assert consolidate.join("jq", [sandbox.root / "manifest.tsv"]) == 1
+    assert "jq is FAILED" in capsys.readouterr().err
+
+
+def test_join_refuses_a_parquet_it_cannot_read(sandbox, capsys, monkeypatch):
+    write_manifest(sandbox.root, ROW)
+    make_project(sandbox.out, "jq", stamp="rows=1\n", parquet=True)
+
+    def unreadable(path):
+        raise RuntimeError("not a parquet")
+    monkeypatch.setattr(consolidate, "read_schema", unreadable)
+    assert consolidate.join("jq", [sandbox.root / "manifest.tsv"]) == 1
+    assert "schema not read" in capsys.readouterr().err
+
+
+def test_main_join_exits_with_the_join_code(sandbox, monkeypatch):
+    seen = []
+    monkeypatch.setattr(consolidate, "join", lambda name, m: seen.append((name, m)) or 2)
+    with pytest.raises(SystemExit) as exc:
+        consolidate.main(["--join", "jq", "--manifest", "m.tsv"])
+    assert exc.value.code == 2 and seen == [("jq", [sandbox.root / "m.tsv"])]
+
+
+def test_connect_retries_while_the_database_is_busy(monkeypatch, capsys):
+    class Busy(Exception):
+        pass
+    calls = []
+
+    def flaky(path):
+        calls.append(path)
+        if len(calls) < 3:
+            raise Busy("Could not set lock on file")
+        return "con"
+    monkeypatch.setattr(consolidate.duckdb, "IOException", Busy, raising=False)
+    monkeypatch.setattr(consolidate.duckdb, "connect", flaky, raising=False)
+    monkeypatch.setattr(consolidate.time, "sleep", lambda s: None)
+    assert consolidate.connect() == "con" and len(calls) == 3
+    assert "is busy" in capsys.readouterr().err
+
+
+def test_connect_gives_up_after_its_tries(monkeypatch):
+    class Busy(Exception):
+        pass
+
+    def busy(path):
+        raise Busy("locked")
+    monkeypatch.setattr(consolidate.duckdb, "IOException", Busy, raising=False)
+    monkeypatch.setattr(consolidate.duckdb, "connect", busy, raising=False)
+    monkeypatch.setattr(consolidate.time, "sleep", lambda s: None)
+    with pytest.raises(Busy):
+        consolidate.connect()
+
+
+def test_the_rebuild_holds_the_writer_lock(sandbox, con, held_lock):
+    """A rebuild must wait for a join in flight, not open the database beside it."""
+    write_manifest(sandbox.root, ROW)
+    import threading
+    finished = threading.Event()
+
+    def rebuild():
+        consolidate.main(["--manifest", "manifest.tsv"])
+        finished.set()
+
+    with held_lock(sandbox.root / "ctp.duckdb.lock"):
+        t = threading.Thread(target=rebuild)
+        t.start()
+        assert not finished.wait(0.3)
+    t.join(5)
+    assert finished.is_set()
+
+
+def test_the_rebuild_records_the_joined_parquets(sandbox, con):
+    write_manifest(sandbox.root, ROW)
+    make_project(sandbox.out, "jq", stamp="rows=1\nbytes=2\n", parquet=True)
+    consolidate.main(["--manifest", "manifest.tsv"])
+    assert "create or replace table joined" in con.find("table joined")
+    sql, rows = con.batches[1]
+    assert sql == consolidate.JOINED_INSERT and rows[0][0] == "jq"

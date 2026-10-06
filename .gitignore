@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 ctp.duckdb
+ctp.duckdb.lock
 runs.log
 metrics.tsv
 ledger.jsonl

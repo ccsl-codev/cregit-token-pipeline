@@ -2024,3 +2024,85 @@ def test_audit_line_shows_a_failure_and_its_detail():
     line = ctp.audit_line({"step": "project", "state": "failed", "failed_step": "clone",
                            "detail": "commit missing"})
     assert "state=failed" in line and "failed_step=clone" in line and "commit missing" in line
+
+
+# --------------------------------------------------------------------------- #
+# schema check and join
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def joining(sandbox):
+    manifest = write_manifest(sandbox.root, VALID_ROW)
+    ctp._OPTS.update(join=True, manifest=str(manifest))
+    return manifest
+
+
+def test_join_runs_the_schema_check_then_the_join(sandbox, runner, jq, joining):
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate", "schema", "join"]
+    parquet = str(sandbox.out / "jq" / "jq-dataset.parquet")
+    assert runner.argv("schema") == ["python3", str(sandbox.root / "validate_schema.py"), parquet]
+    assert runner.argv("join") == ["python3", str(sandbox.root / "consolidate.py"),
+                                   "--join", "jq", "--manifest", str(joining)]
+    steps = [r["step"] for r in ledger_rows(sandbox, "jq")]
+    assert steps == ["pipeline", "firm", "validate", "schema", "join", "cleanup", "project"]
+
+
+@pytest.mark.parametrize("step", ["schema", "join"])
+def test_a_failed_schema_check_or_join_fails_the_project(monkeypatch, sandbox, jq, joining, step):
+    r = FakeRunner(rcs={step: 1})
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    [final] = ledger_rows(sandbox, "jq", "project")
+    assert final["failed_step"] == step
+    assert not ledger_rows(sandbox, "jq", "cleanup")
+    if step == "schema":
+        assert "join" not in [c.phase for c in r.calls]
+
+
+def test_without_join_no_schema_or_join_step_runs(runner, jq):
+    ctp.run_project(jq)
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate"]
+
+
+def test_a_validated_project_resumes_at_the_steps_after_validation(
+        sandbox, runner, jq, joining):
+    fake_parquet(sandbox)
+    (sandbox.out / "jq" / "jq.validated").write_text("rows=7\nbytes=9\n")
+    assert ctp.run_project(jq, resume_validated=True) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["schema", "join"]
+    [final] = ledger_rows(sandbox, "jq", "project")
+    assert final["state"] == "done" and final["parquet"]["rows"] == 7
+
+
+def test_a_validated_project_is_still_skipped_by_default(sandbox, runner, jq, joining):
+    (sandbox.out / "jq").mkdir()
+    (sandbox.out / "jq" / "jq.validated").write_text("rows=7\n")
+    assert ctp.run_project(jq) == ctp.RunOutcome.SKIPPED
+    assert runner.calls == [] and ledger_rows(sandbox) == []
+
+
+def test_resuming_ignores_the_disk_floor(monkeypatch, sandbox, runner, jq, joining):
+    """The steps after validation write almost nothing; the floor guards a new clone."""
+    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    (sandbox.out / "jq").mkdir()
+    (sandbox.out / "jq" / "jq.validated").write_text("rows=7\n")
+    assert ctp.run_project(jq, resume_validated=True) == ctp.RunOutcome.DONE
+
+
+def test_run_options_carry_join_and_the_absolute_manifest(sandbox, runner_script):
+    runner_script()
+    opts = ctp.run_options(run_args(join=True))
+    assert opts["join"] is True
+    assert opts["manifest"] == str((sandbox.root / "manifest.tsv").resolve())
+    assert ctp.run_options(run_args())["join"] is False
+
+
+def test_cmd_db_forwards_each_manifest_as_an_absolute_path(sandbox, monkeypatch):
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {})
+    seen = {}
+    monkeypatch.setattr(ctp.subprocess, "run",
+                        lambda args, **k: seen.update(args=args) or SimpleNamespace(returncode=0))
+    assert ctp.cmd_db(argparse.Namespace(manifest=["a.tsv", "b.tsv"])) == 0
+    assert seen["args"][2:] == ["--manifest", str(sandbox.root / "a.tsv"),
+                                "--manifest", str(sandbox.root / "b.tsv")]

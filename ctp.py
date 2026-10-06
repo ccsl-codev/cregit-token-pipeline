@@ -729,6 +729,18 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     return run_step(ctx, "validate", later["validate"], after_validate) == 0
 
 
+def publish_steps(ctx: ProjectRun) -> bool:
+    """schema (validate_schema.py), then join (an incremental consolidate into
+    ctp.duckdb). True when both pass."""
+    name = ctx.name
+    parquet = OUT / name / f"{name}-dataset.parquet"
+    if run_step(ctx, "schema", ["python3", str(CORPUS / "validate_schema.py"),
+                                str(parquet)]) != 0:
+        return False
+    return run_step(ctx, "join", ["python3", str(CORPUS / "consolidate.py"),
+                                  "--join", name, "--manifest", _OPTS["manifest"]]) == 0
+
+
 def cleanup_step(ctx: ProjectRun) -> bool:
     """Remove the staging clone, and memo/ under --drop-memo. True when clean."""
     name = ctx.name
@@ -751,13 +763,17 @@ def cleanup_step(ctx: ProjectRun) -> bool:
 
 
 def run_project(project: dict, queue_pos: int | None = None,
-                queue_total: int | None = None, attempt: int = 1) -> RunOutcome:
-    """Runs one project's steps and appends a ledger row for each. Returns a RunOutcome."""
+                queue_total: int | None = None, attempt: int = 1,
+                resume_validated: bool = False) -> RunOutcome:
+    """Runs one project's steps and appends a ledger row for each. Returns a RunOutcome.
+    A validated project is skipped, unless resume_validated: then only the steps after
+    validation run (schema, join, cleanup), as after a crash between them."""
     ctx = ProjectRun(project, queue_pos, queue_total, attempt)
     name = project["name"]
     workdir = OUT / name
     stamp = workdir / f"{name}.validated"
-    if stamp.exists():
+    post_only = stamp.exists()
+    if post_only and not resume_validated:
         say(f"{name} — already validated, skip")
         return RunOutcome.SKIPPED
 
@@ -773,20 +789,25 @@ def run_project(project: dict, queue_pos: int | None = None,
 
         _lock_fds[name] = lockfile.fileno()
         try:
-            if shutil.disk_usage(OUT).free < DISK_FLOOR_GB * 2**30:
+            if not post_only and shutil.disk_usage(OUT).free < DISK_FLOOR_GB * 2**30:
                 say(f"{name} — disk below {DISK_FLOOR_GB}G floor, deferred")
                 return ctx.finish(ledger.DEFERRED, detail=f"disk below {DISK_FLOOR_GB}G")
 
-            if not check_memo_dir(name, _OPTS, workdir):
+            if not post_only and not check_memo_dir(name, _OPTS, workdir):
                 ctx.failed_step = "preflight"
                 return ctx.finish(ledger.FAILED, detail="--memo-dir is inside the workdir")
 
             try:
-                validated = build_steps(ctx, workdir, stamp)
+                if post_only:
+                    say(f"{name} — validated earlier; resuming at the steps after validation")
+                    ctx.parquet = parquet_info(name)
+                    ctx.checked_out_sha = runner_checkout(name, workdir)
+                elif not build_steps(ctx, workdir, stamp):
+                    return ctx.finish(ledger.FAILED)
+                if _OPTS.get("join") and not publish_steps(ctx):
+                    return ctx.finish(ledger.FAILED)
             except OSError as exc:
                 say(f"{name} ✗ a phase could not start: {exc}")
-                return ctx.finish(ledger.FAILED)
-            if not validated:
                 return ctx.finish(ledger.FAILED)
 
             clean = cleanup_step(ctx)
@@ -1074,7 +1095,9 @@ def run_options(args: argparse.Namespace) -> dict:
                 memory_limit=args.memory_limit,
                 duckdb_threads=args.duckdb_threads,
                 mask=args.mask,
-                project_meta=project_meta)
+                project_meta=project_meta,
+                join=bool(getattr(args, "join", False)),
+                manifest=str((CORPUS / args.manifest).resolve()))
 
 
 BLOBEXEC_JAR = Path("blobExec/target/scala-2.13/blobExec-0.1.0-assembly.jar")
@@ -1345,7 +1368,9 @@ def cmd_db(args: argparse.Namespace) -> int:
     """Rebuild ctp.duckdb (derived index over stamps/metrics/parquets)."""
     OUT.mkdir(parents=True, exist_ok=True)
     _ENV.update(capture_devenv_env())
-    return subprocess.run(["python3", str(CORPUS / "consolidate.py")],
+    manifests = [arg for m in (getattr(args, "manifest", None) or [])
+                 for arg in ("--manifest", str((CORPUS / m).resolve()))]
+    return subprocess.run(["python3", str(CORPUS / "consolidate.py"), *manifests],
                           cwd=CREGIT, env=_ENV).returncode
 
 
@@ -1410,6 +1435,9 @@ def main() -> int:
     run_p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
                        help="parallel blame workers; the output does not depend "
                             "on N. Omit for the runner's default of 1")
+    run_p.add_argument("--join", action="store_true",
+                       help="after each validated project, check its schema with "
+                            "validate_schema.py and join it into ctp.duckdb")
     run_p.set_defaults(fn=cmd_run)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
@@ -1429,6 +1457,8 @@ def main() -> int:
     au_p.set_defaults(fn=cmd_audit)
 
     db_p = sub.add_parser("db", help="rebuild ctp.duckdb (tracking table + unified tokens view)")
+    db_p.add_argument("--manifest", action="append", metavar="PATH",
+                      help="manifest to index, repeatable (default manifest.tsv)")
     db_p.set_defaults(fn=cmd_db)
 
     args = ap.parse_args()
