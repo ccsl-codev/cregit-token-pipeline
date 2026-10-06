@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ctp — cregit-token-pipeline runner: runs cregit over every project in manifest.tsv.
-Per project: pipeline -> validate -> stamp; a validated project is skipped.
+Per project: pipeline -> firm -> validate -> stamp; a validated project is skipped.
 Ledgers: metrics.tsv (one row per phase attempt), runs.log, state/<name>/logs (never overwritten)."""
 
 from __future__ import annotations
@@ -449,8 +449,31 @@ def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     return pipeline_args
 
 
+_FIRM_VALUE_FLAGS = (("memory_limit", "--memory-limit"), ("duckdb_threads", "--threads"))
+
+
+def project_phases(project: dict, opts: dict, workdir: Path, stamp: Path) -> list[tuple]:
+    """(phase, argv) in run order: cregit writes 67 columns, firm adds 3, validate gates 70."""
+    parquet = str(workdir / f"{project['name']}-dataset.parquet")
+    return [
+        ("pipeline", build_pipeline_args(project, opts, workdir)),
+        ("firm", ["python3", str(CORPUS / "firm_attribution.py"), parquet,
+                  *value_args(opts, _FIRM_VALUE_FLAGS)]),
+        ("validate", ["python3", str(CORPUS / "validate.py"), parquet, str(stamp)]),
+    ]
+
+
+def run_phases(project: dict, phases: list[tuple]) -> int:
+    """The first non-zero return code, or 0 when every phase passed."""
+    for phase, args in phases:
+        rc = run_phase(project, phase, args)
+        if rc != 0:
+            return rc
+    return 0
+
+
 def run_project(project: dict) -> RunOutcome:
-    """Runs one project's pipeline and validate phases. Returns a RunOutcome."""
+    """Runs one project's pipeline, firm and validate phases. Returns a RunOutcome."""
     name = project["name"]
     workdir = OUT / name
     stamp = workdir / f"{name}.validated"
@@ -477,12 +500,7 @@ def run_project(project: dict) -> RunOutcome:
                 return RunOutcome.FAILED
 
             try:
-                rc = run_phase(project, "pipeline", build_pipeline_args(project, _OPTS, workdir))
-                if rc == 0:
-                    rc = run_phase(project, "validate", [
-                        "python3", str(CORPUS / "validate.py"),
-                        str(workdir / f"{name}-dataset.parquet"), str(stamp),
-                    ])
+                rc = run_phases(project, project_phases(project, _OPTS, workdir, stamp))
             except OSError as exc:
                 say(f"{name} ✗ a phase could not start: {exc}")
                 return RunOutcome.FAILED
@@ -665,7 +683,7 @@ def resolve_project_meta(path: str) -> str:
     if not Path(path).exists():
         sys.exit(f"--project-meta {path} does not exist. "
                  "The sidecar format is documented in validate_schema.py, "
-                 "in the comment above EXPECTED_COLUMNS.")
+                 "in the comment above CREGIT_COLUMNS.")
     refuse_unless_runner_accepts("--project-meta", ("--project-meta", "--project-key"))
     # Absolute: the runner starts with cwd=CREGIT, not this repository.
     return str(Path(path).resolve())
@@ -687,7 +705,7 @@ def provenance_gaps(project_meta: str) -> list[tuple[str, str]]:
 
 
 PROVENANCE_REFUSAL_TAIL = (
-    "This does not fail anything. The file keeps all 67 columns in the "
+    "This does not fail anything. The file keeps all 70 columns in the "
     "right order, so validate.py passes it and no consumer can tell a "
     "blank column from provenance that is genuinely unknown, which is "
     "why a long, expensive run can finish and publish silently "
@@ -969,7 +987,7 @@ def main() -> int:
                             "Omit for the generator's default")
     run_p.add_argument("--project-meta", default="", metavar="PATH",
                        help="JSON provenance sidecar keyed by project name (format: "
-                            "validate_schema.py, above EXPECTED_COLUMNS). Without it "
+                            "validate_schema.py, above CREGIT_COLUMNS). Without it "
                             "29 columns are blank and ctp refuses the run")
     run_p.add_argument("--allow-empty-provenance", action="store_true",
                        help="publish with blank provenance columns, e.g. "

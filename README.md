@@ -4,16 +4,16 @@ Runs the [cregit](https://github.com/cregit/cregit) per-project pipeline over a
 manifest of FLOSS repositories that you supply, then validates, indexes and
 prunes the result. It does not select repositories or draw a sample — you
 write the manifest; this tool runs cregit over it. It does not anonymize the
-output or resolve employers either: it only forwards paths you supply to
-cregit, which does that work.
+output.
 
-Each project yields one Parquet file with the same 67 columns and **one row per
+Each project yields one Parquet file with the same 70 columns and **one row per
 token occurrence per file**, carrying the commit and the person that last touched
-that token. 29 of the 67 columns carry per-project provenance — how you found
+that token. cregit writes the first 67; ctp then adds the author's firm in 3 more
+(see [Firm attribution](#firm-attribution)). 29 of the 70 columns carry per-project provenance — how you found
 the project, how you labelled it, which mask tokenized it — filled from an
 optional JSON sidecar you supply. An absent sidecar leaves its columns empty,
 not missing. `validate_schema.py` is the
-authority on the full column list; read the comment above `EXPECTED_COLUMNS`
+authority on the full column list; read the comment above `CREGIT_COLUMNS`
 there for what each column means.
 
 Stdlib Python only; DuckDB, srcML, ctags, Java and Perl come from the cregit
@@ -52,10 +52,26 @@ column from provenance that is genuinely unknown.
 is a JSON sidecar, keyed by project name, that fills the 29 provenance columns
 — how you found the project, how you labelled it, which mask tokenized it. ctp
 forwards the path unchanged to cregit. The format is documented in
-`validate_schema.py`, in the comment above `EXPECTED_COLUMNS`.
+`validate_schema.py`, in the comment above `CREGIT_COLUMNS`.
 
 Pass it instead of `--allow-empty-provenance`. The two flags are mutually
 exclusive: `--allow-empty-provenance` is refused when nothing would be blank.
+
+### Firm attribution
+
+After cregit writes a project's 67 columns, `firm_attribution.py` adds three:
+
+| Column | Value |
+| --- | --- |
+| `firm_raw` | the `company` of `person_domain` in `data/affiliation.merged.csv` |
+| `firm` | the reviewed name from `data/firm_canonical.csv`, else `firm_raw` |
+| `firm_source` | the `source` of the map row (`gitdm`, `patch`, `rich`, `cncf-gitdm`, ...) |
+
+All three are `''` when the domain is not in the map. The domain match ignores
+case. The map holds the 895 rows of the VEM 2026 Corporate Truck Factor map
+unchanged (sources `gitdm`, `patch`, `rich`), widened to 4,041 domains. The
+logic is the firm join that cregit's `feat/firm-attribution` branch used.
+The step accepts its own output, so a re-run applies a changed map.
 
 Each project runs cregit's `run_pipeline_process.sh` (clone → tokenize via the
 incremental blob-map engine → blame → per-project Parquet), then a validation
@@ -75,7 +91,9 @@ project_meta.json (optional sidecar) ──────────────�
                                                    │
                         <out>/<name>/<name>-dataset.parquet   (67 columns)
                                                    │
-                     ├──► validate.py        rows/size/67-column gate → .validated stamp
+                     firm_attribution.py adds firm_raw, firm, firm_source  (70 columns)
+                                                   │
+                     ├──► validate.py        rows/size/70-column gate → .validated stamp
                      ├──► validate_schema.py the same column gate over many files
                      ├──► retain.py          delete memo/ and html/
                      └──► metrics.tsv        append-only, one row per phase attempt

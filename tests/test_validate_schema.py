@@ -81,15 +81,28 @@ def test_a_caller_may_pass_its_own_contract():
 # the contract itself
 # --------------------------------------------------------------------------- #
 
-def test_the_contract_has_67_unique_columns():
-    names = [n for n, _ in CONTRACT]
+FIRM_NAMES = ["firm_raw", "firm", "firm_source"]
+
+
+def test_the_cregit_contract_has_67_unique_columns():
+    names = [n for n, _ in vs.CREGIT_COLUMNS]
     assert len(set(names)) == len(names) == 67
 
 
-def test_the_contract_has_no_firm_columns():
+def test_the_cregit_contract_has_no_firm_columns():
     """Firm attribution is not on cregit master; a run there emits none of them."""
-    names = {n for n, _ in CONTRACT}
-    assert not names & {"firm_raw", "firm", "firm_source"}
+    assert not {n for n, _ in vs.CREGIT_COLUMNS} & set(FIRM_NAMES)
+
+
+def test_the_final_contract_is_cregit_then_the_three_firm_columns():
+    assert CONTRACT == vs.CREGIT_COLUMNS + vs.FIRM_COLUMNS
+    assert [n for n, _ in CONTRACT[-3:]] == FIRM_NAMES
+    assert len({n for n, _ in CONTRACT}) == 70
+
+
+def test_a_file_without_the_firm_step_fails_the_final_contract():
+    drifts = vs.compare_schema(list(vs.CREGIT_COLUMNS))
+    assert [(d.kind, d.column) for d in drifts] == [("missing", n) for n in FIRM_NAMES]
 
 
 # --------------------------------------------------------------------------- #

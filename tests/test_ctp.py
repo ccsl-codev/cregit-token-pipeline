@@ -57,16 +57,18 @@ class FakeRunner:
     """Recording stand-in for subprocess.Popen. Returns a scripted rc per phase
     and writes the stamp when validate succeeds, as validate.py does."""
 
-    def __init__(self, *, pipeline_rc=0, validate_rc=0, raise_on=None, payload=b""):
+    def __init__(self, *, pipeline_rc=0, firm_rc=0, validate_rc=0, raise_on=None,
+                 payload=b""):
         self.calls: list[SimpleNamespace] = []
-        self.pipeline_rc = pipeline_rc
-        self.validate_rc = validate_rc
+        self.rcs = {"pipeline": pipeline_rc, "firm": firm_rc, "validate": validate_rc}
         self.raise_on = raise_on
         self.payload = payload
 
     @staticmethod
     def phase_of(args) -> str:
-        return "pipeline" if str(args[0]).endswith("run_pipeline_process.sh") else "validate"
+        if str(args[0]).endswith("run_pipeline_process.sh"):
+            return "pipeline"
+        return "firm" if str(args[1]).endswith("firm_attribution.py") else "validate"
 
     def __call__(self, args, **kwargs):
         phase = self.phase_of(args)
@@ -76,7 +78,7 @@ class FakeRunner:
         stream = kwargs.get("stdout")
         if self.payload and hasattr(stream, "write"):
             stream.write(self.payload)
-        rc = self.pipeline_rc if phase == "pipeline" else self.validate_rc
+        rc = self.rcs[phase]
         if phase == "validate" and rc == 0:
             stamp = Path(args[3])
             # A relative stamp path would escape tmp_path into the repository.
@@ -552,6 +554,34 @@ def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
         str(sandbox.out / "jq" / "jq-dataset.parquet"),
         str(sandbox.out / "jq" / "jq.validated"),
     ]
+
+
+@pytest.mark.parametrize("opts, tail", [
+    pytest.param({}, [], id="duckdb-defaults"),
+    pytest.param(dict(memory_limit="4GB", duckdb_threads=2),
+                 ["--memory-limit", "4GB", "--threads", "2"], id="runner-limits"),
+])
+def test_firm_argv_is_built_exactly_like_this(sandbox, runner, jq, opts, tail):
+    ctp._OPTS.update(opts)
+    ctp.run_project(jq)
+    assert runner.argv("firm") == [
+        "python3", str(sandbox.root / "firm_attribution.py"),
+        str(sandbox.out / "jq" / "jq-dataset.parquet"), *tail,
+    ]
+
+
+def test_the_firm_phase_runs_between_pipeline_and_validate(sandbox, runner, jq):
+    """validate gates the 70-column form, so it must see the file after firm."""
+    assert ctp.run_project(jq) == "done"
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate"]
+
+
+def test_a_failed_firm_phase_fails_the_project_unstamped(sandbox, monkeypatch, jq):
+    runner = FakeRunner(firm_rc=1)
+    monkeypatch.setattr(ctp.subprocess, "Popen", runner)
+    assert ctp.run_project(jq) == "failed"
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm"]
+    assert not (sandbox.out / "jq" / "jq.validated").exists()
 
 
 # --------------------------------------------------------------------------- #
