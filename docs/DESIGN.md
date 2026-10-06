@@ -137,6 +137,11 @@ validated project is not re-run.
   and every column name, type and position against `EXPECTED_COLUMNS`. It writes
   the `.validated` stamp only when all of them pass, so `--drop-memo` never
   deletes the `memo/` of a drifted file.
+- `validate.py` runs after `firm_attribution.py`, so it checks the final form:
+  cregit's 67 columns (`CREGIT_COLUMNS`) then the 3 firm columns
+  (`FIRM_COLUMNS`). `firm_attribution.py` accepts only the 67-column form, or
+  the 70-column form from an earlier run, and refuses a map with a repeated key,
+  because a repeated key multiplies token rows through the join.
 - `validate_schema.py` runs the same contract check over many files at once and
   reports every drift rather than the first. A corpus is unusable if one project
   has 38 columns and another 67, or if `token_index` is BIGINT in one file and
@@ -156,7 +161,7 @@ gate.
 unless `--allow-empty-provenance` says otherwise.
 
 It refuses rather than warns. Nothing downstream can tell a blank column from
-provenance that is genuinely unknown: the file still carries all 67 columns in
+provenance that is genuinely unknown: the file still carries all 70 columns in
 the right order, so both validation gates pass it, and a long run can finish and
 publish a Parquet that is silently inconsistent with the rest of a corpus. A
 warning is easy to miss at the end of a long log; a refusal is not.
