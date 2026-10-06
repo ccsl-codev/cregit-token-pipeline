@@ -1,48 +1,17 @@
-"""Unit tests for consolidate.py, the DuckDB index builder.
-
-consolidate.py imports duckdb at module scope, and duckdb is not installed in
-.venv (it comes from `devenv shell`). To keep the suite runnable and offline,
-this file installs a stub `duckdb` module in sys.modules before the import when
-the real one is absent. Every test then patches `consolidate.duckdb.connect`
-with a recorder, so no database file is ever opened. The repo's own ctp.duckdb
-is never touched.
-
-The stub only makes the import succeed. Nothing here asserts DuckDB semantics;
-the tests assert the SQL consolidate.py emits and the row tuples it derives.
-
-A projects row carries two visibility flags at the end, rows_unreadable and
-parquet_missing. They exist so that a project which disagrees with itself is
-counted, named and queryable instead of silently wrong, and rows_unreadable
-also drives the non-zero exit status.
-"""
+"""Unit tests for consolidate.py, the DuckDB index builder. Each test patches
+consolidate.duckdb.connect with a recorder, so no database is opened; only the
+schema-gate tests that write a real Parquet need duckdb itself."""
 
 from __future__ import annotations
 
-import fcntl
 import sys
-import types
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-if "duckdb" not in sys.modules:  # pragma: no cover - import plumbing
-    try:
-        import duckdb  # noqa: F401
-    except ModuleNotFoundError:
-        def _unpatched(*args, **kwargs):
-            raise AssertionError(
-                "stub duckdb was called: patch consolidate.duckdb.connect "
-                "or validate.duckdb.sql in the test")
-
-        _stub = types.ModuleType("duckdb")
-        _stub.__doc__ = "Test stub. Real duckdb lives in the devenv shell."
-        _stub.connect = _unpatched
-        _stub.sql = _unpatched
-        sys.modules["duckdb"] = _stub
-
-import consolidate  # noqa: E402
+import consolidate
+import retain
 
 DUCKDB_IS_STUBBED = getattr(sys.modules["duckdb"], "__doc__", "").startswith("Test stub")
 
@@ -87,20 +56,8 @@ class FakeCon:
         return matches[0]
 
 
-@contextmanager
-def held_lock(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fh = path.open("w")
-    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    try:
-        yield
-    finally:
-        fcntl.flock(fh, fcntl.LOCK_UN)
-        fh.close()
-
-
-def write_manifest(root: Path, *lines: str) -> Path:
-    path = root / "manifest.tsv"
+def write_manifest(root: Path, *lines: str, name: str = "manifest.tsv") -> Path:
+    path = root / name
     path.write_text("".join(f"{line}\n" for line in lines))
     return path
 
@@ -131,10 +88,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(consolidate, "CORPUS", tmp_path)
     monkeypatch.setattr(consolidate, "OUT", out)
     monkeypatch.setattr(consolidate, "DB", tmp_path / "ctp.duckdb")
-    # STATE is derived from CORPUS at import, so patching CORPUS alone leaves it
-    # pointing at the real repo's state/ directory. A test that probes or creates
-    # a lock there would touch a live run's bookkeeping.
-    monkeypatch.setattr(consolidate, "STATE", tmp_path / "state")
+    monkeypatch.setattr(retain, "STATE", tmp_path / "state")
     return SimpleNamespace(root=tmp_path, out=out)
 
 
@@ -148,110 +102,35 @@ def con(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# lock_held
-# --------------------------------------------------------------------------- #
-
-def test_lock_held_is_false_without_a_lockfile(sandbox):
-    """A project that never started must read QUEUED, not RUNNING."""
-    assert consolidate.lock_held(sandbox.out / "jq" / ".lock") is False
-
-
-def test_lock_held_is_false_for_a_stale_lockfile(sandbox):
-    """A lockfile left behind by a killed run holds no flock."""
-    lockfile = make_project(sandbox.out, "jq") / ".lock"
-    lockfile.touch()
-    assert consolidate.lock_held(lockfile) is False
-
-
-def test_lock_held_is_true_while_another_process_holds_it(sandbox):
-    """The index must show a live tokenizer as RUNNING, never as FAILED."""
-    lockfile = make_project(sandbox.out, "jq") / ".lock"
-    with held_lock(lockfile):
-        assert consolidate.lock_held(lockfile) is True
-
-
-# --------------------------------------------------------------------------- #
 # project_rows
 # --------------------------------------------------------------------------- #
 
-def test_project_rows_builds_one_ten_column_tuple_per_project(sandbox):
-    """The tuple shape must match the projects table, or executemany fails.
-
-    The shape grew from seven columns to ten: rows_unreadable,
-    parquet_missing and excluded_because now travel with every project. The
-    first two are false for a healthy project, the third is None.
-    """
-    write_manifest(sandbox.root, ROW)
-    make_project(sandbox.out, "jq", stamp="rows=1234\nbytes=5678\n", parquet=True)
-
-    rows = consolidate.project_rows()
-    assert rows == [("jq", "https://github.com/jqlang/jq.git", "community", "S",
-                     "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"),
-                     False, False, None)]
-
-
-def test_project_rows_classifies_all_four_states(sandbox):
+def test_project_rows_classifies_all_four_states(sandbox, held_lock):
     """The index is the dashboard. A wrong state misreports corpus progress."""
     write_manifest(
         sandbox.root,
         "done\thttps://d.git\tcommunity\t\\.[ch]$\tS",
         "running\thttps://r.git\tcommunity\t\\.[ch]$\tM",
         "failed\thttps://f.git\tenterprise\t\\.[ch]$\tL",
+        "wiped\thttps://w.git\tenterprise\t\\.[ch]$\tL",
         "queued\thttps://q.git\tcommunity\t\\.[ch]$\tS")
     make_project(sandbox.out, "done", stamp="rows=7\nbytes=8\n", parquet=True)
     make_project(sandbox.out, "failed")
     make_project(sandbox.out, "running")
-    # The lock lives in ctp.py's state directory, NOT in the work directory.
-    # This test used to create it inside the workdir, which made it agree with
-    # the bug it was supposed to catch: consolidate.py probed the same wrong
-    # path, so RUNNING never fired against a real run.
-    lockdir = consolidate.STATE / "running"
-    lockdir.mkdir(parents=True, exist_ok=True)
+    # The runner deleted this workdir on failure; only ctp's state dir is left.
+    retain.state_dir("wiped").mkdir(parents=True)
+    retain.state_dir("running").mkdir(parents=True)
 
-    with held_lock(lockdir / ".lock"):
+    with held_lock(retain.lock_path("running")):
         states = {r[0]: r[4] for r in consolidate.project_rows()}
 
-    assert states == dict(done="DONE", running="RUNNING",
-                          failed="FAILED", queued="QUEUED")
+    assert states == dict(done="DONE", running="RUNNING", failed="FAILED",
+                          wiped="FAILED", queued="QUEUED")
 
 
-def test_the_liveness_probe_never_writes_to_the_lock_file(sandbox):
-    """A probe must not modify what it observes.
-
-    `lock_held` used to open the lock "w", which truncates. Rebuilding the index
-    therefore truncated the lock file of a RUNNING job. It was harmless only
-    because nothing writes content to that file — a latent bug, not a safe design.
-    """
-    lockdir = consolidate.STATE / "proj"
-    lockdir.mkdir(parents=True, exist_ok=True)
-    lockfile = lockdir / ".lock"
-    lockfile.write_text("sentinel content\n")
-
-    assert consolidate.lock_held(lockfile) is False, "nobody holds it"
-    assert lockfile.read_text() == "sentinel content\n", "the probe truncated it"
-
-
-def test_an_unreadable_lock_file_counts_as_held(sandbox):
-    """Refusing to guess is the safe answer to 'is a run in flight'."""
-    lockdir = consolidate.STATE / "proj"
-    lockdir.mkdir(parents=True, exist_ok=True)
-    lockfile = lockdir / ".lock"
-    lockfile.write_text("")
-    lockfile.chmod(0o000)
-    try:
-        assert consolidate.lock_held(lockfile) is True
-    finally:
-        lockfile.chmod(0o600)
-
-
-def test_project_rows_ignores_a_stale_lock_left_in_the_work_directory(sandbox):
-    """A lock inside the workdir must not be believed.
-
-    run_pipeline_process.sh deletes the work directory at FROM_STEP=1 and again
-    from its EXIT trap, so a lock kept there is unreliable by construction. ctp.py
-    therefore locks state/<name>/.lock. A workdir lock is either a leftover or a
-    different tool's file, and reading it as RUNNING hides a FAILED project.
-    """
+def test_project_rows_ignores_a_stale_lock_left_in_the_work_directory(sandbox, held_lock):
+    """The runner deletes the workdir, so ctp locks state/<name>/.lock. A lock
+    in the workdir is someone else's, and believing it would hide a FAILED project."""
     write_manifest(sandbox.root, "proj\thttps://p.git\tcommunity\t\\.[ch]$\tS")
     workdir = make_project(sandbox.out, "proj")
 
@@ -265,12 +144,6 @@ def test_project_rows_skips_comments_and_blank_lines(sandbox):
     """The manifest header is a comment; treating it as data adds a fake project."""
     write_manifest(sandbox.root, "# name  url  category  filter  class", "", "  ", ROW)
     assert [r[0] for r in consolidate.project_rows()] == ["jq"]
-
-
-def test_project_rows_on_an_empty_manifest_returns_nothing(sandbox):
-    """An empty corpus is a valid state, not a crash."""
-    write_manifest(sandbox.root)
-    assert consolidate.project_rows() == []
 
 
 def test_project_rows_rejects_a_malformed_row(sandbox):
@@ -287,11 +160,8 @@ def test_project_rows_without_a_manifest_raises(sandbox):
 
 
 def test_project_rows_reports_no_parquet_path_when_the_file_is_absent(sandbox):
-    """A stamp without a parquet must not put a dead path in the tokens view.
-
-    The row now also carries parquet_missing = True, so the disagreement
-    between state DONE and an absent dataset is queryable.
-    """
+    """A stamp without a parquet must not put a dead path in the tokens view,
+    and parquet_missing makes the disagreement queryable."""
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=9\nbytes=9\n", parquet=False)
     (name, _url, _cat, _cls, state, n_rows, parquet,
@@ -307,29 +177,19 @@ def test_project_rows_does_not_flag_a_queued_project_as_missing_data(sandbox):
     assert consolidate.project_rows()[0][8] is False
 
 
-def test_project_rows_counts_zero_for_a_stamp_without_a_rows_key(sandbox):
-    """An old or truncated stamp must not crash the rebuild."""
+@pytest.mark.parametrize("stamp, rows", [
+    pytest.param("malformed stamp\n", 0, id="no-rows-key"),
+    pytest.param("rows=5\nbytes=6\nnote=a=b\n", 5, id="extra-key-with-a-second-equals"),
+])
+def test_project_rows_tolerates_an_odd_stamp(sandbox, stamp, rows):
+    """The stamp is a key=value bag; an old or odd stamp must not crash the rebuild."""
     write_manifest(sandbox.root, ROW)
-    make_project(sandbox.out, "jq", stamp="malformed stamp\n", parquet=True)
-    assert consolidate.project_rows()[0][5] == 0
-
-
-def test_project_rows_ignores_extra_stamp_keys(sandbox):
-    """The stamp is a key=value bag; unknown keys are tolerated."""
-    write_manifest(sandbox.root, ROW)
-    make_project(sandbox.out, "jq",
-                 stamp="rows=5\nbytes=6\nvalidated_by=ctp\n", parquet=True)
-    assert consolidate.project_rows()[0][5] == 5
+    make_project(sandbox.out, "jq", stamp=stamp, parquet=True)
+    assert consolidate.project_rows()[0][5] == rows
 
 
 def test_project_rows_survives_a_non_numeric_rows_value(sandbox, capsys):
-    """One bad stamp must not stop the derived index for 1,423 projects.
-
-    This was an expected failure. Before the fix int(kv.get('rows', 0)) was
-    unguarded, so a stamp reading rows=many raised ValueError and ended
-    project_rows() for every project. The project is now reported by name and
-    by value, flagged, and still indexed.
-    """
+    """A bad rows= value is reported by name and value, flagged, and still indexed."""
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=many\nbytes=6\n", parquet=True)
 
@@ -341,21 +201,6 @@ def test_project_rows_survives_a_non_numeric_rows_value(sandbox, capsys):
     err = capsys.readouterr().err
     assert "jq" in err
     assert "'many'" in err
-
-
-def test_project_rows_keeps_indexing_the_projects_after_a_bad_stamp(sandbox):
-    """The bad stamp must cost one project, not the tail of the manifest."""
-    write_manifest(sandbox.root,
-                   "bad\thttps://b.git\tcommunity\t\\.[ch]$\tS",
-                   "good\thttps://g.git\tenterprise\t\\.[ch]$\tL")
-    make_project(sandbox.out, "bad", stamp="rows=many\nbytes=6\n", parquet=True)
-    make_project(sandbox.out, "good", stamp="rows=77\nbytes=8\n", parquet=True)
-
-    rows = {r[0]: r for r in consolidate.project_rows()}
-
-    assert [r[0] for r in consolidate.project_rows()] == ["bad", "good"]
-    assert (rows["good"][5], rows["good"][7]) == (77, False)
-    assert (rows["bad"][5], rows["bad"][7]) == (None, True)
 
 
 # --------------------------------------------------------------------------- #
@@ -467,10 +312,8 @@ def test_main_connects_to_the_configured_database_and_closes_it(
 
 def test_main_reports_a_malformed_stamp_and_still_indexes_the_rest(
         sandbox, con, capsys):
-    """Before the fix a stamp reading rows=many raised ValueError out of
-    project_rows() and no index was built at all. The rebuild now finishes, the
-    bad project is named and counted, and the exit status says something was
-    wrong."""
+    """One bad stamp costs one project: the rebuild finishes, names and counts
+    it, and exits non-zero."""
     write_manifest(sandbox.root,
                    "bad\thttps://b.git\tcommunity\t\\.[ch]$\tS",
                    "good\thttps://g.git\tenterprise\t\\.[ch]$\tL")
@@ -493,9 +336,7 @@ def test_main_reports_a_malformed_stamp_and_still_indexes_the_rest(
 
 def test_main_counts_and_names_a_done_project_whose_parquet_is_gone(
         sandbox, con, capsys):
-    """Before the fix such a project just vanished from the tokens view while
-    the projects table still said DONE, and nothing reported it. The row is now
-    flagged, counted and named, and the view still leaves the dead file out."""
+    """Flagged, counted and named, and the view still leaves the dead file out."""
     write_manifest(sandbox.root,
                    "gone\thttps://x.git\tcommunity\t\\.[ch]$\tS",
                    "here\thttps://y.git\tenterprise\t\\.[ch]$\tL")
@@ -518,28 +359,10 @@ def test_main_counts_and_names_a_done_project_whose_parquet_is_gone(
 # publication exclusions
 # --------------------------------------------------------------------------- #
 
-def test_project_rows_carries_the_reason_for_an_excluded_project(
-        sandbox, monkeypatch):
-    """The reason must reach the projects table. A bare boolean would record
-    that a project was dropped without recording why, which is the thing the
-    sampling record exists to prevent."""
-    monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
-                        {"twin": "near-duplicate of other"})
-    write_manifest(sandbox.root,
-                   "twin\thttps://t.git\tcompany-owned\t\\.[ch]$\tM",
-                   "other\thttps://o.git\tcompany-owned\t\\.[ch]$\tM")
-    make_project(sandbox.out, "twin", stamp="rows=5\nbytes=6\n", parquet=True)
-    make_project(sandbox.out, "other", stamp="rows=7\nbytes=8\n", parquet=True)
-
-    reasons = {r[0]: r[9] for r in consolidate.project_rows()}
-    assert reasons == {"twin": "near-duplicate of other", "other": None}
-
-
-def test_main_keeps_an_excluded_project_in_projects_but_out_of_the_tokens_view(
+def test_an_excluded_project_keeps_its_row_and_reason_but_not_its_tokens(
         sandbox, con, monkeypatch, capsys):
-    """This is the whole point of the mechanism. Deleting the manifest row would
-    drop the project from the sampling record; publishing it would count the
-    same authorship twice. The row stays, the tokens do not."""
+    """Deleting the manifest row would drop the project from the record, and
+    publishing it would count the same authorship twice. The summary names it."""
     monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
                         {"twin": "near-duplicate of other"})
     write_manifest(sandbox.root,
@@ -551,42 +374,20 @@ def test_main_keeps_an_excluded_project_in_projects_but_out_of_the_tokens_view(
     consolidate.main()
 
     _sql, rows = con.batches[0]
-    assert {r[0] for r in rows} == {"twin", "other"}, "the row must survive"
-    assert {r[0]: r[4] for r in rows} == {"twin": "DONE", "other": "DONE"}
+    assert {r[0]: (r[4], r[9]) for r in rows} == {
+        "twin": ("DONE", "near-duplicate of other"), "other": ("DONE", None)}
     view = con.find("create or replace view tokens")
     assert "twin-dataset.parquet" not in view
     assert "other-dataset.parquet" in view
-
-
-def test_main_names_and_counts_a_publication_exclusion(
-        sandbox, con, monkeypatch, capsys):
-    """A silent exclusion is worse than the crash it replaces, so the summary
-    prints the name and the reason."""
-    monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
-                        {"twin": "near-duplicate of other"})
-    write_manifest(sandbox.root,
-                   "twin\thttps://t.git\tcompany-owned\t\\.[ch]$\tM",
-                   "other\thttps://o.git\tcompany-owned\t\\.[ch]$\tM")
-    make_project(sandbox.out, "twin", stamp="rows=5\nbytes=6\n", parquet=True)
-    make_project(sandbox.out, "other", stamp="rows=7\nbytes=8\n", parquet=True)
-
-    consolidate.main()
-
     out = capsys.readouterr().out
     assert "publication exclusions: 1" in out
     assert "- twin: near-duplicate of other" in out
     assert "tokens view: 1,234,567 rows across 1 projects" in out
 
 
-def test_the_shipped_exclusion_list_drops_tendb_and_keeps_tdbctl(sandbox):
-    """The fork pair decision, pinned. tendb has 4.3x the files but every extra
-    path is upstream Oracle, Facebook or Percona code; tdbctl holds 4.9x more
-    first-party authorship. Swapping these two silently would publish the wrong
-    half of a near-duplicate pair."""
-    assert "tencent__tendbcluster-tendb" in consolidate.PUBLICATION_EXCLUSIONS
-    assert "tencent__tendbcluster-tdbctl" not in consolidate.PUBLICATION_EXCLUSIONS
-    why = consolidate.PUBLICATION_EXCLUSIONS["tencent__tendbcluster-tendb"]
-    assert "tencent__tendbcluster-tdbctl" in why, "the reason must name the twin"
+def test_the_shipped_exclusion_list_is_empty(sandbox):
+    """Nothing ships pre-excluded; a deployer adds their own entries."""
+    assert consolidate.PUBLICATION_EXCLUSIONS == {}
 
 
 def test_main_says_nothing_about_flags_when_every_project_is_healthy(
@@ -636,107 +437,42 @@ def test_main_is_safe_to_rerun(sandbox, con, capsys):
 
 # --------------------------------------------------------------------------- #
 # which manifests are indexed
-#
-# The manifest used to be hardcoded to manifest.tsv, which holds 4 legacy pilot
-# projects (jq, zstd, libuv, tmux) whose parquets are still at the old 23-column
-# schema. ctp.py's `db` command passes no arguments, so ctp.duckdb could only
-# ever describe those 4: no corpus-wide query was possible at all. The corpus is
-# manifest.phase1-sm.tsv (187 projects) + manifest.linux.tsv (1).
 # --------------------------------------------------------------------------- #
 
 SM_ROW = "dpdk__dpdk\thttps://x.git/dpdk\tfoundation\t\\.[ch]$\tL"
 LINUX_ROW = "torvalds__linux\t/staging/linux.git\tfoundation\t\\.[ch]$\tL"
-CANDIDATE_ROW = "never__run\thttps://x.git/nr\tcommunity\t\\.[ch]$\tS"
 
 
-def write_named_manifest(root: Path, filename: str, *lines: str) -> Path:
-    path = root / filename
-    path.write_text("".join(f"{line}\n" for line in lines))
-    return path
-
-
-def corpus_manifests(root: Path) -> tuple[Path, Path]:
-    """The two manifests that make up the run set, as the repo carries them."""
-    return (write_named_manifest(root, "manifest.phase1-sm.tsv", SM_ROW),
-            write_named_manifest(root, "manifest.linux.tsv", LINUX_ROW))
-
-
-def test_the_default_manifest_set_is_the_corpus_run_set(sandbox):
-    """THE DEFECT. The default must be what was actually run, not the 4 legacy
-    pilots, or no corpus-wide query is possible."""
-    sm, linux = corpus_manifests(sandbox.root)
-    write_manifest(sandbox.root, ROW)                  # the legacy pilots exist
-
-    assert consolidate.default_manifests() == [sm, linux]
-
-
-def test_the_default_set_never_includes_the_candidate_manifest(sandbox):
-    """manifest.generated.tsv is 3,948 CANDIDATE rows that were never run.
-    Indexing it would stat 3,948 absent workdirs and emit that many phantom
-    QUEUED rows."""
-    corpus_manifests(sandbox.root)
-    write_named_manifest(sandbox.root, "manifest.generated.tsv", CANDIDATE_ROW)
-
-    chosen = consolidate.default_manifests()
-
-    assert all("generated" not in p.name for p in chosen)
-    assert [r[0] for r in consolidate.project_rows(chosen)] == [
-        "dpdk__dpdk", "torvalds__linux"]
-
-
-def test_project_rows_by_default_indexes_the_corpus_not_the_pilots(sandbox):
-    """project_rows() with no list must agree with default_manifests(), so the
-    two entry points cannot drift apart."""
-    corpus_manifests(sandbox.root)
+def test_main_indexes_manifest_tsv_by_default(sandbox, con, capsys):
+    """`ctp.py db` passes no arguments, so manifest.tsv is the default."""
     write_manifest(sandbox.root, ROW)
-
-    names = [r[0] for r in consolidate.project_rows()]
-
-    assert names == ["dpdk__dpdk", "torvalds__linux"]
-    assert "jq" not in names
-
-
-def test_project_rows_takes_the_manifest_list_as_a_parameter(sandbox):
-    """The list is an argument, not a global, so a caller decides what is ground
-    truth. The other manifests on disk must not leak in."""
-    corpus_manifests(sandbox.root)
-    picked = write_named_manifest(sandbox.root, "manifest.mine.tsv", ROW)
-
-    assert [r[0] for r in consolidate.project_rows([picked])] == ["jq"]
-
-
-def test_main_indexes_the_corpus_run_set_by_default(sandbox, con, capsys):
-    """End to end through the CLI path ctp.py uses: no arguments at all."""
-    corpus_manifests(sandbox.root)
-    write_manifest(sandbox.root, ROW)
-    make_project(sandbox.out, "dpdk__dpdk", stamp="rows=5\n", parquet=True)
-    make_project(sandbox.out, "torvalds__linux", stamp="rows=6\n", parquet=True)
+    make_project(sandbox.out, "jq", stamp="rows=5\n", parquet=True)
 
     consolidate.main()
 
     _sql, rows = con.batches[0]
-    assert [r[0] for r in rows] == ["dpdk__dpdk", "torvalds__linux"]
+    assert [r[0] for r in rows] == ["jq"]
     out = capsys.readouterr().out
-    assert "manifests: manifest.phase1-sm.tsv, manifest.linux.tsv" in out
-    assert "DONE: 2" in out
+    assert "manifests: manifest.tsv" in out
+    assert "DONE: 1" in out
 
 
-def test_manifest_given_once_indexes_only_that_manifest(sandbox, con):
-    """Someone who wants the legacy pilots asks for them by name, and gets
-    nothing else."""
-    corpus_manifests(sandbox.root)
-    write_manifest(sandbox.root, ROW)
+def test_manifest_given_explicitly_indexes_only_that_manifest(sandbox, con):
+    """A named manifest is read on its own; the default sitting on disk is not
+    mixed in."""
+    write_manifest(sandbox.root, ROW)                  # would be the default
+    write_manifest(sandbox.root, SM_ROW, name="other.tsv")
 
-    consolidate.main(["--manifest", "manifest.tsv"])
+    consolidate.main(["--manifest", "other.tsv"])
 
     _sql, rows = con.batches[0]
-    assert [r[0] for r in rows] == ["jq"]
+    assert [r[0] for r in rows] == ["dpdk__dpdk"]
 
 
 def test_manifest_given_twice_indexes_both_manifests(sandbox, con, capsys):
     """--manifest is repeatable, and the union is indexed in the order given."""
-    write_named_manifest(sandbox.root, "a.tsv", SM_ROW)
-    write_named_manifest(sandbox.root, "b.tsv", LINUX_ROW)
+    write_manifest(sandbox.root, SM_ROW, name="a.tsv")
+    write_manifest(sandbox.root, LINUX_ROW, name="b.tsv")
 
     consolidate.main(["--manifest", "b.tsv", "--manifest", "a.tsv"])
 
@@ -748,8 +484,8 @@ def test_manifest_given_twice_indexes_both_manifests(sandbox, con, capsys):
 def test_a_project_named_by_two_manifests_is_indexed_once(sandbox, con, capsys):
     """The projects table has name as its primary key, so a repeat would abort
     the insert batch for every project. The repeat is named, not silent."""
-    write_named_manifest(sandbox.root, "a.tsv", SM_ROW, LINUX_ROW)
-    write_named_manifest(sandbox.root, "b.tsv", LINUX_ROW)
+    write_manifest(sandbox.root, SM_ROW, LINUX_ROW, name="a.tsv")
+    write_manifest(sandbox.root, LINUX_ROW, name="b.tsv")
 
     consolidate.main(["--manifest", "a.tsv", "--manifest", "b.tsv"])
 
@@ -760,7 +496,7 @@ def test_a_project_named_by_two_manifests_is_indexed_once(sandbox, con, capsys):
 
 def test_a_duplicate_inside_one_manifest_is_also_indexed_once(sandbox):
     """De-duplication is by project name, so it holds within a manifest too."""
-    one = write_named_manifest(sandbox.root, "a.tsv", LINUX_ROW, LINUX_ROW)
+    one = write_manifest(sandbox.root, LINUX_ROW, LINUX_ROW, name="a.tsv")
     assert [r[0] for r in consolidate.project_rows([one])] == ["torvalds__linux"]
 
 
@@ -768,7 +504,7 @@ def test_an_empty_manifest_indexes_nothing_and_builds_no_view(sandbox, con,
                                                               capsys):
     """An empty run set is a valid state. read_parquet([]) is invalid SQL, so
     the view must be skipped rather than written empty."""
-    empty = write_named_manifest(sandbox.root, "empty.tsv")
+    empty = write_manifest(sandbox.root, name="empty.tsv")
 
     assert consolidate.project_rows([empty]) == []
     consolidate.main(["--manifest", "empty.tsv"])
@@ -777,24 +513,6 @@ def test_an_empty_manifest_indexes_nothing_and_builds_no_view(sandbox, con,
     assert rows == []
     assert not [s for s in con.statements if "view tokens" in s]
     assert "tokens view: 0 rows across 0 projects" in capsys.readouterr().out
-
-
-def test_an_absent_corpus_manifest_is_named_and_the_other_still_indexes(
-        sandbox, capsys):
-    """187 projects silently becoming 1 must be visible."""
-    write_named_manifest(sandbox.root, "manifest.linux.tsv", LINUX_ROW)
-
-    chosen = consolidate.default_manifests()
-
-    assert [p.name for p in chosen] == ["manifest.linux.tsv"]
-    assert "manifest.phase1-sm.tsv is absent" in capsys.readouterr().err
-
-
-def test_the_run_set_falls_back_to_manifest_tsv_when_no_corpus_manifest_exists(
-        sandbox):
-    """A fixture tree or a checkout without the corpus manifests still has
-    manifest.tsv, and that is the only manifest every checkout carries."""
-    assert consolidate.default_manifests() == [sandbox.root / "manifest.tsv"]
 
 
 @pytest.mark.parametrize("value", ["manifest.tsv", "sub/manifest.tsv"])
@@ -812,18 +530,72 @@ def test_an_absolute_manifest_is_used_as_given(sandbox, tmp_path):
 
 # --------------------------------------------------------------------------- #
 # the schema gate
-#
-# read_parquet([...]) binds one schema for the whole list, so one legacy file at
-# 23 or 38 columns aborts the tokens view for every project. These tests need
-# real parquet files, so they are skipped when duckdb is the stub.
 # --------------------------------------------------------------------------- #
 
-requires_duckdb = pytest.mark.skipif(
-    DUCKDB_IS_STUBBED, reason="needs real duckdb (devenv shell) to write parquet")
+LEGACY_23_COLUMNS = consolidate.EXPECTED_COLUMNS[:22] + (("repo_tag", "VARCHAR"),)
+RETYPED_COLUMNS = tuple((name, "VARCHAR" if name == "token_index" else typ)
+                        for name, typ in consolidate.EXPECTED_COLUMNS)
+
+
+@pytest.fixture
+def schemas(monkeypatch):
+    """Map a parquet file name to the schema consolidate.read_schema reports for it."""
+    table: dict[str, tuple] = {}
+    monkeypatch.setattr(consolidate, "read_schema", lambda path: list(table[Path(path).name]))
+    return table
+
+
+def schema_project(out: Path, schemas: dict, name: str, columns) -> Path:
+    """A DONE project whose parquet reports `columns`."""
+    make_project(out, name, stamp="rows=1\nbytes=2\n", parquet=True)
+    schemas[f"{name}-dataset.parquet"] = columns
+    return out / name / f"{name}-dataset.parquet"
+
+
+def test_the_schema_contract_comes_from_validate_schema(sandbox):
+    """The gate must follow a schema widening, so the contract is imported, not copied."""
+    import validate_schema
+    assert consolidate.EXPECTED_COLUMNS is validate_schema.EXPECTED_COLUMNS
+
+
+@pytest.mark.parametrize("columns, drifted_width", [
+    pytest.param(consolidate.EXPECTED_COLUMNS, None, id="matches"),
+    pytest.param(LEGACY_23_COLUMNS, 23, id="legacy-23-columns"),
+    # Same names, token_index as VARCHAR: it would union into silent nulls.
+    pytest.param(RETYPED_COLUMNS, len(consolidate.EXPECTED_COLUMNS), id="wrong-type"),
+])
+def test_schema_split_keeps_only_a_parquet_that_matches_the_contract(
+        sandbox, schemas, columns, drifted_width):
+    path = str(schema_project(sandbox.out, schemas, "jq", columns))
+    usable, drifted, unread = consolidate.schema_split([path])
+    assert unread == []
+    if drifted_width is None:
+        assert (usable, drifted) == ([path], [])
+    else:
+        assert usable == []
+        assert [(d[0], d[1], bool(d[2])) for d in drifted] == [(path, drifted_width, True)]
+
+
+def test_every_mismatched_parquet_is_named_and_counted(sandbox, con, schemas, capsys):
+    """Reporting only the first would hide the second."""
+    write_manifest(sandbox.root, SM_ROW, ROW, LINUX_ROW, name="a.tsv")
+    schema_project(sandbox.out, schemas, "dpdk__dpdk", consolidate.EXPECTED_COLUMNS)
+    schema_project(sandbox.out, schemas, "jq", LEGACY_23_COLUMNS)
+    schema_project(sandbox.out, schemas, "torvalds__linux", consolidate.EXPECTED_COLUMNS[:38])
+
+    consolidate.main(["--manifest", "a.tsv"])
+
+    assert "dpdk__dpdk-dataset.parquet" in con.find("create or replace view tokens")
+    out = capsys.readouterr().out
+    assert "schema mismatch, left out of the tokens view: 2 of 3" in out
+    assert "jq-dataset.parquet (23 columns)" in out
+    assert "torvalds__linux-dataset.parquet (38 columns)" in out
+    assert f"the contract is {len(consolidate.EXPECTED_COLUMNS)} columns" in out
+    assert "tokens view: 1,234,567 rows across 1 projects" in out
 
 
 def write_parquet(path: Path, columns) -> Path:
-    """A one-row parquet with exactly `columns` — (name, duckdb type) pairs."""
+    """A one-row parquet with exactly `columns`, (name, duckdb type) pairs."""
     import duckdb as real_duckdb
 
     select = ", ".join(
@@ -834,116 +606,27 @@ def write_parquet(path: Path, columns) -> Path:
     return path
 
 
-def make_parquet_project(out: Path, name: str, columns) -> Path:
-    """A DONE project whose parquet really is a parquet with `columns`."""
-    workdir = make_project(out, name, stamp="rows=1\nbytes=2\n")
-    write_parquet(workdir / f"{name}-dataset.parquet", columns)
-    return workdir
+@pytest.mark.skipif(DUCKDB_IS_STUBBED, reason="needs real duckdb to write parquet")
+def test_main_leaves_a_real_mismatched_parquet_out_of_the_tokens_view(sandbox, con, capsys):
+    """End to end through the real read_schema. One legacy file would otherwise
+    abort read_parquet([...]) for every project."""
+    write_manifest(sandbox.root, SM_ROW, ROW, name="a.tsv")
+    for name, columns in (("dpdk__dpdk", consolidate.EXPECTED_COLUMNS), ("jq", LEGACY_23_COLUMNS)):
+        workdir = make_project(sandbox.out, name, stamp="rows=1\nbytes=2\n")
+        write_parquet(workdir / f"{name}-dataset.parquet", columns)
 
-
-LEGACY_23_COLUMNS = consolidate.EXPECTED_COLUMNS[:22] + (("repo_tag", "VARCHAR"),)
-
-
-def test_the_schema_contract_comes_from_validate_schema(sandbox):
-    """The gate must follow a schema widening automatically, so the contract is
-    imported, never a column count copied into consolidate.py."""
-    import validate_schema
-
-    assert consolidate.EXPECTED_COLUMNS is validate_schema.EXPECTED_COLUMNS
-
-
-@requires_duckdb
-def test_schema_split_keeps_a_parquet_that_matches_the_contract(sandbox):
-    """The gate must not be so tight that the corpus cannot be indexed."""
-    good = (make_parquet_project(sandbox.out, "dpdk__dpdk",
-                                 consolidate.EXPECTED_COLUMNS)
-            / "dpdk__dpdk-dataset.parquet")
-
-    usable, drifted, unread = consolidate.schema_split([str(good)])
-
-    assert (usable, drifted, unread) == ([str(good)], [], [])
-
-
-@requires_duckdb
-def test_schema_split_leaves_out_a_mismatched_parquet(sandbox):
-    """A 23-column legacy file is the poison this gate exists for."""
-    legacy = (make_parquet_project(sandbox.out, "jq", LEGACY_23_COLUMNS)
-              / "jq-dataset.parquet")
-
-    usable, drifted, unread = consolidate.schema_split([str(legacy)])
-
-    assert usable == []
-    assert unread == []
-    assert len(drifted) == 1
-    path, n_columns, drifts = drifted[0]
-    assert path == str(legacy)
-    assert n_columns == 23
-    assert drifts
-
-
-@requires_duckdb
-def test_main_leaves_a_mismatched_parquet_out_of_the_tokens_view(sandbox, con,
-                                                                capsys):
-    """THE SECOND DEFECT. Before the gate, one legacy 23-column file aborted the
-    whole view, so no corpus-wide query worked at all."""
-    corpus_manifests(sandbox.root)
-    write_manifest(sandbox.root, ROW)
-    make_parquet_project(sandbox.out, "dpdk__dpdk", consolidate.EXPECTED_COLUMNS)
-    make_parquet_project(sandbox.out, "jq", LEGACY_23_COLUMNS)
-
-    consolidate.main(["--manifest", "manifest.phase1-sm.tsv",
-                      "--manifest", "manifest.tsv"])
+    consolidate.main(["--manifest", "a.tsv"])
 
     view = con.find("create or replace view tokens")
     assert "dpdk__dpdk-dataset.parquet" in view
     assert "jq-dataset.parquet" not in view
-    out = capsys.readouterr().out
-    assert "tokens view: 1,234,567 rows across 1 projects" in out
-    # named and counted, or the row count silently looks plausible
-    assert "schema mismatch, left out of the tokens view: 1 of 2" in out
-    assert "jq-dataset.parquet (23 columns)" in out
-    assert f"the contract is {len(consolidate.EXPECTED_COLUMNS)} columns" in out
-
-
-@requires_duckdb
-def test_every_mismatched_parquet_is_named_and_counted(sandbox, con, capsys):
-    """Reporting only the first would hide the second, and the caller cannot
-    act on a file it is not told about."""
-    write_named_manifest(sandbox.root, "a.tsv", SM_ROW, ROW, LINUX_ROW)
-    make_parquet_project(sandbox.out, "dpdk__dpdk", consolidate.EXPECTED_COLUMNS)
-    make_parquet_project(sandbox.out, "jq", LEGACY_23_COLUMNS)
-    make_parquet_project(sandbox.out, "torvalds__linux",
-                         consolidate.EXPECTED_COLUMNS[:38])
-
-    consolidate.main(["--manifest", "a.tsv"])
-
-    out = capsys.readouterr().out
-    assert "schema mismatch, left out of the tokens view: 2 of 3" in out
-    assert "jq-dataset.parquet (23 columns)" in out
-    assert "torvalds__linux-dataset.parquet (38 columns)" in out
-    assert "tokens view: 1,234,567 rows across 1 projects" in out
-
-
-@requires_duckdb
-def test_a_wrong_column_type_is_a_mismatch_too(sandbox):
-    """Same columns with token_index as VARCHAR would union into silent nulls,
-    which is worse than being left out."""
-    retyped = tuple((name, "VARCHAR" if name == "token_index" else typ)
-                    for name, typ in consolidate.EXPECTED_COLUMNS)
-    path = (make_parquet_project(sandbox.out, "dpdk__dpdk", retyped)
-            / "dpdk__dpdk-dataset.parquet")
-
-    usable, drifted, _unread = consolidate.schema_split([str(path)])
-
-    assert usable == []
-    assert [d[1] for d in drifted] == [len(consolidate.EXPECTED_COLUMNS)]
+    assert "schema mismatch, left out of the tokens view: 1 of 2" in capsys.readouterr().out
 
 
 def test_a_parquet_whose_schema_cannot_be_read_stays_in_and_is_reported(
         sandbox, con, capsys):
-    """A file that is not readable at all cannot be shown to disagree with the
-    contract, and a silent exclusion is worse than a loud failure: it is
-    reported on stderr and left in the list."""
+    """A file that cannot be read cannot be shown to disagree, so it stays in
+    the view and is reported on stderr."""
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=1\nbytes=2\n", parquet=True)
 

@@ -1,50 +1,71 @@
 # cregit-token-pipeline
 
-Builds a **token-level code authorship dataset** over a stratified corpus of
-FLOSS repositories, by orchestrating the
-[cregit](https://github.com/cregit/cregit) per-project pipeline and adding
-corpus-level selection, provenance, validation and anonymization around it.
+Runs the [cregit](https://github.com/cregit/cregit) per-project pipeline over a
+manifest of FLOSS repositories that you supply, then validates, indexes and
+prunes the result. It does not select repositories or draw a sample — you
+write the manifest; this tool runs cregit over it. It does not anonymize the
+output or resolve employers either: it only forwards paths you supply to
+cregit, which does that work.
 
 Each project yields one Parquet file with the same 70 columns and **one row per
 token occurrence per file**, carrying the commit and the person that last touched
-that token, the person's employer where it can be resolved, and 29 columns
-recording how the project entered the corpus and how it was labelled.
+that token. 29 of the 70 columns carry per-project provenance — how you found
+the project, how you labelled it, which mask tokenized it — filled from an
+optional JSON sidecar you supply. 3 more carry firm attribution, filled from an
+optional domain-to-firm map and canonical-name table you supply. An absent
+input leaves its columns empty, not missing. `validate_schema.py` is the
+authority on the full column list; read the comment above `EXPECTED_COLUMNS`
+there for what each column means.
 
 Stdlib Python only; DuckDB, srcML, ctags, Java and Perl come from the cregit
 checkout's `devenv shell`.
 
 ## Start here
 
-| If you want to | Read |
-| --- | --- |
-| understand the dataset, its grain and all 70 columns | **[`docs/DATASET-SCHEMA.md`](docs/DATASET-SCHEMA.md)** |
-| know what is wrong with the data before you analyse it | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
-| know why attribution changed in September 2026, and by how much | **[`docs/REBLAME-C100.md`](docs/REBLAME-C100.md)** |
-| know how a project got its `stratum`, or label one yourself | [`docs/CODEBOOK.md`](docs/CODEBOOK.md) |
-| know why the pipeline is built this way | [`docs/DESIGN.md`](docs/DESIGN.md) |
-| see the sampling frame, exclusions and the per-cell draw | [`docs/CORPUS-REVIEW.md`](docs/CORPUS-REVIEW.md), [`docs/CORPUS-SAMPLE.md`](docs/CORPUS-SAMPLE.md) |
-| see the strata checked against an independent published labelling | [`docs/SPINELLIS-VALIDATION.md`](docs/SPINELLIS-VALIDATION.md) |
-
-The three corpus reports are **generated** — by `select_corpus.py review`,
-`select_corpus.py sample` and `validate_spinellis.py`. Do not edit them by hand.
-
-The authority on the schema is `validate_schema.py`, not any document.
+Read [`docs/DESIGN.md`](docs/DESIGN.md) to see why the pipeline is built this
+way. The authority on the schema is `validate_schema.py`, not any document.
 
 ## Quickstart
 
 ```sh
 # 1. point pipeline.cfg at a cregit checkout with rustTokenizer, and an output dir
-# 2. pick a manifest (TSV: name, url, category, file_mask, size_class).
-#    --manifest defaults to manifest.tsv, which is only 4 legacy pilots.
-M=manifest.phase1-sm.tsv
-./ctp.py run --manifest $M --jobs 3 --skip-html --drop-memo
+# 2. write a manifest: a TSV file, one project per line, five fields —
+#    name  url  category  file_filter  size_class
+#    manifest.tsv in this repository is the worked example: 4 small public
+#    pilot projects (jq, zstd, libuv, tmux). Write your own for a real run.
+M=manifest.tsv
+./ctp.py run --manifest $M --jobs 3 --skip-html --drop-memo \
+    --allow-empty-provenance
 ./ctp.py status --manifest $M                    # one-screen progress view
-./validate_schema.py <out>/*/*-dataset.parquet   # schema gate over the corpus
+./validate_schema.py <out>/*/*-dataset.parquet   # re-check the schema over the corpus
 ./ctp.py db                                      # rebuild ctp.duckdb + tokens view
 ```
 
-Full regeneration, from rosters to an anonymized release, is the step table in
-[`docs/DATASET-SCHEMA.md` §2](docs/DATASET-SCHEMA.md#2-regenerating-it).
+That command runs on a fresh clone. Neither the provenance sidecar nor the firm
+map ships with this repository, so the 29 provenance columns and the 3 firm
+columns all come out blank, and `--allow-empty-provenance` is how you say that
+is what you meant. `ctp.py run` refuses to write a Parquet with blank
+provenance unless you say so, because nothing downstream can tell a blank
+column from provenance that is genuinely unknown.
+
+### Provenance and firm attribution
+
+Two independent, optional inputs. Neither ships with this repository; both are
+paths you supply, forwarded unchanged to cregit.
+
+- `--project-meta <path>`: a JSON sidecar, keyed by project name, that fills
+  the 29 provenance columns — how you found the project, how you labelled it,
+  which mask tokenized it. The format is documented in `validate_schema.py`,
+  in the comment above `EXPECTED_COLUMNS`.
+- `--firm-map <path>` plus `--firm-canonical <path>`: a domain-to-firm CSV and
+  a reviewed canonical-name CSV that together fill the 3 firm columns
+  (`firm_raw`, `firm`, `firm_source`). `--firm-canonical` needs `--firm-map`.
+  Passing `--firm-map` alone does not leave `firm` blank: it fills `firm` with
+  `firm_raw` verbatim, so build both files together.
+
+Pass either or both instead of `--allow-empty-provenance`. The flags are
+mutually exclusive: `--allow-empty-provenance` is refused when nothing would
+actually be blank.
 
 Each project runs cregit's `run_pipeline_process.sh` (clone → tokenize via the
 incremental blob-map engine → blame → per-project Parquet), then a validation
@@ -55,26 +76,24 @@ next pass.
 ## Architecture
 
 ```
-candidates.csv ──► select_corpus.py sample ──► manifest.*.tsv
+manifest.*.tsv (you write it: name, url, category, file_filter, size_class)
                                                    │
-project_meta.json (29 provenance fields) ──────────┤
-data/affiliation.merged.csv (domain → firm) ───────┤
+project_meta.json (optional sidecar) ──────────────┤
+firm-map.csv + firm-canonical.csv (optional) ──────┤
                                                    ▼
                                               ctp.py run
                      (ThreadPool, per-project flock, disk floor, retry passes)
                                                    │
                         <out>/<name>/<name>-dataset.parquet   (70 columns)
                                                    │
-                     ├──► validate.py        rows/size gate → .validated stamp
-                     ├──► validate_schema.py column/type/order gate
+                     ├──► validate.py        rows/size/70-column gate → .validated stamp
+                     ├──► validate_schema.py the same column gate over many files
                      ├──► retain.py          delete memo/ and html/
                      └──► metrics.tsv        append-only, one row per phase attempt
 
 ctp.py db ──► ctp.duckdb ├─ projects       DONE/RUNNING/FAILED/QUEUED per project
                          ├─ phase_metrics  the timing ledger, SQL-queryable
                          └─ tokens (view)  every schema-conforming parquet, unified
-
-anonymize_parquet.py ──► pseudonymized parquets ──► verify_anon.py
 ```
 
 Ground truth is always the files — stamps, manifests, `metrics.tsv`.
@@ -111,6 +130,11 @@ state.
 ./run_tests.sh -k domain    # one subset
 ```
 
-Tests needing network or an authenticated `gh` carry the `network` marker and are
-deselected, so a result does not depend on a rate-limit window. Create the
-environment once with `python3 -m venv .venv && .venv/bin/pip install pytest coverage`.
+Create the environment once with
+`python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'`.
+
+`./run_tests.sh` works on a clean clone: no file needs a manual edit first, and
+CI deselects nothing. Tests that assert facts about the cregit checkout named in
+`pipeline.cfg` self-skip when that checkout is absent, which it is on any runner.
+Tests that read a real Parquet need DuckDB and self-skip without it, so install
+the `dev` extra to run the whole suite.

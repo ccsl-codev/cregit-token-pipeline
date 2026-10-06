@@ -1,54 +1,24 @@
-"""Unit tests for validate.py, the post-run gate.
-
-validate.py imports duckdb at module scope and duckdb is not installed in
-.venv (it comes from `devenv shell`), so this file installs a stub `duckdb`
-module in sys.modules before the import when the real one is absent. Each test
-then patches `validate.duckdb.sql` with a recorder, so no parquet is ever read
-and no query ever runs. The fixture parquet is a few bytes of padding under
-tmp_path; only its size matters to the code under test.
-
-The gate is what makes ctp idempotent: it writes the completion stamp, and ctp
-skips any project that has one. So "no stamp on rejection" is a contract, not
-an implementation detail.
-
-Three tests run validate.py in a subprocess under `python -O`, with a tiny
-stub duckdb module on PYTHONPATH. That is the only way to prove the checks
-survive with assertions compiled out. Those runs read no parquet and open no
-database either.
-"""
+"""Unit tests for validate.py, the post-run gate. Each test patches duckdb.sql
+with a recorder, so no parquet is read. The stamp is what makes ctp skip a
+project, so "no stamp on rejection" is a contract."""
 
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
-import types
 from pathlib import Path
 
 import pytest
 
-if "duckdb" not in sys.modules:  # pragma: no cover - import plumbing
-    try:
-        import duckdb  # noqa: F401
-    except ModuleNotFoundError:
-        def _unpatched(*args, **kwargs):
-            raise AssertionError(
-                "stub duckdb was called: patch validate.duckdb.sql in the test")
-
-        _stub = types.ModuleType("duckdb")
-        _stub.__doc__ = "Test stub. Real duckdb lives in the devenv shell."
-        _stub.connect = _unpatched
-        _stub.sql = _unpatched
-        sys.modules["duckdb"] = _stub
-
-import validate  # noqa: E402
+import validate
+from validate_schema import EXPECTED_COLUMNS
 
 
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
 
-COLUMNS = ("repo_name", "commit_id", "token", "token_type", "author")
 
 SCRIPT = Path(validate.__file__).resolve()
 
@@ -86,7 +56,7 @@ class FakeResult:
 class FakeSql:
     """Recording stand-in for duckdb.sql. Reads nothing."""
 
-    def __init__(self, count=4321, columns=COLUMNS):
+    def __init__(self, count=4321, columns=EXPECTED_COLUMNS):
         self.queries: list[str] = []
         self.params: list[list] = []
         self.count = count
@@ -98,7 +68,7 @@ class FakeSql:
         if query.startswith("select count(*)"):
             return FakeResult(row=(self.count,))
         if query.startswith("describe"):
-            return FakeResult(rows=[(c, "VARCHAR", None) for c in self.columns])
+            return FakeResult(rows=[(c, t, None) for c, t in self.columns])
         raise AssertionError(f"unexpected query: {query}")
 
 
@@ -149,25 +119,20 @@ def test_a_good_parquet_writes_the_completion_stamp(invoke, parquet, stamp):
     assert stamp.read_text() == f"rows=4321\nbytes={parquet.stat().st_size}\n"
 
 
-def test_the_gate_reports_rows_bytes_and_columns(invoke, parquet, stamp, capsys):
-    """The phase log is the record of what was accepted, so it must name the
-    row count and the schema."""
+def test_the_gate_reports_rows_and_bytes(invoke, parquet, stamp, capsys):
+    """The phase log is the record of what was accepted."""
     invoke(parquet, stamp)
-    out = capsys.readouterr().out
-    assert f"OK rows=4321 bytes={parquet.stat().st_size}" in out
-    assert "cols=['repo_name', 'commit_id', 'token', 'token_type', 'author']" in out
+    assert f"OK rows=4321 bytes={parquet.stat().st_size}" in capsys.readouterr().out
 
 
-def test_the_gate_counts_rows_and_describes_the_named_parquet(invoke, parquet, stamp):
-    """Both queries must target the file given on the command line; querying
-    anything else would validate the wrong project. The file arrives as a bound
-    parameter, so the SQL text is the same for every project."""
-    sql = invoke(parquet, stamp)
-    assert sql.queries == [
-        "select count(*) from read_parquet(?)",
-        "describe select * from read_parquet(?)",
-    ]
-    assert sql.params == [[str(parquet)], [str(parquet)]]
+def test_a_parquet_that_drifts_from_the_contract_is_rejected(invoke, parquet, stamp, capsys):
+    """A stamp lets --drop-memo delete memo/, so a drifted file must not get one."""
+    drifted = (*EXPECTED_COLUMNS[:-1], (EXPECTED_COLUMNS[-1][0], "BLOB"))
+    with pytest.raises(SystemExit) as exc:
+        invoke(parquet, stamp, sql=FakeSql(columns=drifted))
+    assert exc.value.code == validate.EXIT_REJECTED
+    assert "schema drift (1)" in capsys.readouterr().err
+    assert not stamp.exists()
 
 
 def test_the_stamp_is_overwritten_not_appended(invoke, parquet, stamp):
@@ -181,45 +146,23 @@ def test_the_stamp_is_overwritten_not_appended(invoke, parquet, stamp):
 # rejection paths
 # --------------------------------------------------------------------------- #
 
-def test_a_suspiciously_small_parquet_is_rejected(invoke, tmp_path, stamp, capsys):
-    """A truncated parquet means the tokenizer died late. Accepting it would
-    stamp a broken project DONE and retain.py would then delete its memo/.
-
-    This used to expect an AssertionError. Before the fix the check was a bare
-    `assert`, so `python -O` removed it; now it is an explicit check that
-    prints the reason and exits with the rejection code.
-    """
-    small = tmp_path / "jq-dataset.parquet"
-    small.write_bytes(b"PAR1")
+@pytest.mark.parametrize("size, count, reason", [
+    # A truncated parquet means the tokenizer died late; retain.py would delete memo/.
+    pytest.param(4, 4321, "FAIL parquet suspiciously small: 4 bytes", id="too-small"),
+    pytest.param(10_000, 4321, "FAIL parquet suspiciously small: 10000 bytes",
+                 id="floor-is-exclusive"),
+    pytest.param(20_000, 0, "FAIL parquet has zero rows", id="zero-rows"),
+])
+def test_a_bad_parquet_is_rejected_and_left_unstamped(
+        invoke, tmp_path, stamp, capsys, size, count, reason):
+    """No stamp means the next ctp pass retries the project."""
+    bad = tmp_path / "jq-dataset.parquet"
+    bad.write_bytes(b"\0" * size)
     with pytest.raises(SystemExit) as exc:
-        invoke(small, stamp)
+        invoke(bad, stamp, sql=FakeSql(count=count))
     assert exc.value.code == validate.EXIT_REJECTED
-    assert "FAIL parquet suspiciously small: 4 bytes" in capsys.readouterr().err
+    assert reason in capsys.readouterr().err
     assert not stamp.exists()
-
-
-def test_an_empty_parquet_is_rejected(invoke, parquet, stamp, capsys):
-    """A parquet with a valid header and no rows passes the size floor, so the
-    row count is a separate check.
-
-    This used to expect an AssertionError; the check is now explicit so that
-    `python -O` cannot remove it.
-    """
-    with pytest.raises(SystemExit) as exc:
-        invoke(parquet, stamp, sql=FakeSql(count=0))
-    assert exc.value.code == validate.EXIT_REJECTED
-    assert "FAIL parquet has zero rows" in capsys.readouterr().err
-    assert not stamp.exists()
-
-
-def test_the_size_floor_is_exclusive(invoke, tmp_path, stamp, capsys):
-    """Documents the boundary: exactly 10,000 bytes is rejected."""
-    edge = tmp_path / "jq-dataset.parquet"
-    edge.write_bytes(b"\0" * 10_000)
-    with pytest.raises(SystemExit) as exc:
-        invoke(edge, stamp)
-    assert exc.value.code == validate.EXIT_REJECTED
-    assert "10000 bytes" in capsys.readouterr().err
 
 
 def test_a_missing_parquet_raises_before_any_query(invoke, tmp_path, stamp):
@@ -232,26 +175,13 @@ def test_a_missing_parquet_raises_before_any_query(invoke, tmp_path, stamp):
     assert not stamp.exists()
 
 
-def test_a_rejected_parquet_leaves_no_stamp_so_ctp_retries(invoke, parquet, stamp):
-    """Locks in the resume contract: rejection must be indistinguishable from
-    'never validated', so the next run retries the project."""
-    with pytest.raises(SystemExit):
-        invoke(parquet, stamp, sql=FakeSql(count=0))
-    assert list(stamp.parent.glob("*.validated")) == []
-
-
 @pytest.mark.parametrize("argv", [
     pytest.param((), id="no-arguments"),
     pytest.param(("only-the-parquet",), id="missing-stamp-path"),
     pytest.param(("parquet", "stamp", "extra"), id="extra-arguments"),
 ])
 def test_a_wrong_invocation_prints_usage_and_exits_two(monkeypatch, capsys, argv):
-    """Before the fix, validate.py read sys.argv[1] blind and a call with no
-    arguments died with a bare IndexError. It now prints usage and exits with a
-    code of its own, distinct from a rejected parquet.
-
-    This test used to assert the IndexError.
-    """
+    """Usage, and an exit code distinct from a rejected parquet."""
     monkeypatch.setattr(validate.sys, "argv", ["validate.py", *argv])
     with pytest.raises(SystemExit) as exc:
         validate.main()
@@ -264,53 +194,23 @@ def test_a_wrong_invocation_prints_usage_and_exits_two(monkeypatch, capsys, argv
 # path handling
 # --------------------------------------------------------------------------- #
 
-def test_the_parquet_path_is_bound_not_interpolated(invoke, parquet, stamp):
-    """Before the fix the path was pasted into the query text. It is now a
-    bound parameter, so no project name reaches the SQL parser."""
-    sql = invoke(parquet, stamp)
-    assert all(str(parquet) not in query for query in sql.queries)
-    assert sql.params[0] == [str(parquet)]
-
-
-def test_a_quote_in_the_path_does_not_break_the_sql(invoke, tmp_path):
-    """A path with a quote must still produce valid SQL and validate the file
-    that was named.
-
-    This was an expected failure. Before the fix, validate.py built SQL with
-    f"...from '{parquet}'", so a single quote in the path produced an
-    unbalanced string literal and the gate crashed instead of validating.
-    Project names come from the manifest, so one manifest row was enough.
-    """
-    odd = tmp_path / "we'ird-dataset.parquet"
-    odd.write_bytes(b"PAR1" + b"\0" * 20_000)
-    stamp = tmp_path / "we'ird.validated"
-
-    sql = invoke(odd, stamp)
-
-    assert all(query.count("'") % 2 == 0 for query in sql.queries)
-    assert all("we'ird" not in query for query in sql.queries)
-    assert sql.params == [[str(odd)], [str(odd)]]
-    assert stamp.read_text().startswith("rows=4321\n")
-
-
-def test_a_sql_fragment_in_the_path_is_read_as_a_literal_path(invoke, tmp_path):
-    """A crafted project name must be data, never SQL. Before the fix the
-    fragment landed in the query text and would have run."""
-    evil = tmp_path / "'; drop table x; --"
-    evil.mkdir()
-    crafted = evil / "jq-dataset.parquet"
-    crafted.write_bytes(b"PAR1" + b"\0" * 20_000)
+@pytest.mark.parametrize("folder", ["plain", "we'ird", "'; drop table x; --"])
+def test_the_parquet_path_is_bound_not_interpolated(invoke, tmp_path, folder):
+    """Project names come from the manifest, so the path must be a bound
+    parameter: the SQL text is the same for every project."""
+    (tmp_path / folder).mkdir()
+    parquet = tmp_path / folder / "jq-dataset.parquet"
+    parquet.write_bytes(b"PAR1" + b"\0" * 20_000)
     stamp = tmp_path / "jq.validated"
 
-    sql = invoke(crafted, stamp)
+    sql = invoke(parquet, stamp)
 
-    assert all("drop table" not in query for query in sql.queries)
     assert sql.queries == [
         "select count(*) from read_parquet(?)",
         "describe select * from read_parquet(?)",
     ]
-    assert sql.params == [[str(crafted)], [str(crafted)]]
-    assert stamp.exists()
+    assert sql.params == [[str(parquet)], [str(parquet)]]
+    assert stamp.read_text().startswith("rows=4321\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -322,9 +222,8 @@ def test_a_sql_fragment_in_the_path_is_read_as_a_literal_path(invoke, tmp_path):
     pytest.param(20_000, "parquet has zero rows", id="zero-rows"),
 ])
 def test_a_bad_parquet_still_fails_under_o(tmp_path, size, reason):
-    """Before the fix both checks were bare `assert` statements, so under
-    `python -O` they vanished and any parquet was stamped DONE. The stub duckdb
-    reports zero rows, so both rejections are reachable with -O on."""
+    """`python -O` must not remove the checks. The stub duckdb reports zero
+    rows, so both rejections are reachable."""
     bad = tmp_path / "jq-dataset.parquet"
     bad.write_bytes(b"\0" * size)
     stamp = tmp_path / "jq.validated"

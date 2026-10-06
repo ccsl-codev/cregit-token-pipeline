@@ -1,33 +1,6 @@
-"""The mask exists in two repositories. Keep them equal, and keep both honest.
-
-  1. file_mask.UNIVERSAL_MASK                         — what ctp.py sends and what
-                                                        every manifest records
-                                                        (this repo)
-  2. cregit-issue61/tokenize/CregitLanguages.pm       — what routes an extension
-                                                        to a parser, and what
-                                                        tokenize/fileMask.pl
-                                                        prints (the other repo)
-
-(2) is the authority: it decides whether a selected blob can actually be
-tokenized. (1) only has to agree with it. They are versioned separately and
-nothing else keeps them in step, so this is the same arrangement — and the same
-kind of test — as tests/test_meta_field_drift.py.
-
-A divergence does not crash. The mask in this repo selects a file, the tokenizer
-in the other repo has no parser for it, and the run dies part-way through with
-"Unknown parser for extension" after step 1 has already done its work. Or worse:
-srcML exits 0 and emits nothing for an extension it does not recognise, so the
-blob is tokenized to an empty file and the run reports success.
-
-That second failure mode is why the parser checks below exist at all. "The parser
-file is present and executable" is not the same claim as "the parser can parse
-this extension", and the M4 tokenizer is the proof: m4Tokenizer/m4.py was present
-and executable while being Python 2 and unable to run at all.
-
-The perl side is read by RUNNING it (`perl tokenize/fileMask.pl`) rather than by
-parsing the .pm, because the mask is derived there too and a hand-parse would
-only compare the inputs, not the result. Skipped when that checkout is absent.
-"""
+"""The mask exists twice: file_mask.UNIVERSAL_MASK here, and CregitLanguages.pm in
+the cregit checkout, which routes extensions to parsers and is the authority.
+Nothing else keeps them in step. The perl side is read by running it."""
 from __future__ import annotations
 
 import shutil
@@ -36,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-import ctp                                  # only for the configured CREGIT path
+import ctp
 from file_mask import TOKENIZABLE_EXTENSIONS, UNIVERSAL_MASK
 
 TOKENIZE_DIR = ctp.CREGIT / "tokenize"
@@ -44,12 +17,12 @@ FILE_MASK_PL = TOKENIZE_DIR / "fileMask.pl"
 LANGUAGES_PM = TOKENIZE_DIR / "CregitLanguages.pm"
 
 
-def _need_cregit() -> None:
-    if not LANGUAGES_PM.exists():
-        pytest.skip(f"{LANGUAGES_PM} is not checked out on this machine; "
-                    "the drift check needs both repositories")
-    if shutil.which("perl") is None:
-        pytest.skip("no perl on PATH")
+pytestmark = [
+    pytest.mark.skipif(not LANGUAGES_PM.exists(), reason=(
+        f"{LANGUAGES_PM} is not checked out on this machine; "
+        "the drift check needs both repositories")),
+    pytest.mark.skipif(shutil.which("perl") is None, reason="no perl on PATH"),
+]
 
 
 def _perl(expression: str) -> str:
@@ -83,25 +56,18 @@ def cregit_parsers() -> dict[str, str]:
 
 
 def test_the_two_repositories_agree_on_the_mask_byte_for_byte():
-    """blobExec compares the recorded mask as a string, so "equivalent" is not
-    good enough: a different spelling of the same regex forces every project to
-    rebuild."""
-    _need_cregit()
+    """blobExec compares the recorded mask as a string: a different spelling of
+    the same regex forces every project to rebuild."""
     assert cregit_mask() == UNIVERSAL_MASK
 
 
 def test_the_two_repositories_agree_on_the_extension_list():
-    """Compared as lists, so an ordering difference fails here with a readable
-    diff rather than as an opaque mask mismatch."""
-    _need_cregit()
+    """As lists, so an ordering difference shows as a readable diff."""
     assert cregit_masked_extensions() == sorted(TOKENIZABLE_EXTENSIONS)
 
 
 def test_every_extension_this_repo_masks_is_routed_to_a_parser_by_the_tokenizer():
-    """The go/md/yaml defect, as an assertion. tokenBySha.pl mapped `go`, `md` and
-    `yaml`; tokenize.pl had no parser for any of them, so such a blob cleared the
-    first gate and died at the second."""
-    _need_cregit()
+    """A masked extension with no parser dies part-way through the run."""
     routed = cregit_routed_extensions()
     parsers = cregit_parsers()
     for ext in TOKENIZABLE_EXTENSIONS:
@@ -113,7 +79,6 @@ def test_every_extension_this_repo_masks_is_routed_to_a_parser_by_the_tokenizer(
 def test_every_parser_the_mask_can_reach_exists_and_is_executable():
     """A parser that is missing or mode 644 fails per blob, deep inside step 2,
     after step 1 has already cloned and walked."""
-    _need_cregit()
     routed = cregit_routed_extensions()
     parsers = cregit_parsers()
     reachable = {routed[ext] for ext in TOKENIZABLE_EXTENSIONS}
@@ -125,10 +90,8 @@ def test_every_parser_the_mask_can_reach_exists_and_is_executable():
 
 
 def test_the_tokenizer_no_longer_claims_languages_it_cannot_parse():
-    """Every extension the tokenizer routes must reach a parser, not only the ones
-    this repo masks. Otherwise a future widening here can select an extension that
-    was never going to work."""
-    _need_cregit()
+    """Every routed extension must reach a parser, or a future widening here can
+    select an extension that was never going to work."""
     routed = cregit_routed_extensions()
     parsers = cregit_parsers()
     for ext, lang in sorted(routed.items()):
@@ -140,12 +103,8 @@ def test_the_tokenizer_no_longer_claims_languages_it_cannot_parse():
 
 
 def test_m4_is_routed_but_not_masked():
-    """m4Tokenizer/m4.py is present and executable and still cannot be trusted
-    with real autotools input: its lexer ends a quote on a backtick instead of an
-    apostrophe. Selecting .am/.ac would fail whole projects at step 2. This
-    assertion is the record of that decision — delete it when the lexer is
-    fixed, not before."""
-    _need_cregit()
+    """m4.py's lexer ends a quote on a backtick, so selecting .am/.ac would fail
+    whole projects at step 2. Delete this when the lexer is fixed."""
     routed = cregit_routed_extensions()
     assert routed.get("am") == "M4" and routed.get("ac") == "M4"
     assert "am" not in TOKENIZABLE_EXTENSIONS
@@ -161,11 +120,7 @@ def test_the_configured_cregit_checkout_is_the_one_the_pipeline_runs():
 
 
 def test_the_runner_takes_its_default_mask_from_the_same_table():
-    """Not typed beside the table: run_pipeline_process.sh resolves its default
-    from tokenize/fileMask.pl, so a project run without --mask gets exactly the
-    mask this repo records in the manifest."""
-    _need_cregit()
+    """A project run without --mask must get the mask the manifest records."""
     runner = (ctp.CREGIT / "run_pipeline_process.sh").read_text()
     assert "tokenize/fileMask.pl" in runner
-    # And no literal per-language mask left behind as a default.
     assert r"MASK='\.[ch]$'" not in runner
