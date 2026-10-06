@@ -709,6 +709,35 @@ def resume_step(name: str, workdir: Path, pinned: str) -> int:
     return 2
 
 
+def derived_artifacts(name: str) -> tuple[str, ...]:
+    """What steps 3 to 10 rebuild from the tokenized repo. The same list as the
+    runner's drop_refold_derived_artifacts: step 6 cannot clone over an existing
+    working clone, and blame of a stale sha must not survive."""
+    return ("blame", "html", f"{name}-original", f"{name}-cregit",
+            f"{name}-original.db", f"{name}-cregit.db", f"{name}-persons.db",
+            f"{name}-persons.xls", f"{name}-dataset.parquet")
+
+
+def drop_derived(name: str, workdir: Path) -> tuple[list[str], list[str]]:
+    """Delete the derived artifacts, keeping the bare repos, the blob map and the memo.
+    Returns (dropped, errors)."""
+    dropped, errors = [], []
+    for entry in derived_artifacts(name):
+        path = workdir / entry
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_dir() and not path.is_symlink():
+            errs = retain.remove_tree(path)
+        else:
+            try:
+                path.unlink()
+                errs = []
+            except OSError as exc:
+                errs = [f"{path} ({exc})"]
+        (errors.extend(errs) if errs else dropped.append(entry))
+    return dropped, errors
+
+
 def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     """clone (when pinned), pipeline, firm, validate. True when the project validated."""
     name = ctx.name
@@ -741,14 +770,29 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     if ctx.pinned and run_step(ctx, "clone", pin_args(ctx.project), after_clone) != 0:
         return False
     opts = _OPTS
+    resume: dict = {}
     if _OPTS.get("auto_resume") and _OPTS.get("from_step", 1) == 1:
         step = resume_step(name, workdir, ctx.pinned)
         if step > 1:
-            say(f"{name} — an earlier attempt left its clone and blob map; "
-                f"resuming the runner at step {step}")
+            dropped, errors = drop_derived(name, workdir)
+            say(f"{name} — an earlier attempt left its clone and blob map; resuming the "
+                f"runner at step {step}" + (f", after dropping {', '.join(dropped)}"
+                                            if dropped else ""))
+            resume = {"from_step": step, "dropped": dropped}
+            if errors:
+                now = time.time()
+                ctx.record("pipeline", "failed", now, now, exit_code=None, resume=resume,
+                           detail=f"could not drop the derived artifacts: {errors}")
+                ctx.failed_step = "pipeline"
+                return False
             opts = {**_OPTS, "from_step": step}
+
+    def after_pipeline_resumed(rc: int):
+        rc, extra = after_pipeline(rc)
+        return rc, ({**extra, "resume": resume} if resume else extra)
+
     if run_step(ctx, "pipeline", build_pipeline_args(ctx.project, opts, workdir),
-                after_pipeline) != 0:
+                after_pipeline_resumed) != 0:
         return False
     # firm adds the 3 firm columns to cregit's 67; validate gates the 70.
     later = dict(project_phases(ctx.project, _OPTS, workdir, stamp))

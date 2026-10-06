@@ -2759,3 +2759,59 @@ def test_the_deferral_wait_is_capped(monkeypatch, sandbox, fake_projects, no_gat
     fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
     ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=10)
     assert "deferred; next try in 0s" in capsys.readouterr().out
+
+
+def test_a_step_2_resume_drops_the_derived_artifacts_first(monkeypatch, sandbox, pinned_jq):
+    workdir = leftover_attempt(sandbox)
+    for entry in ("blame", "jq-original", "jq-cregit"):
+        (workdir / entry).mkdir()
+    for entry in ("jq-cregit.db", "jq-dataset.parquet"):
+        (workdir / entry).write_bytes(b"x")
+    (workdir / "memo").mkdir()
+    (workdir / "jq-cregit.git").mkdir()
+    seen = {}
+    r = FakeRunner()
+
+    def popen(args, **kwargs):
+        if FakeRunner.phase_of(args) == "pipeline":
+            seen["left"] = sorted(p.name for p in workdir.iterdir())
+        return r(args, **kwargs)
+    monkeypatch.setattr(ctp.subprocess, "Popen", popen)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp._OPTS.update(auto_resume=True, from_step=1)
+    ctp.run_project(pinned_jq)
+    # The bare repos, the blob map and the memo stay; the rest is rebuilt.
+    assert seen["left"] == ["jq-blobmap.db", "jq-cregit.git", "jq-original.git", "memo"]
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert row["resume"] == {"from_step": 2, "dropped": [
+        "blame", "jq-original", "jq-cregit", "jq-cregit.db", "jq-dataset.parquet"]}
+
+
+def test_a_resume_that_cannot_drop_fails_without_running_the_pipeline(
+        monkeypatch, sandbox, pinned_jq):
+    workdir = leftover_attempt(sandbox)
+    (workdir / "blame").mkdir()
+    r = FakeRunner()
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    monkeypatch.setattr(ctp.retain, "remove_tree", lambda p: [f"{p} (busy)"])
+    ctp._OPTS.update(auto_resume=True, from_step=1)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    assert "pipeline" not in [c.phase for c in r.calls]
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert "could not drop" in row["detail"]
+
+
+def test_drop_derived_reports_a_file_it_cannot_unlink(monkeypatch, sandbox):
+    workdir = sandbox.out / "jq"
+    workdir.mkdir()
+    (workdir / "jq-cregit.db").write_bytes(b"x")
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name == "jq-cregit.db":
+            raise PermissionError("read-only")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    dropped, errors = ctp.drop_derived("jq", workdir)
+    assert dropped == [] and "read-only" in errors[0]
