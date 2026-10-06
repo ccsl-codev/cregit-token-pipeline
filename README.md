@@ -7,13 +7,12 @@ write the manifest; this tool runs cregit over it. It does not anonymize the
 output or resolve employers either: it only forwards paths you supply to
 cregit, which does that work.
 
-Each project yields one Parquet file with the same 70 columns and **one row per
+Each project yields one Parquet file with the same 67 columns and **one row per
 token occurrence per file**, carrying the commit and the person that last touched
-that token. 29 of the 70 columns carry per-project provenance — how you found
+that token. 29 of the 67 columns carry per-project provenance — how you found
 the project, how you labelled it, which mask tokenized it — filled from an
-optional JSON sidecar you supply. 3 more carry firm attribution, filled from an
-optional domain-to-firm map and canonical-name table you supply. An absent
-input leaves its columns empty, not missing. `validate_schema.py` is the
+optional JSON sidecar you supply. An absent sidecar leaves its columns empty,
+not missing. `validate_schema.py` is the
 authority on the full column list; read the comment above `EXPECTED_COLUMNS`
 there for what each column means.
 
@@ -28,7 +27,7 @@ way. The authority on the schema is `validate_schema.py`, not any document.
 ## Quickstart
 
 ```sh
-# 1. point pipeline.cfg at a cregit checkout with rustTokenizer, and an output dir
+# 1. point pipeline.cfg at a cregit master checkout (bb6f985 or later), and an output dir
 # 2. write a manifest: a TSV file, one project per line, five fields —
 #    name  url  category  file_filter  size_class
 #    manifest.tsv in this repository is the worked example: 4 small public
@@ -41,31 +40,22 @@ M=manifest.tsv
 ./ctp.py db                                      # rebuild ctp.duckdb + tokens view
 ```
 
-That command runs on a fresh clone. Neither the provenance sidecar nor the firm
-map ships with this repository, so the 29 provenance columns and the 3 firm
-columns all come out blank, and `--allow-empty-provenance` is how you say that
-is what you meant. `ctp.py run` refuses to write a Parquet with blank
+That command runs on a fresh clone. The provenance sidecar does not ship with
+this repository, so the 29 provenance columns come out blank, and
+`--allow-empty-provenance` is how you say that is what you meant. `ctp.py run` refuses to write a Parquet with blank
 provenance unless you say so, because nothing downstream can tell a blank
 column from provenance that is genuinely unknown.
 
-### Provenance and firm attribution
+### Provenance
 
-Two independent, optional inputs. Neither ships with this repository; both are
-paths you supply, forwarded unchanged to cregit.
+`--project-meta <path>` is optional and does not ship with this repository. It
+is a JSON sidecar, keyed by project name, that fills the 29 provenance columns
+— how you found the project, how you labelled it, which mask tokenized it. ctp
+forwards the path unchanged to cregit. The format is documented in
+`validate_schema.py`, in the comment above `EXPECTED_COLUMNS`.
 
-- `--project-meta <path>`: a JSON sidecar, keyed by project name, that fills
-  the 29 provenance columns — how you found the project, how you labelled it,
-  which mask tokenized it. The format is documented in `validate_schema.py`,
-  in the comment above `EXPECTED_COLUMNS`.
-- `--firm-map <path>` plus `--firm-canonical <path>`: a domain-to-firm CSV and
-  a reviewed canonical-name CSV that together fill the 3 firm columns
-  (`firm_raw`, `firm`, `firm_source`). `--firm-canonical` needs `--firm-map`.
-  Passing `--firm-map` alone does not leave `firm` blank: it fills `firm` with
-  `firm_raw` verbatim, so build both files together.
-
-Pass either or both instead of `--allow-empty-provenance`. The flags are
-mutually exclusive: `--allow-empty-provenance` is refused when nothing would
-actually be blank.
+Pass it instead of `--allow-empty-provenance`. The two flags are mutually
+exclusive: `--allow-empty-provenance` is refused when nothing would be blank.
 
 Each project runs cregit's `run_pipeline_process.sh` (clone → tokenize via the
 incremental blob-map engine → blame → per-project Parquet), then a validation
@@ -79,14 +69,13 @@ next pass.
 manifest.*.tsv (you write it: name, url, category, file_filter, size_class)
                                                    │
 project_meta.json (optional sidecar) ──────────────┤
-firm-map.csv + firm-canonical.csv (optional) ──────┤
                                                    ▼
                                               ctp.py run
                      (ThreadPool, per-project flock, disk floor, retry passes)
                                                    │
-                        <out>/<name>/<name>-dataset.parquet   (70 columns)
+                        <out>/<name>/<name>-dataset.parquet   (67 columns)
                                                    │
-                     ├──► validate.py        rows/size/70-column gate → .validated stamp
+                     ├──► validate.py        rows/size/67-column gate → .validated stamp
                      ├──► validate_schema.py the same column gate over many files
                      ├──► retain.py          delete memo/ and html/
                      └──► metrics.tsv        append-only, one row per phase attempt

@@ -139,7 +139,7 @@ validated project is not re-run.
   deletes the `memo/` of a drifted file.
 - `validate_schema.py` runs the same contract check over many files at once and
   reports every drift rather than the first. A corpus is unusable if one project
-  has 38 columns and another 70, or if `token_index` is BIGINT in one file and
+  has 38 columns and another 67, or if `token_index` is BIGINT in one file and
   VARCHAR in another: a consumer would union them and get silent nulls.
   `consolidate.py` applies it again when it builds the `tokens` view.
 
@@ -152,12 +152,11 @@ gate.
 
 ## 7. The provenance guard
 
-`ctp.py run` refuses to reach the Parquet-writing step with a provenance gap —
-a missing `--project-meta`, a missing `--firm-map`, or a `--firm-map` given
-without `--firm-canonical` — unless `--allow-empty-provenance` says otherwise.
+`ctp.py run` refuses to reach the Parquet-writing step without `--project-meta`
+unless `--allow-empty-provenance` says otherwise.
 
 It refuses rather than warns. Nothing downstream can tell a blank column from
-provenance that is genuinely unknown: the file still carries all 70 columns in
+provenance that is genuinely unknown: the file still carries all 67 columns in
 the right order, so both validation gates pass it, and a long run can finish and
 publish a Parquet that is silently inconsistent with the rest of a corpus. A
 warning is easy to miss at the end of a long log; a refusal is not.
@@ -166,13 +165,6 @@ The escape hatch takes no default, so it can only arrive by being typed, and it
 prints exactly which columns it gave up. It is refused in turn when nothing
 would actually be blank, so it cannot sit unused in a launcher script and
 silence a real gap on a later run that does have one.
-
-`--firm-canonical` is checked separately from `--firm-map` because the two fail
-differently. Omitting `--firm-map` leaves three columns empty, which the guard
-reports as a blank. Omitting `--firm-canonical` alone does not blank anything:
-`firm` silently repeats `firm_raw` instead of the canonical name. A wrong column is a different failure
-from a blank one, so the guard reports it as its own gap rather than folding it
-into the same message.
 
 ## 8. Corpus-level stages
 
@@ -191,10 +183,8 @@ Not built. Each is a gap, not a plan:
   draws a sample, or assigns a project's stratum or history cluster. Those
   choices, and the 29 provenance columns that record them, are entirely on the
   person who writes the manifest and the optional sidecar.
-- **Building the domain-to-firm map or the canonical-name table.** `ctp.py run`
-  forwards `--firm-map` and `--firm-canonical` to cregit; building those two
-  CSVs is on the person who supplies them.
-- **A corpus-level firm or organisation rollup.** Attribution is per token only.
+- **Firm attribution.** cregit master emits no firm columns, so `ctp.py run`
+  forwards no firm flags.
 - **A per-project metadata table / dataset card** — name, category, URL, pinned
   sha, commit count, token rows, file count, languages, run duration, and the
   cregit and tokenizer versions.
