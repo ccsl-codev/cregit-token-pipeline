@@ -104,7 +104,8 @@ directory without editing it.
   runner at step 2 when its clone and blob map survive, so its
   tokenizations are kept.
 - A failed project runs at most `1 + --retries` times, counted across
-  restarts.
+  restarts. An attempt that died mid-step, with its machine, counts too, so a
+  project that kills its run is not retried for ever.
 - Each phase holds the project's lock, and so does every process it starts.
   If ctp dies with `kill -9`, its runner tree keeps the lock, and a new
   census waits for it rather than racing it.
@@ -171,7 +172,15 @@ sha256sum <output_dir>/antirez__kilo/antirez__kilo-dataset.parquet   # equals pa
 ./validate_schema.py <output_dir>/antirez__kilo/antirez__kilo-dataset.parquet
 ```
 
-## 4. ctp.duckdb during a census
+## 4. One census per checkout
+
+The ledger, `state/` (logs and locks), `metrics.tsv`, `runs.log` and
+`ctp.duckdb` live in this checkout, whatever `CTP_CONFIG` says. Two censuses
+from one checkout share them, so run one census per checkout. A second census
+on the same output directory is safe, because of the locks, but each would
+count the other's running attempts as interrupted.
+
+## 5. ctp.duckdb during a census
 
 Each join holds `ctp.duckdb.lock` and writes `ctp.duckdb`. DuckDB lets one
 process write, so do not keep the file open in another process during a
