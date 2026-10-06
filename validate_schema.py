@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Schema gate: every parquet must carry the 67 columns of EXPECTED_COLUMNS.
+"""Schema gate: every parquet must carry EXPECTED_COLUMNS, cregit's 67 then ctp's 3 firm ones.
 Usage: validate_schema.py <parquet>...  |  --emit-contract <parquet> (print, no check).
 Exit 0 all match, 1 any drift (all drifts printed), 2 usage. duckdb is imported lazily."""
 from __future__ import annotations
@@ -15,7 +15,7 @@ EXIT_USAGE = 2
 # --project-meta sidecar: a JSON object keyed by project name; each value maps the 29
 # provenance fields (clone_url..file_mask) to strings, a missing key giving ''. Names
 # and order must match PROJECT_META_FIELDS in cregit's generate_dataset.py.
-EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
+CREGIT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("repo_name", "VARCHAR"),
     ("clone_url", "VARCHAR"),
     ("provenance_status", "VARCHAR"),
@@ -84,6 +84,16 @@ EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("footer_personids", "VARCHAR[]"),
     ("footer_person_names", "VARCHAR[]"),
 )
+
+# Resolved per row from person_domain by firm_attribution.py; all '' when the
+# domain is not in data/affiliation.merged.csv.
+FIRM_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("firm_raw", "VARCHAR"),
+    ("firm", "VARCHAR"),
+    ("firm_source", "VARCHAR"),
+)
+
+EXPECTED_COLUMNS = CREGIT_COLUMNS + FIRM_COLUMNS
 
 
 @dataclass(frozen=True)
