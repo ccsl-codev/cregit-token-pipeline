@@ -668,9 +668,11 @@ class ProjectRun:
 
 def run_step(ctx: ProjectRun, step: str, argv: list[str],
              after=None) -> int:
-    """Run one phase and append its ledger row. `after(rc)` may veto a success and
+    """Run one phase and append its ledger rows: one when it starts, so a crash shows
+    which step was running, and one when it ends. `after(rc)` may veto a success and
     add fields: it returns (rc, extra). Re-raises OSError after recording it."""
     start = time.time()
+    ctx.record(step, "started", start, start, argv=argv)
     try:
         rc = run_phase(ctx.project, step, argv, keep_fds=_held_fds(ctx.name))
     except OSError as exc:
@@ -1740,13 +1742,28 @@ def audit_line(row: dict) -> str:
     return "  ".join(cells + notes)
 
 
+def interrupted(rows: list[dict]) -> list[dict]:
+    """rows without each started row whose step ended; one that never ended is kept,
+    marked interrupted: its process died mid-step."""
+    ended = {(r.get("run_id"), r.get("attempt"), r.get("step"))
+             for r in rows if r.get("status") != "started"}
+    out = []
+    for r in rows:
+        if r.get("status") != "started":
+            out.append(r)
+        elif (r.get("run_id"), r.get("attempt"), r.get("step")) not in ended:
+            out.append({**r, "status": "interrupted",
+                        "detail": "started, and no end row: the run died here"})
+    return out
+
+
 def cmd_audit(args: argparse.Namespace) -> int:
-    """Print one project's ledger rows; --json prints them whole."""
+    """Print one project's ledger rows; --json prints every row whole."""
     rows = ledger.project_rows(ledger.read(LEDGER), args.project)
     if not rows:
         print(f"{args.project}: no rows in {LEDGER}", file=sys.stderr)
         return 1
-    for row in rows:
+    for row in (rows if args.json else interrupted(rows)):
         print(json.dumps(row, ensure_ascii=False) if args.json else audit_line(row))
     return 0
 

@@ -1746,10 +1746,21 @@ def test_commit_url_matches_the_runner_default(url, expected):
 # audit ledger
 # --------------------------------------------------------------------------- #
 
-def ledger_rows(sandbox, project=None, step=None):
+def ledger_rows(sandbox, project=None, step=None, started=False):
+    """The ledger's rows, without the started rows unless started=True."""
     rows = ledger.read(sandbox.root / "ledger.jsonl")
     return [r for r in rows if (project is None or r.get("project") == project)
-            and (step is None or r.get("step") == step)]
+            and (step is None or r.get("step") == step)
+            and (started or r.get("status") != "started")]
+
+
+def test_each_step_writes_a_started_row_before_it_runs(sandbox, runner, jq):
+    ctp.run_project(jq)
+    rows = ledger_rows(sandbox, "jq", started=True)
+    assert [(r["step"], r["status"]) for r in rows] == [
+        ("pipeline", "started"), ("pipeline", "ok"), ("firm", "started"), ("firm", "ok"),
+        ("validate", "started"), ("validate", "ok"), ("cleanup", "ok"), ("project", "done")]
+    assert rows[0]["argv"][0] == "./run_pipeline_process.sh"
 
 
 def fake_parquet(sandbox, name="jq", data=b"PAR1 fake parquet PAR1") -> Path:
@@ -2020,7 +2031,22 @@ def test_audit_json_prints_whole_rows(sandbox, runner, jq, capsys):
     capsys.readouterr()
     ctp.cmd_audit(argparse.Namespace(project="jq", json=True))
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert rows[-1]["state"] == "done" and rows[2]["parquet"]["rows"] == 42
+    assert rows[-1]["state"] == "done"
+    [validated] = [r for r in rows if r["step"] == "validate" and r["status"] == "ok"]
+    assert validated["parquet"]["rows"] == 42
+    assert [r["status"] for r in rows if r["step"] == "pipeline"] == ["started", "ok"]
+
+
+def test_audit_marks_a_step_that_never_ended(sandbox, capsys):
+    path = sandbox.root / "ledger.jsonl"
+    base = {"project": "jq", "run_id": "r1", "attempt": 1}
+    ledger.append(path, {**base, "step": "clone", "status": "started"})
+    ledger.append(path, {**base, "step": "clone", "status": "ok"})
+    ledger.append(path, {**base, "step": "pipeline", "status": "started"})
+    ctp.cmd_audit(argparse.Namespace(project="jq", json=False))
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert "pipeline  interrupted" in lines[1] and "the run died here" in lines[1]
 
 
 def test_audit_of_an_unknown_project_fails(sandbox, capsys):
