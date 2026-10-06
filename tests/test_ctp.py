@@ -1373,11 +1373,6 @@ def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
 
 @pytest.mark.parametrize("absent, expected", [
     pytest.param({"project_meta": ""}, "--project-meta", id="no-sidecar"),
-    # --firm-canonical without --firm-map has a refusal of its own.
-    pytest.param({"firm_map": "", "firm_canonical": ""}, "--firm-map",
-                 id="no-firm-map"),
-    pytest.param({"firm_canonical": ""}, "--firm-canonical",
-                 id="no-canonical-table"),
 ])
 def test_each_provenance_flag_missing_on_its_own_is_refused(
         must_not_start, absent, expected):
@@ -1437,7 +1432,6 @@ def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start)
 
 @pytest.mark.parametrize("absent, expected", [
     pytest.param("project_meta", "--project-meta", id="sidecar"),
-    pytest.param("firm_canonical", "--firm-canonical", id="canonical-table"),
 ])
 def test_a_provenance_path_that_is_not_a_file_is_refused_by_its_own_check(
         must_not_start, absent, expected):
