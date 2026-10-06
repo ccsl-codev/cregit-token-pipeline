@@ -32,6 +32,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 # The scripts sit at the repository root and form no package.
 py-modules = [
+    "build_manifest",
     "consolidate",
     "ctp",
     "file_mask",
