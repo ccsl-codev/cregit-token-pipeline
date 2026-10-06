@@ -2374,6 +2374,27 @@ def test_census_retries_a_failure_within_the_run(sandbox, fake_projects, no_gate
     assert fake.calls[2][3] == 2 and results["a"] == ctp.RunOutcome.DONE
 
 
+def test_census_gives_up_on_a_project_that_keeps_killing_its_run(
+        sandbox, fake_projects, no_gates, capsys):
+    log = sandbox.root / "ledger.jsonl"
+    for run in ("r1", "r2"):
+        ledger.append(log, {"project": "a", "run_id": run, "attempt": 1,
+                            "step": "pipeline", "status": "started"})
+    fake = fake_projects()
+    ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
+    assert fake.calls == []
+    assert "failed 2 times (last at pipeline (interrupted))" in capsys.readouterr().out
+
+
+def test_one_interrupted_run_is_retried(sandbox, fake_projects, no_gates):
+    ledger.append(sandbox.root / "ledger.jsonl", {"project": "a", "run_id": "r1",
+                                                  "attempt": 1, "step": "pipeline",
+                                                  "status": "started"})
+    fake = fake_projects()
+    ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
+    assert fake.calls == [("a", 1, 1, 2, False)]
+
+
 def test_census_without_retries_runs_a_failure_once(sandbox, fake_projects, no_gates):
     fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED] * 3})
     results = ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.01)

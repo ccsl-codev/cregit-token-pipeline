@@ -72,20 +72,29 @@ class History:
     failures: int = 0          # final rows with state failed
     attempts: int = 0          # final rows of any state except skipped and deferred
     last_failed_step: str = ""
+    interrupted: int = 0       # runs whose attempt started a step and never finished
     rows: list = field(default_factory=list)
 
 
 def histories(rows: list[dict]) -> dict[str, History]:
-    """project name -> History, in ledger order."""
+    """project name -> History, in ledger order. A run that started a step of a
+    project and wrote no final row for it died mid-step: that counts as an
+    interrupted attempt, so a project that kills its machine is not retried forever."""
     out: dict[str, History] = {}
+    started: dict[tuple, str] = {}
+    finished: set[tuple] = set()
     for row in rows:
         name = row.get("project")
         if not name:
             continue
         h = out.setdefault(name, History())
         h.rows.append(row)
+        key = (name, row.get("run_id"), row.get("attempt"))
+        if row.get("status") == "started":
+            started[key] = row.get("step", "")   # the last step it started
         if row.get("step") != FINAL_STEP:
             continue
+        finished.add(key)
         state = row.get("state", "")
         if state in (SKIPPED, DEFERRED):
             continue
@@ -94,6 +103,12 @@ def histories(rows: list[dict]) -> dict[str, History]:
         if state == FAILED:
             h.failures += 1
             h.last_failed_step = row.get("failed_step", "")
+    for key, step in started.items():
+        if key not in finished:
+            h = out[key[0]]
+            h.interrupted += 1
+            h.attempts += 1
+            h.last_failed_step = f"{step} (interrupted)"
     return out
 
 

@@ -70,6 +70,19 @@ def test_histories_take_the_last_final_state_and_count_failures():
     assert h["b"].state == "" and h["b"].attempts == 0
 
 
+def test_an_attempt_that_died_mid_step_counts_as_interrupted():
+    rows = [{"project": "a", "run_id": "r1", "attempt": 1, "step": "clone", "status": "started"},
+            {"project": "a", "run_id": "r1", "attempt": 1, "step": "clone", "status": "ok"},
+            {"project": "a", "run_id": "r1", "attempt": 1, "step": "pipeline",
+             "status": "started"},
+            {"project": "a", "run_id": "r2", "attempt": 1, "step": "pipeline",
+             "status": "started"},
+            {"project": "a", "run_id": "r2", "attempt": 1, "step": "project", "state": "done"}]
+    h = ledger.histories(rows)["a"]
+    assert h.interrupted == 1 and h.attempts == 2 and h.failures == 0
+    assert h.last_failed_step == "pipeline (interrupted)" and h.state == "done"
+
+
 def test_project_rows_filters_by_name():
     rows = [final("a", "done"), final("b", "done"), {"project": "a", "step": "x"}]
     assert ledger.project_rows(rows, "a") == [rows[0], rows[2]]

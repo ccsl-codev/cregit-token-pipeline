@@ -1444,7 +1444,7 @@ def plan(project: dict, history: ledger.History, retries: int) -> str:
     stamped = (OUT / name / f"{name}.validated").exists()
     if history.state == ledger.DONE and stamped:
         return SKIP
-    if history.failures > retries:
+    if history.failures + history.interrupted > retries:
         return GIVE_UP
     # Validated but not done: a crash after validation, a done-dirty cleanup, or
     # a project an earlier `ctp.py run` validated. Only the later steps run.
@@ -1490,11 +1490,13 @@ def schedule(projects: list[dict], workers: int, retries: int, stop_file: Path,
         if decision == SKIP:
             results[name] = RunOutcome.SKIPPED
         elif decision == GIVE_UP:
-            say(f"{name} — failed {h.failures} times (last at {h.last_failed_step or '?'}), "
-                f"more than --retries {retries}; not retried")
+            say(f"{name} — failed {h.failures + h.interrupted} times "
+                f"(last at {h.last_failed_step or '?'}), more than --retries {retries}; "
+                "not retried")
             results[name] = RunOutcome.FAILED
         else:
-            queue.append(Job(pos, project, h.attempts + 1, h.failures, decision == POST))
+            queue.append(Job(pos, project, h.attempts + 1, h.failures + h.interrupted,
+                             decision == POST))
     skipped = sum(1 for v in results.values() if v == RunOutcome.SKIPPED)
     say(f"census: {total} projects, {skipped} already done, {len(queue)} to run, "
         f"{workers} workers")
