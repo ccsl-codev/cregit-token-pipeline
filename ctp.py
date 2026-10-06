@@ -37,7 +37,8 @@ from file_mask import UNIVERSAL_MASK
 # resume if the command path string drifts (/home vs /local/home symlink alias).
 CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
-_cfg.read(CORPUS / "pipeline.cfg")
+# pipeline.cfg here, or the file CTP_CONFIG names; retain and consolidate read the same.
+_cfg.read(retain.CONFIG)
 
 
 def _cfg_path(key: str, default: str) -> Path:
@@ -1215,6 +1216,10 @@ def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
         "argv": sys.argv[1:],
     }
     flags["manifest_path"] = str(manifest)
+    flags["config_path"] = str(retain.CONFIG)
+    flags["config_sha256"] = sha256_file(retain.CONFIG) if retain.CONFIG.is_file() else ""
+    flags["cregit_dir"] = str(CREGIT)
+    flags["output_dir"] = str(OUT)
     try:
         flags["manifest_sha256"] = sha256_file(manifest)
     except OSError:
@@ -1222,8 +1227,15 @@ def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
     return flags
 
 
+def forward_config() -> None:
+    """A step that reads the config (the join, a rebuild) must read this run's file."""
+    if os.environ.get("CTP_CONFIG"):
+        _ENV["CTP_CONFIG"] = str(retain.CONFIG)
+
+
 def start_ledger_run(args: argparse.Namespace, manifest: Path, command: str) -> None:
     """Fill _RUN, then append the run-start row."""
+    forward_config()
     _RUN.clear()
     _RUN["run_id"] = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
     _RUN["tools"] = tool_versions()
@@ -1651,6 +1663,7 @@ def cmd_db(args: argparse.Namespace) -> int:
     """Rebuild ctp.duckdb (derived index over stamps/metrics/parquets)."""
     OUT.mkdir(parents=True, exist_ok=True)
     _ENV.update(capture_devenv_env())
+    forward_config()
     manifests = [arg for m in (getattr(args, "manifest", None) or [])
                  for arg in ("--manifest", str((CORPUS / m).resolve()))]
     return subprocess.run(["python3", str(CORPUS / "consolidate.py"), *manifests],

@@ -1308,3 +1308,26 @@ def test_disk_bytes_counts_a_tree_and_survives_a_missing_path(out):
     workdir = full_workdir(out)
     assert retain.disk_bytes(workdir / "memo") >= 14000
     assert retain.disk_bytes(workdir / "absent") == 0
+
+
+# --------------------------------------------------------------------------- #
+# config_path: pipeline.cfg, or the file CTP_CONFIG names
+# --------------------------------------------------------------------------- #
+
+def test_config_path_defaults_to_the_repository_file(monkeypatch):
+    monkeypatch.delenv("CTP_CONFIG", raising=False)
+    assert retain.config_path() == retain.CORPUS / "pipeline.cfg"
+
+
+def test_config_path_follows_ctp_config(monkeypatch, tmp_path):
+    cfg = tmp_path / "e2e.cfg"
+    cfg.write_text("[paths]\n")
+    monkeypatch.setenv("CTP_CONFIG", str(cfg))
+    assert retain.config_path() == cfg.resolve()
+
+
+def test_a_ctp_config_that_names_no_file_stops(monkeypatch, tmp_path):
+    """The defaults point at a live dataset, so a typo must not fall back to them."""
+    monkeypatch.setenv("CTP_CONFIG", str(tmp_path / "typo.cfg"))
+    with pytest.raises(SystemExit, match="is not a file"):
+        retain.config_path()

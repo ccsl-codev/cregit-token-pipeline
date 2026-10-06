@@ -18,12 +18,12 @@ from pathlib import Path
 
 import duckdb
 
-from retain import project_state
+from retain import CONFIG, project_state
 from validate_schema import EXPECTED_COLUMNS, compare_schema, read_schema
 
 CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
-_cfg.read(CORPUS / "pipeline.cfg")
+_cfg.read(CONFIG)
 OUT = (CORPUS / Path(_cfg.get("paths", "output_dir",
        fallback="../cregit-workspace/corpus-files")).expanduser()).resolve()
 DB = CORPUS / "ctp.duckdb"
