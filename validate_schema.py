@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Schema gate: every parquet must carry the 70 columns of EXPECTED_COLUMNS.
+"""Schema gate: every parquet must carry the 67 columns of EXPECTED_COLUMNS.
 Usage: validate_schema.py <parquet>...  |  --emit-contract <parquet> (print, no check).
 Exit 0 all match, 1 any drift (all drifts printed), 2 usage. duckdb is imported lazily."""
 from __future__ import annotations
@@ -67,11 +67,6 @@ EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("person_name", "VARCHAR"),
     ("person_email", "VARCHAR"),
     ("person_domain", "VARCHAR"),
-    # A per-row join of person_domain against the caller's --firm-map CSV, so these
-    # can differ within one project. All three are '' when the domain is not mapped.
-    ("firm_raw", "VARCHAR"),
-    ("firm", "VARCHAR"),
-    ("firm_source", "VARCHAR"),
     ("repo_tag", "VARCHAR"),
     ("footer_signed_off_by", "VARCHAR[]"),
     ("footer_co_authored_by", "VARCHAR[]"),

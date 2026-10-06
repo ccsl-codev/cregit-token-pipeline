@@ -412,7 +412,6 @@ _SWITCH_FLAGS = (("skip_html", "--skip-html"), ("reblame", "--reblame"),
 # The runner calls blame_jobs --jobs; ctp's own --jobs means concurrent projects.
 _VALUE_FLAGS = (("gc", "--gc"), ("blame_jobs", "--jobs"),
                 ("memory_limit", "--memory-limit"), ("duckdb_threads", "--duckdb-threads"))
-_FIRM_FLAGS = (("firm_map", "--firm-map"), ("firm_canonical", "--firm-canonical"))
 
 
 def value_args(opts: dict, table: tuple) -> list[str]:
@@ -443,8 +442,6 @@ def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     # The sidecar is keyed by manifest name; the generator refuses a key it cannot find.
     if opts.get("project_meta"):
         pipeline_args += ["--project-meta", str(opts["project_meta"]), "--project-key", name]
-    if opts.get("firm_map"):
-        pipeline_args += value_args(opts, _FIRM_FLAGS)
     # FROM_STEP is positional and must come last.
     from_step = opts.get("from_step", 1)
     if from_step > 1:
@@ -674,68 +671,29 @@ def resolve_project_meta(path: str) -> str:
     return str(Path(path).resolve())
 
 
-def resolve_firm_paths(firm_map: str, firm_canonical: str) -> tuple[str, str]:
-    if not firm_map:
-        if firm_canonical:
-            sys.exit("--firm-canonical without --firm-map has no firm_raw to "
-                     "canonicalise. Pass a domain-to-firm CSV via --firm-map too.")
-        return "", ""
-    if not Path(firm_map).is_file():
-        sys.exit(f"--firm-map {firm_map} is not a file. Supply a "
-                 "domain-to-firm CSV; this tool only joins it in, it does "
-                 "not build one.")
-    refuse_unless_runner_accepts(
-        "--firm-map", ("--firm-map", "--firm-canonical"),
-        "\nThat checkout would run step 10 without the firm join, so "
-        "every Parquet would carry three blank firm columns.")
-    if firm_canonical and not Path(firm_canonical).is_file():
-        sys.exit(f"--firm-canonical {firm_canonical} is not a file.")
-    return (str(Path(firm_map).resolve()),
-            str(Path(firm_canonical).resolve()) if firm_canonical else "")
-
-
-def resolve_provenance_paths(args: argparse.Namespace) -> tuple[str, str, str]:
-    """--project-meta, --firm-map and --firm-canonical as absolute paths ("" when
-    omitted). Exits on a missing file or a flag the checkout does not accept."""
-    project_meta = resolve_project_meta(args.project_meta) if args.project_meta else ""
-    # A firm map that never arrives does not fail the run: it publishes blank
-    # firm columns across the whole corpus.
-    return (project_meta, *resolve_firm_paths(args.firm_map, args.firm_canonical))
-
-
-def provenance_gaps(project_meta: str, firm_map: str, firm_canonical: str) -> list[tuple[str, str]]:
+def provenance_gaps(project_meta: str) -> list[tuple[str, str]]:
     """(flag, what publishing without it costs) for each missing provenance flag."""
-    gaps: list[tuple[str, str]] = []
-    if not project_meta:
-        gaps.append(("--project-meta",
-                     "29 provenance columns empty on every row: clone_url, "
-                     "provenance_status, source, stratum, fact, contested, "
-                     "label_date, owner, repo, roster_name, roster_lang, "
-                     "language, commits, size_class, size_kb, stars, pushed_at, "
-                     "license, owner_type, archived, fork, history_cluster, "
-                     "history_shared_with, history_relation, history_includes, "
-                     "history_first, history_created, manifest_category, "
-                     "file_mask"))
-    if not firm_map:
-        gaps.append(("--firm-map",
-                     "3 firm columns empty on every row: firm_raw, firm, firm_source"))
-    elif not firm_canonical:
-        # Not an empty column, a wrong one: `firm` gets firm_raw's value verbatim.
-        gaps.append(("--firm-canonical",
-                     "`firm` repeats `firm_raw` instead of the reviewed canonical name"))
-    return gaps
+    if project_meta:
+        return []
+    return [("--project-meta",
+             "29 provenance columns empty on every row: clone_url, "
+             "provenance_status, source, stratum, fact, contested, "
+             "label_date, owner, repo, roster_name, roster_lang, "
+             "language, commits, size_class, size_kb, stars, pushed_at, "
+             "license, owner_type, archived, fork, history_cluster, "
+             "history_shared_with, history_relation, history_includes, "
+             "history_first, history_created, manifest_category, "
+             "file_mask")]
 
 
 PROVENANCE_REFUSAL_TAIL = (
-    "This does not fail anything. The file keeps all 70 columns in the "
+    "This does not fail anything. The file keeps all 67 columns in the "
     "right order, so validate.py passes it and no consumer can tell a "
     "blank column from provenance that is genuinely unknown, which is "
     "why a long, expensive run can finish and publish silently "
     "inconsistent with the rest of the corpus.\n"
-    "Pass the flags this run is missing:\n"
-    "  --project-meta <your-project-meta>.json \\\n"
-    "  --firm-map <your-firm-map>.csv \\\n"
-    "  --firm-canonical <your-firm-canonical>.csv\n"
+    "Pass the flag this run is missing:\n"
+    "  --project-meta <your-project-meta>.json\n"
     "If blank columns are genuinely what you want — a fixture, a "
     "one-project smoke run, a corpus whose sidecar does not exist yet — "
     "say so with --allow-empty-provenance.")
@@ -747,10 +705,10 @@ def enforce_provenance(gaps: list[tuple[str, str]], args: argparse.Namespace) ->
     a blank column from provenance that is genuinely unknown."""
     allow_empty = bool(args.allow_empty_provenance)
     if allow_empty and not gaps:
-        sys.exit("--allow-empty-provenance has nothing to allow: --project-meta, "
-                 "--firm-map and --firm-canonical are all present, so no column "
-                 "would be blank. Drop the flag — left in a wrapper it would "
-                 "silence the guard on the next run that does omit one.")
+        sys.exit("--allow-empty-provenance has nothing to allow: --project-meta "
+                 "is present, so no column would be blank. Drop the flag — left "
+                 "in a wrapper it would silence the guard on the next run that "
+                 "omits --project-meta.")
     if not gaps or args.from_step > DATASET_STEP:
         return
     itemised = "".join(f"  {flag} absent — {cost}\n" for flag, cost in gaps)
@@ -805,8 +763,8 @@ def announce_run(opts: dict, jobs: int) -> None:
 def run_options(args: argparse.Namespace) -> dict:
     """The checked options run_project reads through _OPTS. Exits on a refusal."""
     mask_widened, retokenize = preflight_runner_flags(args)
-    project_meta, firm_map, firm_canonical = resolve_provenance_paths(args)
-    enforce_provenance(provenance_gaps(project_meta, firm_map, firm_canonical), args)
+    project_meta = resolve_project_meta(args.project_meta) if args.project_meta else ""
+    enforce_provenance(provenance_gaps(project_meta), args)
     return dict(skip_html=args.skip_html, drop_memo=args.drop_memo,
                 reblame=args.reblame,
                 memo_dir=args.memo_dir,
@@ -819,8 +777,7 @@ def run_options(args: argparse.Namespace) -> dict:
                 memory_limit=args.memory_limit,
                 duckdb_threads=args.duckdb_threads,
                 mask=args.mask,
-                project_meta=project_meta,
-                firm_map=firm_map, firm_canonical=firm_canonical)
+                project_meta=project_meta)
 
 
 def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
@@ -1014,14 +971,8 @@ def main() -> int:
                        help="JSON provenance sidecar keyed by project name (format: "
                             "validate_schema.py, above EXPECTED_COLUMNS). Without it "
                             "29 columns are blank and ctp refuses the run")
-    run_p.add_argument("--firm-map", default="", metavar="PATH",
-                       help="domain->firm CSV joined against person_domain. Without "
-                            "it 3 firm columns are blank and ctp refuses the run")
-    run_p.add_argument("--firm-canonical", default="", metavar="PATH",
-                       help="canonical firm-name CSV. Needs --firm-map. Without it "
-                            "`firm` repeats `firm_raw` and ctp refuses the run")
     run_p.add_argument("--allow-empty-provenance", action="store_true",
-                       help="publish with blank provenance or firm columns, e.g. "
+                       help="publish with blank provenance columns, e.g. "
                             "for a fixture or a smoke run. Refused when nothing "
                             "would be blank")
     run_p.add_argument("--mask", default="", metavar="REGEX",
