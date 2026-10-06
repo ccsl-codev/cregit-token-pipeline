@@ -77,9 +77,11 @@ def u_of(slug: str) -> float:
 
 
 def project_name(host: str, slug: str) -> str:
-    """owner__repo for GitHub, host__owner__repo elsewhere. One plain directory name."""
+    """owner__repo for GitHub, host__owner__repo elsewhere. One plain directory name.
+    A host other than GitHub can keep repositories at its root (a Gerrit server such
+    as git.libreoffice.org): there the slug is one segment and the host is the owner."""
     parts = [p for p in slug.strip("/").split("/") if p]
-    if len(parts) < 2:
+    if len(parts) < (2 if host == DEFAULT_HOST else 1):
         raise FrameError(f"slug {slug!r} is not owner/repo")
     if host != DEFAULT_HOST:
         parts.insert(0, host)
@@ -168,6 +170,7 @@ def meta_record(r: dict, status: str) -> dict:
     source = r["row"]
     rec = {f: (source.get(f) or "").strip() for f in META_FIELDS}
     owner, _, repo = r["slug"].rpartition("/")
+    owner = owner or r["host"]  # a repository at the root of its host
     rec["owner"] = rec["owner"] or owner
     rec["repo"] = rec["repo"] or repo
     rec["clone_url"] = r["url"]

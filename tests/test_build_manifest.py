@@ -188,6 +188,12 @@ def test_a_non_github_host_prefixes_the_name():
     assert bm.project_name("github.com", "o/r") == "o__r"
 
 
+def test_a_repository_at_the_root_of_a_non_github_host_is_named_after_the_host():
+    assert bm.project_name("git.libreoffice.org", "libvisio") == "git.libreoffice.org__libvisio"
+    with pytest.raises(bm.FrameError, match="not owner/repo"):
+        bm.project_name("github.com", "libvisio")
+
+
 def test_limit_below_one_is_a_usage_error(tmp_path):
     with pytest.raises(SystemExit):
         bm.main([str(FIXTURE), "--manifest", str(tmp_path / "m"),
