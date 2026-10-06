@@ -30,6 +30,8 @@ way. The authority on the schema is `validate_schema.py`, not any document.
 # 1. point pipeline.cfg at a cregit master checkout (bb6f985 or later), and an output dir
 # 2. write a manifest: a TSV file, one project per line, five fields —
 #    name  url  category  file_filter  size_class
+#    and an optional sixth, commit: a 40-hex SHA to pin. A pinned project is
+#    cloned at exactly that commit; a five-field row runs the remote HEAD.
 #    manifest.tsv in this repository is the worked example: 4 small public
 #    pilot projects (jq, zstd, libuv, tmux). Write your own for a real run.
 M=manifest.tsv

@@ -22,6 +22,7 @@ from pathlib import Path
 
 import configparser
 
+import pin
 import retain
 from retain import lock_path, state_dir
 from file_mask import UNIVERSAL_MASK
@@ -68,6 +69,10 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 DATASET_STEP = 10
 
 MANIFEST_FIELDS = ("name", "url", "category", "file_filter", "size_class")
+# An optional sixth column pins the commit to analyse. A five-column row runs the
+# remote's HEAD at clone time, and the record says "unpinned".
+PINNED_FIELD = "commit"
+UNPINNED = "unpinned"
 SIZE_CLASSES = ("S", "M", "L")
 
 _metrics_lock = threading.Lock()
@@ -91,10 +96,16 @@ def read_manifest(path: Path, only: set | None) -> list[dict]:
         if not line.strip() or line.startswith("#"):
             continue
         fields = line.split("\t")
-        if len(fields) != len(MANIFEST_FIELDS):
+        if len(fields) not in (len(MANIFEST_FIELDS), len(MANIFEST_FIELDS) + 1):
             raise ValueError(f"{path}:{lineno}: expected {len(MANIFEST_FIELDS)} tab-separated"
-                             f" fields, got {len(fields)}: {line!r}")
+                             f" fields, or {len(MANIFEST_FIELDS) + 1} with a pinned commit,"
+                             f" got {len(fields)}: {line!r}")
         row = dict(zip(MANIFEST_FIELDS, fields))
+        if len(fields) > len(MANIFEST_FIELDS):
+            row[PINNED_FIELD] = fields[-1]
+            if not pin.SHA_RE.match(row[PINNED_FIELD]):
+                raise ValueError(f"{path}:{lineno}: commit {row[PINNED_FIELD]!r} is not a"
+                                 " 40-character lowercase hex SHA")
         if row["size_class"] not in SIZE_CLASSES:
             raise ValueError(f"{path}:{lineno}: size_class {row['size_class']!r}"
                              f" is not one of {', '.join(SIZE_CLASSES)}")
@@ -419,17 +430,71 @@ def value_args(opts: dict, table: tuple) -> list[str]:
     return [arg for opt, flag in table if opts.get(opt) for arg in (flag, str(opts[opt]))]
 
 
+def pinned_clone_path(name: str) -> Path:
+    """Where the clone step stages a pinned project. Outside the workdir, because
+    the runner deletes the workdir at step 1."""
+    return OUT / pin.STAGING_DIR / f"{name}.git"
+
+
+def pin_result_path(name: str) -> Path:
+    return state_dir(name) / "pin.json"
+
+
+def commit_url(url: str) -> str:
+    """The runner's own default, from the real URL rather than the staging path."""
+    return url.removesuffix(".git").rstrip("/") + "/commit/"
+
+
+def pin_args(project: dict) -> list[str]:
+    name = project["name"]
+    return ["python3", str(CORPUS / "pin.py"),
+            "--url", project["url"], "--commit", project[PINNED_FIELD],
+            "--dest", str(pinned_clone_path(name)), "--result", str(pin_result_path(name))]
+
+
+def git_head(repo: Path) -> str:
+    """HEAD of repo, or "" when repo is absent or git cannot read it."""
+    if not repo.exists():
+        return ""
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD^{commit}"],
+                              env=_ENV or None, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    out = (getattr(proc, "stdout", "") or "").strip() if proc.returncode == 0 else ""
+    return out if pin.SHA_RE.match(out) else ""
+
+
+def runner_checkout(name: str, workdir: Path) -> str:
+    """The commit the runner checked out for blame (step 6), from its working clone."""
+    return git_head(workdir / f"{name}-original")
+
+
+def drop_pinned_clone(name: str) -> list[str]:
+    """Delete the staging clone. Returns the errors, empty when it is gone."""
+    target = pinned_clone_path(name)
+    if not target.exists() and not target.is_symlink():
+        return []
+    if target.is_symlink() or target.resolve().parent != (OUT / pin.STAGING_DIR).resolve():
+        return [f"refusing to delete {target}: not a directory inside {OUT / pin.STAGING_DIR}"]
+    return retain.remove_tree(target)
+
+
 def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     """The run_pipeline_process.sh argv for one project. Assumes check_memo_dir
     has already refused an unsafe --memo-dir."""
     name = project["name"]
+    pinned = bool(project.get(PINNED_FIELD))
     pipeline_args = [
         "./run_pipeline_process.sh",
-        "--repo-url", project["url"],
+        "--repo-url", str(pinned_clone_path(name)) if pinned else project["url"],
         "--repo-name", name,
         "--work", str(workdir),
         "--mask", opts.get("mask") or project["file_filter"],
     ]
+    if pinned:
+        # The runner derives commit links from --repo-url, which is now a local path.
+        pipeline_args += ["--commit-url", commit_url(project["url"])]
     pipeline_args += [flag for opt, flag in _SWITCH_FLAGS if opts.get(opt)]
     pipeline_args += value_args(opts, (("retokenize", "--retokenize"),))
     # One subdirectory per project: tokenBySha.pl keys the memo on the content
@@ -472,6 +537,21 @@ def run_phases(project: dict, phases: list[tuple]) -> int:
     return 0
 
 
+def checkout_matches(name: str, workdir: Path, pinned: str) -> bool:
+    """Says which commit the runner blamed. False when a pinned project's
+    checkout is not the pinned commit, or cannot be read."""
+    seen = runner_checkout(name, workdir)
+    if not pinned:
+        say(f"{name} — unpinned, checked out {seen or 'an unreadable HEAD'}")
+        return True
+    if seen != pinned:
+        say(f"{name} ✗ pinned {pinned}, but the runner checked out "
+            f"{seen or 'an unreadable HEAD'}")
+        return False
+    say(f"{name} — checked out the pinned commit {pinned}")
+    return True
+
+
 def run_project(project: dict) -> RunOutcome:
     """Runs one project's pipeline, firm and validate phases. Returns a RunOutcome."""
     name = project["name"]
@@ -499,13 +579,25 @@ def run_project(project: dict) -> RunOutcome:
             if not check_memo_dir(name, _OPTS, workdir):
                 return RunOutcome.FAILED
 
+            pinned = project.get(PINNED_FIELD, "")
             try:
-                rc = run_phases(project, project_phases(project, _OPTS, workdir, stamp))
+                rc = 0
+                if pinned:
+                    rc = run_phase(project, "clone", pin_args(project))
+                pipeline, *later = project_phases(project, _OPTS, workdir, stamp)
+                if rc == 0:
+                    rc = run_phase(project, *pipeline)
+                if rc == 0 and not checkout_matches(name, workdir, pinned):
+                    rc = 1
+                if rc == 0:
+                    rc = run_phases(project, later)
             except OSError as exc:
                 say(f"{name} ✗ a phase could not start: {exc}")
                 return RunOutcome.FAILED
             if rc != 0:
                 return RunOutcome.FAILED
+            for err in drop_pinned_clone(name):
+                say(f"{name} — staging clone not fully removed: {err}")
 
             if _OPTS.get("drop_memo"):
                 # prune checks the keepers itself.
@@ -827,11 +919,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     _OPTS.update(run_options(args))
+    if any(p.get(PINNED_FIELD) for p in projects):
+        refuse_unless_runner_accepts(
+            "a pinned manifest", ("--commit-url",),
+            " Pinned projects run from a local staging clone, so the runner needs "
+            "--commit-url to keep the real commit links.")
     announce_run(_OPTS, args.jobs)
 
     run_start = time.time()
     say("capturing devenv environment (once)...")
     _ENV.update(capture_devenv_env())
+    # A deleted or private repository must fail its clone, not wait for a password.
+    _ENV.setdefault("GIT_TERMINAL_PROMPT", "0")
     say(f"devenv environment captured ({len(_ENV)} vars)")
     with RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-start\tjobs={args.jobs}\tprojects={len(projects)}\n")

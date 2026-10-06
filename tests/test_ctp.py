@@ -53,32 +53,62 @@ REAL_RUNNER_USAGE = """\
 """
 
 
+PINNED_SHA = "0123456789abcdef0123456789abcdef01234567"
+OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+PINNED_ROW = VALID_ROW + "\t" + PINNED_SHA
+
+# The script each python3 step runs, by phase.
+STEP_SCRIPTS = {"pin.py": "clone", "firm_attribution.py": "firm", "validate.py": "validate",
+                "validate_schema.py": "schema", "consolidate.py": "join"}
+
+
 class FakeRunner:
-    """Recording stand-in for subprocess.Popen. Returns a scripted rc per phase
-    and writes the stamp when validate succeeds, as validate.py does."""
+    """Recording stand-in for subprocess.Popen and subprocess.run. Returns a
+    scripted rc per phase, writes the stamp when validate succeeds, as
+    validate.py does, and the result file when clone succeeds, as pin.py does.
+    `checkout` is the HEAD that `git rev-parse` reports for the runner's clone."""
 
     def __init__(self, *, pipeline_rc=0, firm_rc=0, validate_rc=0, raise_on=None,
-                 payload=b""):
+                 payload=b"", rcs=None, checkout=PINNED_SHA):
         self.calls: list[SimpleNamespace] = []
-        self.rcs = {"pipeline": pipeline_rc, "firm": firm_rc, "validate": validate_rc}
+        self.rcs = {"pipeline": pipeline_rc, "firm": firm_rc, "validate": validate_rc,
+                    **(rcs or {})}
         self.raise_on = raise_on
         self.payload = payload
+        self.checkout = checkout
 
     @staticmethod
     def phase_of(args) -> str:
         if str(args[0]).endswith("run_pipeline_process.sh"):
             return "pipeline"
-        return "firm" if str(args[1]).endswith("firm_attribution.py") else "validate"
+        if args[0] == "git":
+            return "git"
+        return STEP_SCRIPTS.get(Path(args[1]).name, "validate") if len(args) > 1 else "validate"
+
+    def rc_of(self, phase: str) -> int:
+        return self.rcs.get(phase, 0)
 
     def __call__(self, args, **kwargs):
         phase = self.phase_of(args)
         self.calls.append(SimpleNamespace(phase=phase, args=list(args), kwargs=kwargs))
         if self.raise_on == phase:
             raise OSError(f"no such file or directory: {args[0]}")
+        if phase == "git":
+            return SimpleNamespace(returncode=0, stdout=f"{self.checkout}\n")
         stream = kwargs.get("stdout")
         if self.payload and hasattr(stream, "write"):
             stream.write(self.payload)
-        rc = self.rcs[phase]
+        rc = self.rc_of(phase)
+        if phase == "pipeline" and rc == 0 and "--commit-url" in args:
+            # A pinned run's working clone, which runner_checkout reads. Unpinned
+            # runs leave none, so a test that fakes only Popen starts no git.
+            work = Path(args[args.index("--work") + 1])
+            name = args[args.index("--repo-name") + 1]
+            (work / f"{name}-original").mkdir(parents=True, exist_ok=True)
+        if phase == "clone" and rc == 0:
+            commit = args[args.index("--commit") + 1]
+            Path(args[args.index("--result") + 1]).write_text(
+                f'{{"pinned_sha": "{commit}", "checked_out_sha": "{commit}"}}\n')
         if phase == "validate" and rc == 0:
             stamp = Path(args[3])
             # A relative stamp path would escape tmp_path into the repository.
@@ -1554,3 +1584,140 @@ def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq)
     ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
     argv = runner.argv("pipeline")
     assert argv[argv.index("--mask") + 1] == r"\.java$"
+
+
+
+# --------------------------------------------------------------------------- #
+# pinned commit
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def pinned_jq(jq):
+    return {**jq, "commit": PINNED_SHA}
+
+
+def test_manifest_reads_a_sixth_column_as_the_pinned_commit(tmp_path):
+    [row] = ctp.read_manifest(write_manifest(tmp_path, PINNED_ROW), None)
+    assert row["commit"] == PINNED_SHA
+
+
+def test_manifest_without_the_column_is_unpinned(tmp_path):
+    [row] = ctp.read_manifest(write_manifest(tmp_path, VALID_ROW), None)
+    assert "commit" not in row
+
+
+@pytest.mark.parametrize("commit", ["abc123", PINNED_SHA.upper(), PINNED_SHA + "0", ""])
+def test_manifest_rejects_a_commit_that_is_not_a_full_sha(tmp_path, commit):
+    with pytest.raises(ValueError, match="40-character"):
+        ctp.read_manifest(write_manifest(tmp_path, f"{VALID_ROW}\t{commit}"), None)
+
+
+def test_manifest_rejects_seven_fields(tmp_path):
+    with pytest.raises(ValueError, match="pinned commit"):
+        ctp.read_manifest(write_manifest(tmp_path, f"{PINNED_ROW}\textra"), None)
+
+
+def test_a_pinned_project_clones_first_then_runs_from_the_staging_clone(
+        sandbox, runner, pinned_jq):
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["clone", "pipeline", "git", "firm", "validate"]
+    staging = sandbox.out / ".ctp-pinned" / "jq.git"
+    assert runner.argv("clone") == [
+        "python3", str(sandbox.root / "pin.py"),
+        "--url", "https://github.com/jqlang/jq.git", "--commit", PINNED_SHA,
+        "--dest", str(staging), "--result", str(ctp.pin_result_path("jq"))]
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--repo-url") + 1] == str(staging)
+    assert argv[argv.index("--commit-url") + 1] == "https://github.com/jqlang/jq/commit/"
+
+
+def test_an_unpinned_project_clones_the_url_itself(runner, jq):
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate"]
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--repo-url") + 1] == jq["url"]
+    assert "--commit-url" not in argv
+
+
+def test_a_failed_clone_stops_before_the_pipeline(monkeypatch, pinned_jq):
+    r = FakeRunner(rcs={"clone": 3})
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    assert [c.phase for c in r.calls] == ["clone"]
+
+
+def test_a_checkout_that_differs_from_the_pin_fails_the_project(
+        monkeypatch, capsys, pinned_jq):
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    assert "validate" not in [c.phase for c in r.calls]
+    assert f"but the runner checked out {OTHER_SHA}" in capsys.readouterr().out
+
+
+def test_an_unreadable_checkout_fails_a_pinned_project(monkeypatch, pinned_jq):
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
+    monkeypatch.setattr(ctp, "runner_checkout", lambda name, workdir: "")
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+
+
+def test_the_staging_clone_is_removed_once_the_project_validates(sandbox, runner, pinned_jq):
+    staging = ctp.pinned_clone_path("jq")
+    staging.mkdir(parents=True)
+    (staging / "HEAD").write_text("ref: refs/heads/master\n")
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert not staging.exists()
+
+
+def test_a_symlinked_staging_clone_is_not_followed(sandbox, tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("x")
+    staging = ctp.pinned_clone_path("jq")
+    staging.parent.mkdir(parents=True)
+    staging.symlink_to(victim)
+    assert ctp.drop_pinned_clone("jq")
+    assert (victim / "keep").exists()
+
+
+def test_git_head_is_empty_for_a_missing_repo(tmp_path):
+    assert ctp.git_head(tmp_path / "absent") == ""
+
+
+@pytest.mark.parametrize("result, expected", [
+    (SimpleNamespace(returncode=0, stdout=f"{PINNED_SHA}\n"), PINNED_SHA),
+    (SimpleNamespace(returncode=0, stdout="not a sha\n"), ""),
+    (SimpleNamespace(returncode=128, stdout=f"{PINNED_SHA}\n"), ""),
+])
+def test_git_head_returns_only_a_full_sha(monkeypatch, tmp_path, result, expected):
+    monkeypatch.setattr(ctp.subprocess, "run", lambda *a, **k: result)
+    assert ctp.git_head(tmp_path) == expected
+
+
+def test_git_head_is_empty_when_git_cannot_start(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise OSError("no git")
+    monkeypatch.setattr(ctp.subprocess, "run", boom)
+    assert ctp.git_head(tmp_path) == ""
+
+
+def test_a_pinned_manifest_needs_a_runner_with_commit_url(must_not_start, runner_script):
+    runner_script(REAL_RUNNER_USAGE.replace("--commit-url", "--commit-link"))
+    write_manifest(must_not_start.root, PINNED_ROW)
+    with pytest.raises(SystemExit, match="--commit-url"):
+        ctp.cmd_run(run_args())
+
+
+def test_a_pinned_manifest_runs_on_a_runner_with_commit_url(ready):
+    write_manifest(ready.root, PINNED_ROW)
+    assert ctp.cmd_run(run_args()) == 0
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://github.com/jqlang/jq.git", "https://github.com/jqlang/jq/commit/"),
+    ("https://gitlab.com/a/b/", "https://gitlab.com/a/b/commit/"),
+    ("https://example.org/r", "https://example.org/r/commit/"),
+])
+def test_commit_url_matches_the_runner_default(url, expected):
+    assert ctp.commit_url(url) == expected

@@ -637,3 +637,14 @@ def test_a_parquet_whose_schema_cannot_be_read_stays_in_and_is_reported(
     assert "schema not read for 1 of 1 parquet(s)" in captured.err
     assert "jq-dataset.parquet" in captured.err
     assert "schema mismatch" not in captured.out
+
+
+def test_project_rows_reads_a_pinned_six_column_row(sandbox):
+    write_manifest(sandbox.root, ROW + "\t" + "a" * 40)
+    assert [r[0] for r in consolidate.project_rows()] == ["jq"]
+
+
+def test_project_rows_rejects_seven_fields(sandbox):
+    write_manifest(sandbox.root, ROW + "\t" + "a" * 40 + "\textra")
+    with pytest.raises(ValueError, match="5 or 6"):
+        consolidate.project_rows()

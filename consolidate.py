@@ -85,7 +85,12 @@ def manifest_entries(manifests: Sequence[Path]):
         for line in Path(manifest).read_text().splitlines():
             if not line.strip() or line.startswith("#"):
                 continue
-            name, url, category, _file_filter, size_class = line.split("\t")
+            fields = line.split("\t")
+            # A sixth column, the pinned commit, is optional and not indexed here.
+            if len(fields) not in (5, 6):
+                raise ValueError(f"{manifest}: expected 5 or 6 tab-separated fields, "
+                                 f"got {len(fields)}: {line!r}")
+            name, url, category, _file_filter, size_class = fields[:5]
             if name in seen:
                 print(f"  ! {name} is named twice, "
                       f"the later row in {Path(manifest).name} is ignored",
