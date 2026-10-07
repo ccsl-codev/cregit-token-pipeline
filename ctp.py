@@ -442,7 +442,8 @@ def check_memo_dir(name: str, opts: dict, workdir: Path) -> bool:
 
 
 _SWITCH_FLAGS = (("skip_html", "--skip-html"), ("reblame", "--reblame"),
-                 ("mask_widened", "--mask-widened"), ("force_clean", "--force-clean"))
+                 ("mask_widened", "--mask-widened"), ("force_clean", "--force-clean"),
+                 ("tokenizer_worker", "--tokenizer-worker"))
 # The runner calls blame_jobs --jobs; ctp's own --jobs means concurrent projects.
 _VALUE_FLAGS = (("gc", "--gc"), ("blame_jobs", "--jobs"),
                 ("memory_limit", "--memory-limit"), ("duckdb_threads", "--duckdb-threads"))
@@ -1040,6 +1041,9 @@ REQUIRES: dict[str, str] = {
     "--mask-widened": ("That checkout would drop the flag, and blobExec would then refuse "
                         "every project whose recorded mask differs from the manifest's "
                         "(exit 3)."),
+    "--tokenizer-worker": ("That checkout has no tokenizer worker pool, so step 2 would "
+                           "start one tokenizer process per blob. Point pipeline.cfg at a "
+                           "checkout with cregit #102 or later."),
     "--retokenize": ("That checkout would drop the flag, step 2 would reuse the cached "
                       "tokenizations you asked to discard, and the run would exit 0 having "
                       "changed nothing. Check pipeline.cfg points at a checkout that has it."),
@@ -1067,6 +1071,9 @@ def preflight_runner_flags(args: argparse.Namespace) -> tuple[bool, str]:
                  "The re-blame happens inside step 7; from step 8 the flag is skipped and\n"
                  "step 10 rebuilds the Parquet from the blame already on disk.")
     refuse_memo_conflicts(args)
+    if getattr(args, "tokenizer_worker", False) and args.shards > 1:
+        sys.exit("--tokenizer-worker needs the runner's pipeline mode, and --shards runs "
+                 "sharded mode. Use one of them.")
     # Our own values before the runner probe, so a typo is not reported as "not implemented".
     refuse_bad_values(args)
 
@@ -1125,6 +1132,7 @@ def requested_runner_flags(args: argparse.Namespace, mask_widened: bool,
         "--duckdb-threads": bool(args.duckdb_threads),
         "--mask-widened": mask_widened,
         "--retokenize": bool(retokenize),
+        "--tokenizer-worker": bool(getattr(args, "tokenizer_worker", False)),
     }
     return [flag for flag in REQUIRES if requested[flag]]
 
@@ -1303,6 +1311,7 @@ def run_options(args: argparse.Namespace) -> dict:
                 from_step=args.from_step, gc=args.gc,
                 mask_widened=mask_widened,
                 retokenize=retokenize,
+                tokenizer_worker=bool(getattr(args, "tokenizer_worker", False)),
                 blame_jobs=args.blame_jobs,
                 memory_limit=args.memory_limit,
                 duckdb_threads=args.duckdb_threads,
@@ -1872,6 +1881,9 @@ def add_project_options(p: argparse.ArgumentParser) -> None:
     """The options of one project run, shared by run and census."""
     p.add_argument("--skip-html", action="store_true",
                        help="never generate the HTML views (94-255 MB per project)")
+    p.add_argument("--tokenizer-worker", action="store_true",
+                       help="tokenize in step 2 with the runner's worker pool (long-lived "
+                            "tokenizer processes) instead of one process per blob")
     p.add_argument("--reblame", action="store_true",
                        help="re-blame every file in step 7 instead of skipping those "
                             "with .blame output, after the blame itself changed. "

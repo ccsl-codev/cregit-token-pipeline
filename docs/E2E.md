@@ -109,6 +109,15 @@ example after the pin changed), the runner gets `--force-clean`: the old work
 is for another commit, so the step-1 wipe is allowed even with a large memo. The
 pipeline row records it as `resume.stale_workdir`.
 
+### The tokenizer worker pool: `--tokenizer-worker`
+
+`--tokenizer-worker` passes the runner's flag of the same name: step 2 tokenizes
+with long-lived worker processes instead of one process per blob. On jq it used
+about 2x less wall time and 2.7x less CPU, with the same output. It needs the
+runner's pipeline mode, so it cannot be combined with `--shards`. A project that
+resumes at step 2 keeps its blob map and memo, so the flag can be turned on for
+a run that stopped.
+
 ### Gates, stop and resume
 
 - A project starts only with `--disk-floor-gb` free disk (default 150) and

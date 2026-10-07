@@ -2973,3 +2973,34 @@ def test_a_post_validation_attempt_records_the_latest_commit(monkeypatch, sandbo
     rows = ledger_rows(sandbox, "jq")
     assert rows and all(r["pinned_sha"] == OTHER_SHA and r["snapshot_sha"] == PINNED_SHA
                         for r in rows)
+
+
+# --tokenizer-worker: the runner's worker pool in step 2.
+
+WORKER_USAGE = REAL_RUNNER_USAGE + "#   --tokenizer-worker  tokenize with long-lived worker processes\n"
+
+
+def test_tokenizer_worker_is_passed_to_the_runner(sandbox, runner, jq):
+    opts = {**ctp._OPTS, "tokenizer_worker": True}
+    argv = ctp.build_pipeline_args(jq, opts, sandbox.out / "jq")
+    assert "--tokenizer-worker" in argv
+    assert "--tokenizer-worker" not in ctp.build_pipeline_args(jq, ctp._OPTS, sandbox.out / "jq")
+
+
+def test_tokenizer_worker_needs_a_runner_that_has_it(must_not_start, runner_script):
+    runner_script(REAL_RUNNER_USAGE)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(tokenizer_worker=True))
+    assert "--tokenizer-worker is not implemented" in str(exc.value)
+
+
+def test_tokenizer_worker_and_shards_are_refused_together(must_not_start, runner_script):
+    runner_script(WORKER_USAGE)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(tokenizer_worker=True, shards=4))
+    assert "--tokenizer-worker needs the runner's pipeline mode" in str(exc.value)
+
+
+def test_tokenizer_worker_is_an_effective_option(sandbox, runner_script):
+    runner_script(WORKER_USAGE)
+    assert ctp.run_options(run_args(tokenizer_worker=True))["tokenizer_worker"] is True
