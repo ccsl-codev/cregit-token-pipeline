@@ -710,6 +710,15 @@ def latest_path(name: str) -> Path:
     return state_dir(name) / "latest.json"
 
 
+def recorded_latest(name: str) -> str:
+    """The commit an earlier --latest attempt chose for this project, or ""."""
+    try:
+        sha = json.loads(latest_path(name).read_text()).get("resolved_sha", "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return sha if pin.SHA_RE.match(sha) else ""
+
+
 def resolve_latest(ctx: ProjectRun) -> bool:
     """--latest: pin this attempt to the remote head of the project's default branch.
     The first attempt reads it with `git ls-remote` and keeps the choice in
@@ -946,6 +955,10 @@ def run_project(project: dict, queue_pos: int | None = None,
     validation run (schema, join, cleanup), as after a crash between them."""
     ctx = ProjectRun(project, queue_pos, queue_total, attempt)
     name = project["name"]
+    if _OPTS.get("latest") and project.get(PINNED_FIELD):
+        # An attempt that only runs the steps after validation clones nothing, so
+        # its rows carry the commit the validated run chose.
+        ctx.latest = recorded_latest(name)
     workdir = OUT / name
     stamp = workdir / f"{name}.validated"
     post_only = stamp.exists()

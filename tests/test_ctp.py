@@ -2958,3 +2958,18 @@ def test_a_workdir_of_another_commit_is_wiped_with_force_clean(monkeypatch, sand
 def test_a_fresh_workdir_is_not_force_cleaned(sandbox, runner, pinned_jq):
     ctp.run_project(pinned_jq)
     assert "--force-clean" not in runner.argv("pipeline")
+
+
+def test_a_post_validation_attempt_records_the_latest_commit(monkeypatch, sandbox, runner,
+                                                             pinned_jq, joining):
+    monkeypatch.setitem(ctp._OPTS, "latest", True)
+    monkeypatch.setattr(ctp.pin, "remote_head", lambda url, timeout=None: pytest.fail("read"))
+    path = ctp.latest_path("jq")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"resolved_sha": OTHER_SHA, "snapshot_sha": PINNED_SHA}))
+    fake_parquet(sandbox)
+    (sandbox.out / "jq" / "jq.validated").write_text("rows=7\nbytes=9\n")
+    assert ctp.run_project(pinned_jq, resume_validated=True) == ctp.RunOutcome.DONE
+    rows = ledger_rows(sandbox, "jq")
+    assert rows and all(r["pinned_sha"] == OTHER_SHA and r["snapshot_sha"] == PINNED_SHA
+                        for r in rows)
