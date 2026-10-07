@@ -181,3 +181,11 @@ def test_a_remote_without_a_default_branch_uses_the_fallback_name(source, dest, 
     result = pin.prepare(f"file://{src}", shas["c2"], dest)
     assert result["branch"] == pin.FALLBACK_BRANCH
     assert result["remote_head_moved"] is False
+
+
+def test_a_git_call_that_does_not_end_is_a_pin_error(monkeypatch):
+    def slow(*args, **kwargs):
+        raise pin.subprocess.TimeoutExpired(cmd="git", timeout=kwargs["timeout"])
+    monkeypatch.setattr(pin.subprocess, "run", slow)
+    with pytest.raises(pin.PinError, match="did not end in 5 s"):
+        pin.remote_head("https://example.invalid/r.git", timeout=5)

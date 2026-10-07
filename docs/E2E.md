@@ -89,6 +89,26 @@ day of its clone, and the ledger says `"pinned_sha": "unpinned"`.
 `pipeline.cfg`, so a census can use another cregit checkout or output
 directory without editing it.
 
+### The newest commit: `--latest`
+
+With `--latest`, a project does not run at its manifest commit. When its first
+attempt starts, the census reads the head of the default branch with
+`git ls-remote` (300 s timeout) and pins that commit. So each project runs at the
+newest commit on the day it runs.
+
+- The ledger records both commits: `pinned_sha` is the commit that ran, and
+  `snapshot_sha` is the manifest commit. A `resolve` row before the clone
+  records the branch, the time of the read, and whether it was reused.
+- `state/<name>/latest.json` keeps the choice. A later attempt of the project
+  reuses it, so a resumed run keeps its finished work at one commit. To read
+  the head again, delete that file.
+- A remote that does not answer fails the project at the `resolve` step.
+
+When the workdir holds a clone of another commit than the pinned one (for
+example after the pin changed), the runner gets `--force-clean`: the old work
+is for another commit, so the step-1 wipe is allowed even with a large memo. The
+pipeline row records it as `resume.stale_workdir`.
+
 ### Gates, stop and resume
 
 - A project starts only with `--disk-floor-gb` free disk (default 150) and

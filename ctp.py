@@ -442,7 +442,7 @@ def check_memo_dir(name: str, opts: dict, workdir: Path) -> bool:
 
 
 _SWITCH_FLAGS = (("skip_html", "--skip-html"), ("reblame", "--reblame"),
-                 ("mask_widened", "--mask-widened"))
+                 ("mask_widened", "--mask-widened"), ("force_clean", "--force-clean"))
 # The runner calls blame_jobs --jobs; ctp's own --jobs means concurrent projects.
 _VALUE_FLAGS = (("gc", "--gc"), ("blame_jobs", "--jobs"),
                 ("memory_limit", "--memory-limit"), ("duckdb_threads", "--duckdb-threads"))
@@ -468,10 +468,11 @@ def commit_url(url: str) -> str:
     return url.removesuffix(".git").rstrip("/") + "/commit/"
 
 
-def pin_args(project: dict) -> list[str]:
+def pin_args(project: dict, commit: str = "") -> list[str]:
+    """pin.py for this attempt: `commit` (the --latest choice) or the manifest commit."""
     name = project["name"]
     return ["python3", str(CORPUS / "pin.py"),
-            "--url", project["url"], "--commit", project[PINNED_FIELD],
+            "--url", project["url"], "--commit", commit or project[PINNED_FIELD],
             "--dest", str(pinned_clone_path(name)), "--result", str(pin_result_path(name))]
 
 
@@ -618,6 +619,7 @@ class ProjectRun:
     queue_total: int | None = None
     attempt: int = 1
     checked_out_sha: str = ""
+    latest: str = ""  # --latest: the remote head this attempt pins, else ""
     parquet: dict | None = None
     failed_step: str = ""
     started: float = field(default_factory=time.time)
@@ -628,7 +630,7 @@ class ProjectRun:
 
     @property
     def pinned(self) -> str:
-        return self.project.get(PINNED_FIELD, "")
+        return self.latest or self.project.get(PINNED_FIELD, "")
 
     def base(self) -> dict:
         mask = _OPTS.get("mask") or self.project["file_filter"]
@@ -639,6 +641,8 @@ class ProjectRun:
             "attempt": self.attempt,
             "manifest_row": dict(self.project),
             "pinned_sha": self.pinned or UNPINNED,
+            # The manifest commit, when --latest pinned another one.
+            **({"snapshot_sha": self.project.get(PINNED_FIELD, "")} if self.latest else {}),
             "checked_out_sha": self.checked_out_sha,
             "file_mask_sha256": sha256_text(mask),
             "tools": _RUN.get("tools", {}),
@@ -697,6 +701,58 @@ _lock_fds: dict = {}
 def _held_fds(name: str) -> tuple:
     fd = _lock_fds.get(name)
     return (fd,) if fd is not None else ()
+
+
+LATEST_TIMEOUT_S = 300
+
+
+def latest_path(name: str) -> Path:
+    return state_dir(name) / "latest.json"
+
+
+def resolve_latest(ctx: ProjectRun) -> bool:
+    """--latest: pin this attempt to the remote head of the project's default branch.
+    The first attempt reads it with `git ls-remote` and keeps the choice in
+    state/<name>/latest.json; a later attempt reuses it, so a resumed run keeps its
+    finished work at one commit. Records a 'resolve' ledger row. False on a failure."""
+    start = time.time()
+    path = latest_path(ctx.name)
+    reused = True
+    try:
+        rec = json.loads(path.read_text())
+        if not pin.SHA_RE.match(rec.get("resolved_sha", "")):
+            raise ValueError(f"no resolved_sha in {path}")
+    except (OSError, ValueError):
+        reused = False
+        try:
+            branch, sha = pin.remote_head(ctx.project["url"], timeout=LATEST_TIMEOUT_S)
+        except pin.PinError as exc:
+            sha, branch, error = "", "", str(exc)
+        else:
+            error = "" if pin.SHA_RE.match(sha) else "the remote gave no HEAD commit"
+        if error:
+            ctx.record("resolve", "failed", start, time.time(), detail=error)
+            ctx.failed_step = "resolve"
+            return False
+        rec = {"url": ctx.project["url"], "snapshot_sha": ctx.project.get(PINNED_FIELD, ""),
+               "resolved_sha": sha, "branch": branch, "resolved_at": now_iso()}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rec) + "\n")
+        tmp.replace(path)
+    ctx.latest = rec["resolved_sha"]
+    say(f"{ctx.name} — latest: {'reusing' if reused else 'resolved'} {ctx.latest} "
+        f"(snapshot {rec.get('snapshot_sha') or 'none'})")
+    ctx.record("resolve", "ok", start, time.time(), resolve={**rec, "reused": reused})
+    return True
+
+
+def stale_workdir(name: str, workdir: Path, pinned: str) -> str:
+    """The commit an earlier attempt left in the workdir when it is not the pinned
+    one, else "". Such a workdir holds work for another commit, so the runner may
+    wipe it even when its memo is large (--force-clean)."""
+    head = git_head(workdir / f"{name}-original.git")
+    return head if head and pinned and head != pinned else ""
 
 
 def resume_step(name: str, workdir: Path, pinned: str) -> int:
@@ -769,12 +825,21 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
         ctx.parquet = parquet_info(name)
         return rc, {"parquet": ctx.parquet}
 
-    if ctx.pinned and run_step(ctx, "clone", pin_args(ctx.project), after_clone) != 0:
+    if ctx.pinned and _OPTS.get("latest") and not resolve_latest(ctx):
+        return False
+    if ctx.pinned and run_step(ctx, "clone", pin_args(ctx.project, ctx.latest),
+                               after_clone) != 0:
         return False
     opts = _OPTS
     resume: dict = {}
+    stale = stale_workdir(name, workdir, ctx.pinned)
+    if stale:
+        say(f"{name} — the workdir holds commit {stale}, not {ctx.pinned}; "
+            "the runner wipes it (--force-clean)")
+        resume = {"stale_workdir": stale}
+        opts = {**_OPTS, "force_clean": True}
     if _OPTS.get("auto_resume") and _OPTS.get("from_step", 1) == 1:
-        step = resume_step(name, workdir, ctx.pinned)
+        step = 1 if stale else resume_step(name, workdir, ctx.pinned)
         if step > 1:
             dropped, errors = drop_derived(name, workdir)
             say(f"{name} — an earlier attempt left its clone and blob map; resuming the "
@@ -1605,7 +1670,11 @@ def cmd_census(args: argparse.Namespace) -> int:
 
     args.join, args.cleanup = True, True
     _OPTS.update(run_options(args))
-    _OPTS.update(own_session=True, min_free_mem_gb=args.min_free_mem_gb, auto_resume=True)
+    _OPTS.update(own_session=True, min_free_mem_gb=args.min_free_mem_gb, auto_resume=True,
+                 latest=bool(getattr(args, "latest", False)))
+    if _OPTS["latest"]:
+        say("--latest: each project pins the remote head of its default branch when its "
+            "first attempt starts; the ledger records it and the manifest commit")
     DISK_FLOOR_GB = args.disk_floor_gb
     if len(projects) > unpinned:
         refuse_unless_runner_accepts(
@@ -1875,6 +1944,11 @@ def main() -> int:
     ce_p.add_argument("--retries", type=int, default=1,
                       help="retries per failed project, counted across restarts (default 1)")
     ce_p.add_argument("--only", help="comma-separated project names to restrict to")
+    ce_p.add_argument("--latest", action="store_true",
+                      help="pin each project to the remote head of its default branch when "
+                           "its first attempt starts, not to the manifest commit. The ledger "
+                           "records both; state/<name>/latest.json keeps the choice for "
+                           "later attempts (delete it to read the head again)")
     ce_p.add_argument("--min-free-mem-gb", type=float, default=MIN_FREE_MEM_GB, metavar="G",
                       help=f"start a project only with this much MemAvailable "
                            f"(default {MIN_FREE_MEM_GB})")

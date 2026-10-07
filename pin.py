@@ -52,13 +52,17 @@ def log(msg: str) -> None:
     print(f"[pin {datetime.now(timezone.utc):%H:%M:%S}] {msg}", flush=True)
 
 
-def git(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def git(args: list[str], cwd: Path | None = None, check: bool = True,
+        timeout: float | None = None) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k not in REPO_REDIRECTS}
     env.update(GIT_ENV)
     cmd = ["git", *GIT_OPTS, *args]
     log("$ " + " ".join(cmd))
-    proc = subprocess.run(cmd, cwd=cwd, env=env, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, env=env, text=True, timeout=timeout,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise PinError(f"git {args[0]} did not end in {timeout:.0f} s") from exc
     if proc.stdout:
         print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n", flush=True)
     if check and proc.returncode != 0:
@@ -66,9 +70,9 @@ def git(args: list[str], cwd: Path | None = None, check: bool = True) -> subproc
     return proc
 
 
-def remote_head(url: str) -> tuple[str, str]:
+def remote_head(url: str, timeout: float | None = None) -> tuple[str, str]:
     """(default branch name, its sha) from `git ls-remote --symref`, or ("", "")."""
-    proc = git(["ls-remote", "--symref", url, "HEAD"], check=False)
+    proc = git(["ls-remote", "--symref", url, "HEAD"], check=False, timeout=timeout)
     if proc.returncode != 0:
         raise PinError(f"cannot reach {url}: git ls-remote exit {proc.returncode}")
     branch, sha = "", ""

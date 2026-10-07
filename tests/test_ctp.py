@@ -2871,3 +2871,90 @@ def test_drop_derived_reports_a_file_it_cannot_unlink(monkeypatch, sandbox):
     monkeypatch.setattr(Path, "unlink", unlink)
     dropped, errors = ctp.drop_derived("jq", workdir)
     assert dropped == [] and "read-only" in errors[0]
+
+
+# --latest: pin each project to the remote head when its first attempt starts.
+
+@pytest.fixture
+def latest(monkeypatch, sandbox):
+    monkeypatch.setitem(ctp._OPTS, "latest", True)
+    calls = []
+
+    def remote_head(url, timeout=None):
+        calls.append((url, timeout))
+        return "master", OTHER_SHA
+    monkeypatch.setattr(ctp.pin, "remote_head", remote_head)
+    return calls
+
+
+def test_latest_pins_the_remote_head_and_records_the_snapshot(monkeypatch, sandbox, latest,
+                                                               pinned_jq):
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    argv = r.argv("clone")
+    assert argv[argv.index("--commit") + 1] == OTHER_SHA
+    assert latest == [("https://github.com/jqlang/jq.git", ctp.LATEST_TIMEOUT_S)]
+    [resolve] = ledger_rows(sandbox, "jq", "resolve")
+    assert resolve["resolve"]["resolved_sha"] == OTHER_SHA
+    assert resolve["resolve"]["snapshot_sha"] == PINNED_SHA
+    assert resolve["resolve"]["reused"] is False
+    rows = ledger_rows(sandbox, "jq")
+    assert all(row["pinned_sha"] == OTHER_SHA and row["snapshot_sha"] == PINNED_SHA
+               for row in rows)
+    assert rows[-1]["state"] == "done"
+    saved = json.loads(ctp.latest_path("jq").read_text())
+    assert saved["resolved_sha"] == OTHER_SHA and saved["branch"] == "master"
+
+
+def test_latest_reuses_the_commit_of_an_earlier_attempt(monkeypatch, sandbox, latest,
+                                                         pinned_jq):
+    path = ctp.latest_path("jq")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"resolved_sha": OTHER_SHA, "snapshot_sha": PINNED_SHA}))
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert latest == []
+    argv = r.argv("clone")
+    assert argv[argv.index("--commit") + 1] == OTHER_SHA
+    [resolve] = ledger_rows(sandbox, "jq", "resolve")
+    assert resolve["resolve"]["reused"] is True
+
+
+def test_latest_fails_the_project_when_the_remote_head_cannot_be_read(
+        monkeypatch, sandbox, runner, pinned_jq):
+    monkeypatch.setitem(ctp._OPTS, "latest", True)
+
+    def unreachable(url, timeout=None):
+        raise ctp.pin.PinError("cannot reach it")
+    monkeypatch.setattr(ctp.pin, "remote_head", unreachable)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    assert runner.calls == []
+    [row] = ledger_rows(sandbox, "jq", "resolve")
+    assert row["status"] == "failed" and "cannot reach it" in row["detail"]
+    assert ledger_rows(sandbox, "jq", "project")[0]["failed_step"] == "resolve"
+    assert not ctp.latest_path("jq").exists()
+
+
+def test_without_latest_the_manifest_commit_is_pinned(sandbox, runner, pinned_jq):
+    ctp.run_project(pinned_jq)
+    assert ledger_rows(sandbox, "jq", "resolve") == []
+    assert all("snapshot_sha" not in row for row in ledger_rows(sandbox, "jq"))
+
+
+def test_a_workdir_of_another_commit_is_wiped_with_force_clean(monkeypatch, sandbox, runner,
+                                                               pinned_jq):
+    monkeypatch.setattr(ctp, "git_head", lambda repo: OTHER_SHA
+                        if repo.name == "jq-original.git" else PINNED_SHA)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert "--force-clean" in runner.argv("pipeline")
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert row["resume"] == {"stale_workdir": OTHER_SHA}
+
+
+def test_a_fresh_workdir_is_not_force_cleaned(sandbox, runner, pinned_jq):
+    ctp.run_project(pinned_jq)
+    assert "--force-clean" not in runner.argv("pipeline")
