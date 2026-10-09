@@ -30,6 +30,8 @@ way. The authority on the schema is `validate_schema.py`, not any document.
 # 1. point pipeline.cfg at a cregit master checkout (bb6f985 or later), and an output dir
 # 2. write a manifest: a TSV file, one project per line, five fields —
 #    name  url  category  file_filter  size_class
+#    and an optional sixth, commit: a 40-hex SHA to pin. A pinned project is
+#    cloned at exactly that commit; a five-field row runs the remote HEAD.
 #    manifest.tsv in this repository is the worked example: 4 small public
 #    pilot projects (jq, zstd, libuv, tmux). Write your own for a real run.
 M=manifest.tsv
@@ -79,6 +81,28 @@ gate, then a `.validated` stamp. Runs are idempotent: validated projects are
 skipped, interrupted ones resume from the blob map, failed ones are retried on the
 next pass.
 
+## End-to-end run
+
+For a long run over a projects dataset, build the manifest from the selection
+frame, then run `census`. Each project is cloned at its pinned commit,
+tokenized, blamed, validated, schema-checked, joined into `ctp.duckdb` and
+cleaned down to its Parquet. Every step appends a row to `ledger.jsonl`.
+
+```sh
+./build_manifest.py frame.csv --manifest manifest.census.tsv \
+    --project-meta project_meta.census.json
+./ctp.py census --manifest manifest.census.tsv \
+    --project-meta project_meta.census.json --workers 3 --skip-html
+touch STOP                                # stop after the running projects
+./ctp.py census ...                       # the same command resumes
+./ctp.py audit antirez__kilo              # one project's ledger, one line per step
+```
+
+[`docs/E2E.md`](docs/E2E.md) gives the frame contract, the steps, the gates,
+the stop and resume rules, and the ledger fields. HTML deletion
+(`--drop-html`) and anonymization (`--anonymize SCRIPT`) are open decisions,
+so both are off by default.
+
 ## Architecture
 
 ```
@@ -116,6 +140,9 @@ state.
   beside `metrics.tsv` rather than in the project work directory, because a
   from-scratch run deletes that directory.
 - `metrics.tsv`: `iso_start  project  class  phase  duration_s  rc  log`.
+- `ledger.jsonl`: the audit ledger, one JSON row per project and step, with the
+  pinned and checked-out commit, the tool versions, the flags and the Parquet
+  sha256. Append-only. `./ctp.py audit NAME` prints a project's rows.
 
 ## Operational notes
 

@@ -1,0 +1,6 @@
+slug,host,repo_url,head_oid,u,size_class,labels,included,language,commits
+antirez/kilo,github.com,https://github.com/antirez/kilo.git,0099562d0e79aea0c6deedfa1ee0ef4a3a8883b7,0.6150032235701087,S,community,1,C,20
+zserge/jsmn,github.com,https://github.com/zserge/jsmn.git,23f13d25958f575f293527064cb884cbc3f4c40c,0.016641409990528433,S,community,1,C,156
+DaveGamble/cJSON,github.com,https://github.com/DaveGamble/cJSON.git,6d9f2443ab071f86e5d9b43025a40929ec41c46c,0.03184153664579492,S,community,1,C,1113
+example-group/example-lib,gitlab.com,https://gitlab.com/example-group/example-lib.git,1111111111111111111111111111111111111111,0.4170294472402092,M,company;Example Corp,1,C++,40000
+example-org/excluded,github.com,https://github.com/example-org/excluded.git,2222222222222222222222222222222222222222,0.03829090359332765,S,community,0,Rust,90

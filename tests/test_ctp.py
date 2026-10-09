@@ -5,6 +5,8 @@ real corpus or starts a process; a test that needs one installs a fake."""
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import fcntl
 import os
 import shutil
@@ -17,8 +19,11 @@ from types import SimpleNamespace
 import pytest
 
 import ctp
+import ledger
 import retain
 from file_mask import UNIVERSAL_MASK
+
+REAL_TOOL_VERSIONS = ctp.tool_versions
 
 
 # --------------------------------------------------------------------------- #
@@ -53,32 +58,70 @@ REAL_RUNNER_USAGE = """\
 """
 
 
+PINNED_SHA = "0123456789abcdef0123456789abcdef01234567"
+OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+PINNED_ROW = VALID_ROW + "\t" + PINNED_SHA
+
+# The script each python3 step runs, by phase.
+STEP_SCRIPTS = {"pin.py": "clone", "firm_attribution.py": "firm", "validate.py": "validate",
+                "validate_schema.py": "schema", "consolidate.py": "join",
+                "anonymize_parquet.py": "anonymize"}
+
+
 class FakeRunner:
-    """Recording stand-in for subprocess.Popen. Returns a scripted rc per phase
-    and writes the stamp when validate succeeds, as validate.py does."""
+    """Recording stand-in for subprocess.Popen and subprocess.run. Returns a
+    scripted rc per phase, writes the stamp when validate succeeds, as
+    validate.py does, and the result file when clone succeeds, as pin.py does.
+    `checkout` is the HEAD that `git rev-parse` reports for the runner's clone."""
 
     def __init__(self, *, pipeline_rc=0, firm_rc=0, validate_rc=0, raise_on=None,
-                 payload=b""):
+                 payload=b"", rcs=None, checkout=PINNED_SHA, pin_result=True,
+                 anon_output=True):
         self.calls: list[SimpleNamespace] = []
-        self.rcs = {"pipeline": pipeline_rc, "firm": firm_rc, "validate": validate_rc}
+        self.rcs = {"pipeline": pipeline_rc, "firm": firm_rc, "validate": validate_rc,
+                    **(rcs or {})}
         self.raise_on = raise_on
         self.payload = payload
+        self.checkout = checkout
+        self.pin_result = pin_result
+        self.anon_output = anon_output
 
     @staticmethod
     def phase_of(args) -> str:
         if str(args[0]).endswith("run_pipeline_process.sh"):
             return "pipeline"
-        return "firm" if str(args[1]).endswith("firm_attribution.py") else "validate"
+        if args[0] == "git":
+            return "git"
+        return STEP_SCRIPTS.get(Path(args[1]).name, "validate") if len(args) > 1 else "validate"
+
+    def rc_of(self, phase: str) -> int:
+        return self.rcs.get(phase, 0)
 
     def __call__(self, args, **kwargs):
         phase = self.phase_of(args)
         self.calls.append(SimpleNamespace(phase=phase, args=list(args), kwargs=kwargs))
         if self.raise_on == phase:
             raise OSError(f"no such file or directory: {args[0]}")
+        if phase == "git":
+            return SimpleNamespace(returncode=0, stdout=f"{self.checkout}\n")
         stream = kwargs.get("stdout")
         if self.payload and hasattr(stream, "write"):
             stream.write(self.payload)
-        rc = self.rcs[phase]
+        rc = self.rc_of(phase)
+        if phase == "pipeline" and rc == 0 and "--commit-url" in args:
+            # A pinned run's working clone, which runner_checkout reads. Unpinned
+            # runs leave none, so a test that fakes only Popen starts no git.
+            work = Path(args[args.index("--work") + 1])
+            name = args[args.index("--repo-name") + 1]
+            (work / f"{name}-original").mkdir(parents=True, exist_ok=True)
+        if phase == "anonymize" and rc == 0 and self.anon_output:
+            outdir = Path(args[2])
+            outdir.mkdir(parents=True, exist_ok=True)
+            (outdir / Path(args[3]).name).write_bytes(b"PAR1 anon PAR1")
+        if phase == "clone" and rc == 0 and self.pin_result:
+            commit = args[args.index("--commit") + 1]
+            Path(args[args.index("--result") + 1]).write_text(
+                f'{{"pinned_sha": "{commit}", "checked_out_sha": "{commit}"}}\n')
         if phase == "validate" and rc == 0:
             stamp = Path(args[3])
             # A relative stamp path would escape tmp_path into the repository.
@@ -144,17 +187,21 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(ctp, "METRICS", tmp_path / "metrics.tsv")
     monkeypatch.setattr(ctp, "RUNS_LOG", tmp_path / "runs.log")
     monkeypatch.setattr(ctp, "RESOURCES", tmp_path / "resources.tsv")
+    monkeypatch.setattr(ctp, "LEDGER", tmp_path / "ledger.jsonl")
+    # tool_versions starts git and srcml; its own tests call REAL_TOOL_VERSIONS.
+    monkeypatch.setattr(ctp, "tool_versions", lambda: {"ctp_commit": "test"})
     monkeypatch.setattr(retain, "STATE", tmp_path / "state")
+    monkeypatch.setattr(retain, "OUT", out)
     # A real disk_usage call stays, but the floor can never trip by accident.
     monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 0)
     monkeypatch.setattr(ctp.time, "sleep", lambda *a, **k: None)
     monkeypatch.setattr(ctp.subprocess, "run", forbidden)
     monkeypatch.setattr(ctp.subprocess, "Popen", forbidden)
 
-    for shared in (ctp._OPTS, ctp._ENV, ctp._live):
+    for shared in (ctp._OPTS, ctp._ENV, ctp._live, ctp._RUN, ctp._lock_fds):
         shared.clear()
     yield SimpleNamespace(root=tmp_path, out=out, cregit=cregit)
-    for shared in (ctp._OPTS, ctp._ENV, ctp._live):
+    for shared in (ctp._OPTS, ctp._ENV, ctp._live, ctp._RUN, ctp._lock_fds):
         shared.clear()
 
 
@@ -463,10 +510,11 @@ def test_drop_memo_does_not_prune_a_failed_project(monkeypatch, jq, runner_kwarg
 
 def test_drop_memo_reports_when_retain_refuses(monkeypatch, capsys, runner, jq):
     """retain.prune re-checks the keepers itself. A refusal must be visible,
-    and must not turn a validated project into a failure."""
+    and must not turn a validated project into a failure: it is done-dirty."""
     monkeypatch.setattr(ctp.retain, "prune", lambda *a, **k: (0, False))
     ctp._OPTS.update(skip_html=False, drop_memo=True)
-    assert ctp.run_project(jq) == "done"
+    outcome = ctp.run_project(jq)
+    assert outcome == "done-dirty" and outcome.is_success
     assert "retain refused the prune" in capsys.readouterr().out
 
 
@@ -1554,3 +1602,1405 @@ def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq)
     ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
     argv = runner.argv("pipeline")
     assert argv[argv.index("--mask") + 1] == r"\.java$"
+
+
+
+# --------------------------------------------------------------------------- #
+# pinned commit
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def pinned_jq(jq):
+    return {**jq, "commit": PINNED_SHA}
+
+
+def test_manifest_reads_a_sixth_column_as_the_pinned_commit(tmp_path):
+    [row] = ctp.read_manifest(write_manifest(tmp_path, PINNED_ROW), None)
+    assert row["commit"] == PINNED_SHA
+
+
+def test_manifest_without_the_column_is_unpinned(tmp_path):
+    [row] = ctp.read_manifest(write_manifest(tmp_path, VALID_ROW), None)
+    assert "commit" not in row
+
+
+@pytest.mark.parametrize("commit", ["abc123", PINNED_SHA.upper(), PINNED_SHA + "0", ""])
+def test_manifest_rejects_a_commit_that_is_not_a_full_sha(tmp_path, commit):
+    with pytest.raises(ValueError, match="40-character"):
+        ctp.read_manifest(write_manifest(tmp_path, f"{VALID_ROW}\t{commit}"), None)
+
+
+def test_manifest_rejects_seven_fields(tmp_path):
+    with pytest.raises(ValueError, match="pinned commit"):
+        ctp.read_manifest(write_manifest(tmp_path, f"{PINNED_ROW}\textra"), None)
+
+
+def test_a_pinned_project_clones_first_then_runs_from_the_staging_clone(
+        sandbox, runner, pinned_jq):
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["clone", "pipeline", "git", "firm", "validate"]
+    staging = sandbox.out / ".ctp-pinned" / "jq.git"
+    assert runner.argv("clone") == [
+        "python3", str(sandbox.root / "pin.py"),
+        "--url", "https://github.com/jqlang/jq.git", "--commit", PINNED_SHA,
+        "--dest", str(staging), "--result", str(ctp.pin_result_path("jq"))]
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--repo-url") + 1] == str(staging)
+    assert argv[argv.index("--commit-url") + 1] == "https://github.com/jqlang/jq/commit/"
+
+
+def test_an_unpinned_project_clones_the_url_itself(runner, jq):
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate"]
+    argv = runner.argv("pipeline")
+    assert argv[argv.index("--repo-url") + 1] == jq["url"]
+    assert "--commit-url" not in argv
+
+
+def test_a_failed_clone_stops_before_the_pipeline(monkeypatch, pinned_jq):
+    r = FakeRunner(rcs={"clone": 3})
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    assert [c.phase for c in r.calls] == ["clone"]
+
+
+def test_a_checkout_that_differs_from_the_pin_fails_the_project(
+        monkeypatch, capsys, pinned_jq):
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    assert "validate" not in [c.phase for c in r.calls]
+    assert f"but the runner checked out {OTHER_SHA}" in capsys.readouterr().out
+
+
+def test_an_unreadable_checkout_fails_a_pinned_project(monkeypatch, pinned_jq):
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
+    monkeypatch.setattr(ctp, "runner_checkout", lambda name, workdir: "")
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+
+
+def test_the_staging_clone_is_removed_once_the_project_validates(sandbox, runner, pinned_jq):
+    staging = ctp.pinned_clone_path("jq")
+    staging.mkdir(parents=True)
+    (staging / "HEAD").write_text("ref: refs/heads/master\n")
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert not staging.exists()
+
+
+def test_a_symlinked_staging_clone_is_not_followed(sandbox, tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("x")
+    staging = ctp.pinned_clone_path("jq")
+    staging.parent.mkdir(parents=True)
+    staging.symlink_to(victim)
+    assert ctp.drop_pinned_clone("jq")
+    assert (victim / "keep").exists()
+
+
+def test_git_head_is_empty_for_a_missing_repo(tmp_path):
+    assert ctp.git_head(tmp_path / "absent") == ""
+
+
+@pytest.mark.parametrize("result, expected", [
+    (SimpleNamespace(returncode=0, stdout=f"{PINNED_SHA}\n"), PINNED_SHA),
+    (SimpleNamespace(returncode=0, stdout="not a sha\n"), ""),
+    (SimpleNamespace(returncode=128, stdout=f"{PINNED_SHA}\n"), ""),
+])
+def test_git_head_returns_only_a_full_sha(monkeypatch, tmp_path, result, expected):
+    monkeypatch.setattr(ctp.subprocess, "run", lambda *a, **k: result)
+    assert ctp.git_head(tmp_path) == expected
+
+
+def test_git_head_is_empty_when_git_cannot_start(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise OSError("no git")
+    monkeypatch.setattr(ctp.subprocess, "run", boom)
+    assert ctp.git_head(tmp_path) == ""
+
+
+def test_a_pinned_manifest_needs_a_runner_with_commit_url(must_not_start, runner_script):
+    runner_script(REAL_RUNNER_USAGE.replace("--commit-url", "--commit-link"))
+    write_manifest(must_not_start.root, PINNED_ROW)
+    with pytest.raises(SystemExit, match="--commit-url"):
+        ctp.cmd_run(run_args())
+
+
+def test_a_pinned_manifest_runs_on_a_runner_with_commit_url(ready):
+    write_manifest(ready.root, PINNED_ROW)
+    assert ctp.cmd_run(run_args()) == 0
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://github.com/jqlang/jq.git", "https://github.com/jqlang/jq/commit/"),
+    ("https://gitlab.com/a/b/", "https://gitlab.com/a/b/commit/"),
+    ("https://example.org/r", "https://example.org/r/commit/"),
+])
+def test_commit_url_matches_the_runner_default(url, expected):
+    assert ctp.commit_url(url) == expected
+
+
+
+# --------------------------------------------------------------------------- #
+# audit ledger
+# --------------------------------------------------------------------------- #
+
+def ledger_rows(sandbox, project=None, step=None, started=False):
+    """The ledger's rows, without the started rows unless started=True."""
+    rows = ledger.read(sandbox.root / "ledger.jsonl")
+    return [r for r in rows if (project is None or r.get("project") == project)
+            and (step is None or r.get("step") == step)
+            and (started or r.get("status") != "started")]
+
+
+def test_an_internal_error_still_writes_the_final_row(monkeypatch, sandbox, runner, jq):
+    def boom(ctx):
+        raise KeyError("surprise")
+    monkeypatch.setattr(ctp, "cleanup_step", boom)
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    [final] = ledger_rows(sandbox, "jq", "project")
+    assert final["failed_step"] == "internal" and "KeyError" in final["detail"]
+
+
+def test_each_step_writes_a_started_row_before_it_runs(sandbox, runner, jq):
+    ctp.run_project(jq)
+    rows = ledger_rows(sandbox, "jq", started=True)
+    assert [(r["step"], r["status"]) for r in rows] == [
+        ("pipeline", "started"), ("pipeline", "ok"), ("firm", "started"), ("firm", "ok"),
+        ("validate", "started"), ("validate", "ok"), ("cleanup", "ok"), ("project", "done")]
+    assert rows[0]["argv"][0] == "./run_pipeline_process.sh"
+
+
+def fake_parquet(sandbox, name="jq", data=b"PAR1 fake parquet PAR1") -> Path:
+    path = sandbox.out / name / f"{name}-dataset.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def test_a_done_project_writes_one_row_per_step_then_its_state(sandbox, runner, jq):
+    fake_parquet(sandbox)
+    ctp._RUN.update(run_id="r1", tools={"ctp_commit": "abc"}, flags={"jobs": 1})
+    assert ctp.run_project(jq, queue_pos=3, queue_total=9) == ctp.RunOutcome.DONE
+    rows = ledger_rows(sandbox, "jq")
+    assert [r["step"] for r in rows] == ["pipeline", "firm", "validate", "cleanup", "project"]
+    assert [r["status"] for r in rows] == ["ok", "ok", "ok", "ok", "done"]
+    for row in rows:
+        assert row["run_id"] == "r1" and row["queue_pos"] == 3 and row["queue_total"] == 9
+        assert row["manifest_row"] == jq
+        assert row["pinned_sha"] == "unpinned"
+        assert row["tools"] == {"ctp_commit": "abc"} and row["flags"] == {"jobs": 1}
+        assert row["file_mask_sha256"] == hashlib.sha256(jq["file_filter"].encode()).hexdigest()
+        assert row["start_utc"] <= row["end_utc"]
+    assert rows[0]["exit_code"] == 0 and rows[0]["log"].endswith(".log")
+    assert rows[-1]["state"] == "done"
+
+
+def test_the_validate_row_carries_the_parquet_hash_and_row_count(sandbox, runner, jq):
+    data = b"PAR1 some bytes PAR1"
+    path = fake_parquet(sandbox, data=data)
+    ctp.run_project(jq)
+    [row] = ledger_rows(sandbox, "jq", "validate")
+    assert row["parquet"] == {"path": str(path), "bytes": len(data),
+                              "sha256": hashlib.sha256(data).hexdigest(), "rows": 42}
+    assert ledger_rows(sandbox, "jq", "project")[0]["parquet"] == row["parquet"]
+
+
+def test_a_pinned_project_records_the_pin_and_the_checkout(sandbox, runner, pinned_jq):
+    ctp.run_project(pinned_jq)
+    rows = ledger_rows(sandbox, "jq")
+    assert [r["step"] for r in rows] == [
+        "clone", "pipeline", "firm", "validate", "cleanup", "project"]
+    assert rows[0]["pin"]["checked_out_sha"] == PINNED_SHA
+    assert all(r["pinned_sha"] == PINNED_SHA for r in rows)
+    assert rows[0]["checked_out_sha"] == ""
+    assert all(r["checked_out_sha"] == PINNED_SHA for r in rows[1:])
+    assert rows[4]["cleanup"]["removed"] == [str(ctp.pinned_clone_path("jq"))]
+
+
+def test_a_clone_without_a_result_file_fails(monkeypatch, sandbox, pinned_jq):
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(pin_result=False))
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    [row] = ledger_rows(sandbox, "jq", "clone")
+    assert row["status"] == "failed" and "no pin result" in row["detail"]
+
+
+def test_a_checkout_mismatch_is_recorded_on_the_pipeline_row(monkeypatch, sandbox, pinned_jq):
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp.run_project(pinned_jq)
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert row["status"] == "failed" and row["exit_code"] == 1
+    assert row["checked_out_sha"] == OTHER_SHA and "not the pinned" in row["detail"]
+    [final] = ledger_rows(sandbox, "jq", "project")
+    assert final["state"] == "failed" and final["failed_step"] == "pipeline"
+
+
+def test_a_failed_pipeline_names_the_failed_step(monkeypatch, sandbox, jq):
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(pipeline_rc=2))
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    rows = ledger_rows(sandbox, "jq")
+    assert [(r["step"], r["status"]) for r in rows] == [("pipeline", "failed"),
+                                                        ("project", "failed")]
+    assert rows[0]["exit_code"] == 2 and rows[1]["failed_step"] == "pipeline"
+
+
+def test_a_phase_that_cannot_start_is_recorded(monkeypatch, sandbox, jq):
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(raise_on="validate"))
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    [row] = ledger_rows(sandbox, "jq", "validate")
+    assert row["status"] == "failed" and row["exit_code"] is None
+    assert "could not start" in row["detail"]
+    assert ledger_rows(sandbox, "jq", "project")[0]["failed_step"] == "validate"
+
+
+def test_a_held_lock_is_recorded_as_deferred(sandbox, runner, jq, held_lock):
+    with held_lock(ctp.lock_path("jq")):
+        assert ctp.run_project(jq) == ctp.RunOutcome.DEFERRED
+    [row] = ledger_rows(sandbox, "jq")
+    assert row["state"] == "deferred" and "lock" in row["detail"]
+
+
+def test_the_disk_floor_is_recorded_as_deferred(monkeypatch, sandbox, runner, jq):
+    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    assert ctp.run_project(jq) == ctp.RunOutcome.DEFERRED
+    assert ledger_rows(sandbox, "jq")[0]["detail"].startswith("disk below")
+
+
+def test_a_refused_memo_dir_is_a_preflight_failure(sandbox, runner, jq):
+    ctp._OPTS.update(memo_dir=str(sandbox.out))
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    [row] = ledger_rows(sandbox, "jq")
+    assert row["failed_step"] == "preflight"
+
+
+def test_a_refused_prune_makes_the_project_done_dirty(monkeypatch, sandbox, runner, jq):
+    monkeypatch.setattr(ctp.retain, "prune", lambda *a, **k: (0, False))
+    ctp._OPTS.update(drop_memo=True)
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE_DIRTY
+    [cleanup] = ledger_rows(sandbox, "jq", "cleanup")
+    assert cleanup["status"] == "failed" and cleanup["cleanup"]["errors"]
+    assert ledger_rows(sandbox, "jq", "project")[0]["state"] == "done-dirty"
+
+
+def test_a_staging_clone_that_cannot_be_removed_makes_it_done_dirty(
+        monkeypatch, sandbox, runner, pinned_jq):
+    monkeypatch.setattr(ctp, "drop_pinned_clone", lambda name: ["permission denied"])
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE_DIRTY
+
+
+def test_done_dirty_is_a_success_that_a_retry_pass_does_not_rerun(monkeypatch, jq):
+    calls = []
+
+    def fake(project):
+        calls.append(project["name"])
+        return ctp.RunOutcome.DONE_DIRTY
+    monkeypatch.setattr(ctp, "run_project", fake)
+    results = ctp.run_passes([jq], jobs=1, retries=2)
+    assert results == {"jq": ctp.RunOutcome.DONE_DIRTY} and calls == ["jq"]
+
+
+def test_the_ledger_is_append_only_across_runs(sandbox, runner, jq):
+    fake_parquet(sandbox)
+    ctp.run_project(jq)
+    path = sandbox.root / "ledger.jsonl"
+    first, inode = path.read_bytes(), path.stat().st_ino
+    (sandbox.out / "jq" / "jq.validated").unlink()
+    ctp.run_project(jq)
+    assert path.read_bytes().startswith(first) and len(path.read_bytes()) > len(first)
+    assert path.stat().st_ino == inode
+
+
+def test_a_failed_ledger_write_stops_the_run_loudly(monkeypatch, capsys, sandbox, runner, jq):
+    def boom(path, row):
+        raise OSError("disk full")
+    monkeypatch.setattr(ctp.ledger, "append", boom)
+    ctp.run_project(jq)
+    assert "disk full" in ctp._RUN["ledger_broken"]
+    assert "LEDGER WRITE FAILED" in capsys.readouterr().out
+
+
+def test_each_phase_hands_the_project_lock_to_its_process(sandbox, runner, jq):
+    ctp.run_project(jq)
+    for call in runner.calls:
+        [fd] = call.kwargs["pass_fds"]
+        assert isinstance(fd, int)
+
+
+def test_run_phase_without_kept_fds_passes_none(sandbox, runner, jq):
+    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    assert "pass_fds" not in runner.calls[0].kwargs
+
+
+def test_cmd_run_writes_run_start_and_run_end_rows(ready):
+    assert ctp.cmd_run(run_args(jobs=2)) == 0
+    rows = ledger.read(ready.root / "ledger.jsonl")
+    assert [r["step"] for r in rows] == ["run-start", "run-end"]
+    start, end = rows
+    assert start["run_id"] == end["run_id"] == ctp._RUN["run_id"]
+    assert start["tools"] == {"ctp_commit": "test"}
+    flags = start["flags"]
+    assert flags["cli"]["jobs"] == 2
+    assert flags["manifest_path"] == str(ready.root / "manifest.tsv")
+    assert flags["manifest_sha256"] == hashlib.sha256(
+        (ready.root / "manifest.tsv").read_bytes()).hexdigest()
+    assert end["exit_code"] == 0 and end["outcomes"] == {"done": 1}
+
+
+def test_cmd_run_stops_when_the_ledger_cannot_be_written(ready, monkeypatch):
+    def boom(path, row):
+        raise OSError("read-only file system")
+    monkeypatch.setattr(ctp.ledger, "append", boom)
+    with pytest.raises(SystemExit, match="cannot write the ledger"):
+        ctp.cmd_run(run_args())
+
+
+def test_end_ledger_run_survives_a_failed_write(monkeypatch, capsys):
+    def boom(path, row):
+        raise OSError("gone")
+    monkeypatch.setattr(ctp.ledger, "append", boom)
+    ctp.end_ledger_run(0, time.time(), {})
+    assert "cannot write the run-end row" in capsys.readouterr().out
+
+
+def test_run_flags_records_every_option_and_the_manifest(sandbox):
+    manifest = write_manifest(sandbox.root, VALID_ROW)
+    ctp._OPTS.update(shard_classes=("L",), drop_memo=True)
+    flags = ctp.run_flags(run_args(jobs=4), manifest)
+    assert flags["effective"]["shard_classes"] == ["L"]
+    assert flags["effective"]["drop_memo"] is True and flags["cli"]["drop_memo"] is False
+    assert flags["cli"]["jobs"] == 4 and "fn" not in flags["cli"]
+    assert flags["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert ctp.run_flags(run_args(), sandbox.root / "absent.tsv")["manifest_sha256"] == ""
+
+
+def test_tool_versions_names_every_tool(monkeypatch, sandbox):
+    outputs = {
+        ("git", "-C", str(sandbox.root), "rev-parse", "HEAD"): "a" * 40,
+        ("git", "-C", str(sandbox.root), "status", "--porcelain",
+         "--untracked-files=no"): " M ctp.py",
+        ("git", "-C", str(sandbox.cregit), "rev-parse", "HEAD"): "b" * 40,
+        ("git", "-C", str(sandbox.cregit), "status", "--porcelain",
+         "--untracked-files=no"): "",
+        ("srcml", "--version"): "srcml: 1.1.0\nlibsrcml: 1.1.0",
+        ("git", "--version"): "git version 2.55.0",
+    }
+    monkeypatch.setattr(ctp, "_capture", lambda cmd, cwd=None: outputs.get(tuple(cmd), ""))
+    jar = sandbox.cregit / ctp.BLOBEXEC_JAR
+    jar.parent.mkdir(parents=True)
+    jar.write_bytes(b"jar bytes")
+    tools = REAL_TOOL_VERSIONS()
+    assert tools["ctp_commit"] == "a" * 40 + "-dirty"
+    assert tools["cregit_commit"] == "b" * 40
+    assert tools["srcml_version"] == "srcml: 1.1.0"
+    assert tools["blobexec_jar_sha256"] == hashlib.sha256(b"jar bytes").hexdigest()
+    assert tools["git_version"] == "git version 2.55.0"
+
+
+def test_tool_versions_leaves_a_missing_tool_blank(monkeypatch, sandbox):
+    monkeypatch.setattr(ctp, "_capture", lambda cmd, cwd=None: "")
+    ctp._ENV.update(PATH=str(sandbox.root / "empty-bin"))
+    tools = REAL_TOOL_VERSIONS()
+    assert tools["ctp_commit"] == "" and tools["srcml_version"] == ""
+    assert tools["srcml_path"] == "" and tools["blobexec_jar_sha256"] == ""
+
+
+@pytest.mark.parametrize("result, expected", [
+    (SimpleNamespace(returncode=0, stdout=" out \n"), "out"),
+    (SimpleNamespace(returncode=1, stdout="out"), ""),
+])
+def test_capture_returns_stdout_only_on_success(monkeypatch, result, expected):
+    monkeypatch.setattr(ctp.subprocess, "run", lambda *a, **k: result)
+    assert ctp._capture(["x"]) == expected
+
+
+def test_capture_is_blank_when_the_tool_is_missing(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("srcml")
+    monkeypatch.setattr(ctp.subprocess, "run", boom)
+    assert ctp._capture(["srcml"]) == ""
+
+
+def test_audit_prints_one_line_per_step(sandbox, runner, pinned_jq, capsys):
+    ctp.run_project(pinned_jq)
+    capsys.readouterr()
+    assert ctp.cmd_audit(argparse.Namespace(project="jq", json=False)) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert [line.split()[1] for line in out] == [
+        "clone", "pipeline", "firm", "validate", "cleanup", "project"]
+    assert f"checked_out={PINNED_SHA}" in out[1]
+    assert "state=done" in out[-1] and "removed=1 errors=0" in out[4]
+
+
+def test_audit_json_prints_whole_rows(sandbox, runner, jq, capsys):
+    fake_parquet(sandbox)
+    ctp.run_project(jq)
+    capsys.readouterr()
+    ctp.cmd_audit(argparse.Namespace(project="jq", json=True))
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert rows[-1]["state"] == "done"
+    [validated] = [r for r in rows if r["step"] == "validate" and r["status"] == "ok"]
+    assert validated["parquet"]["rows"] == 42
+    assert [r["status"] for r in rows if r["step"] == "pipeline"] == ["started", "ok"]
+
+
+def test_audit_marks_a_step_that_never_ended(sandbox, capsys):
+    path = sandbox.root / "ledger.jsonl"
+    base = {"project": "jq", "run_id": "r1", "attempt": 1}
+    ledger.append(path, {**base, "step": "clone", "status": "started"})
+    ledger.append(path, {**base, "step": "clone", "status": "ok"})
+    ledger.append(path, {**base, "step": "pipeline", "status": "started"})
+    ctp.cmd_audit(argparse.Namespace(project="jq", json=False))
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert "pipeline  interrupted" in lines[1] and "the run died here" in lines[1]
+
+
+def test_audit_of_an_unknown_project_fails(sandbox, capsys):
+    assert ctp.cmd_audit(argparse.Namespace(project="nope", json=False)) == 1
+    assert "no rows" in capsys.readouterr().err
+
+
+def test_audit_line_shows_a_failure_and_its_detail():
+    line = ctp.audit_line({"step": "project", "state": "failed", "failed_step": "clone",
+                           "detail": "commit missing"})
+    assert "state=failed" in line and "failed_step=clone" in line and "commit missing" in line
+
+
+# --------------------------------------------------------------------------- #
+# schema check and join
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def joining(sandbox):
+    manifest = write_manifest(sandbox.root, VALID_ROW)
+    ctp._OPTS.update(join=True, manifest=str(manifest))
+    return manifest
+
+
+def test_join_runs_the_schema_check_then_the_join(sandbox, runner, jq, joining):
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate", "schema", "join"]
+    parquet = str(sandbox.out / "jq" / "jq-dataset.parquet")
+    assert runner.argv("schema") == ["python3", str(sandbox.root / "validate_schema.py"), parquet]
+    assert runner.argv("join") == ["python3", str(sandbox.root / "consolidate.py"),
+                                   "--join", "jq", "--manifest", str(joining)]
+    steps = [r["step"] for r in ledger_rows(sandbox, "jq")]
+    assert steps == ["pipeline", "firm", "validate", "schema", "join", "cleanup", "project"]
+
+
+@pytest.mark.parametrize("step", ["schema", "join"])
+def test_a_failed_schema_check_or_join_fails_the_project(monkeypatch, sandbox, jq, joining, step):
+    r = FakeRunner(rcs={step: 1})
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    [final] = ledger_rows(sandbox, "jq", "project")
+    assert final["failed_step"] == step
+    assert not ledger_rows(sandbox, "jq", "cleanup")
+    if step == "schema":
+        assert "join" not in [c.phase for c in r.calls]
+
+
+def test_without_join_no_schema_or_join_step_runs(runner, jq):
+    ctp.run_project(jq)
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate"]
+
+
+def test_a_validated_project_resumes_at_the_steps_after_validation(
+        sandbox, runner, jq, joining):
+    fake_parquet(sandbox)
+    (sandbox.out / "jq" / "jq.validated").write_text("rows=7\nbytes=9\n")
+    assert ctp.run_project(jq, resume_validated=True) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["schema", "join"]
+    [final] = ledger_rows(sandbox, "jq", "project")
+    assert final["state"] == "done" and final["parquet"]["rows"] == 7
+
+
+def test_a_validated_project_is_still_skipped_by_default(sandbox, runner, jq, joining):
+    (sandbox.out / "jq").mkdir()
+    (sandbox.out / "jq" / "jq.validated").write_text("rows=7\n")
+    assert ctp.run_project(jq) == ctp.RunOutcome.SKIPPED
+    assert runner.calls == [] and ledger_rows(sandbox) == []
+
+
+def test_resuming_ignores_the_disk_floor(monkeypatch, sandbox, runner, jq, joining):
+    """The steps after validation write almost nothing; the floor guards a new clone."""
+    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    (sandbox.out / "jq").mkdir()
+    (sandbox.out / "jq" / "jq.validated").write_text("rows=7\n")
+    assert ctp.run_project(jq, resume_validated=True) == ctp.RunOutcome.DONE
+
+
+def test_run_options_carry_join_and_the_absolute_manifest(sandbox, runner_script):
+    runner_script()
+    opts = ctp.run_options(run_args(join=True))
+    assert opts["join"] is True
+    assert opts["manifest"] == str((sandbox.root / "manifest.tsv").resolve())
+    assert ctp.run_options(run_args())["join"] is False
+
+
+def test_cmd_db_forwards_each_manifest_as_an_absolute_path(sandbox, monkeypatch):
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {})
+    seen = {}
+    monkeypatch.setattr(ctp.subprocess, "run",
+                        lambda args, **k: seen.update(args=args) or SimpleNamespace(returncode=0))
+    assert ctp.cmd_db(argparse.Namespace(manifest=["a.tsv", "b.tsv"])) == 0
+    assert seen["args"][2:] == ["--manifest", str(sandbox.root / "a.tsv"),
+                                "--manifest", str(sandbox.root / "b.tsv")]
+
+
+# --------------------------------------------------------------------------- #
+# cleanup, --drop-html and --anonymize
+# --------------------------------------------------------------------------- #
+
+def runner_leftovers(sandbox, name="jq") -> Path:
+    """The work files a real runner leaves beside the Parquet."""
+    workdir = sandbox.out / name
+    for d in (f"{name}-original.git", f"{name}-cregit", "memo", "blame", "html"):
+        (workdir / d).mkdir(parents=True, exist_ok=True)
+        (workdir / d / "f").write_bytes(b"x" * 4096)
+    (workdir / f"{name}-blobmap.db").write_bytes(b"d" * 4096)
+    (workdir / "pipeline.log").write_text("log\n")
+    return workdir
+
+
+def test_cleanup_removes_the_work_files_and_keeps_the_parquet(sandbox, runner, jq):
+    fake_parquet(sandbox)
+    workdir = runner_leftovers(sandbox)
+    ctp._OPTS.update(cleanup=True)
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE
+    assert sorted(p.name for p in workdir.iterdir()) == [
+        "html", "jq-dataset.parquet", "jq.validated"]
+    [row] = ledger_rows(sandbox, "jq", "cleanup")
+    assert row["status"] == "ok"
+    assert set(row["cleanup"]["removed"]) == {
+        "jq-original.git", "jq-cregit", "memo", "blame", "jq-blobmap.db", "pipeline.log"}
+    assert row["cleanup"]["bytes_freed"] > 0
+    assert sorted(row["cleanup"]["kept"]) == ["html", "jq-dataset.parquet", "jq.validated"]
+    # The logs and the ledger live outside the workdir and stay.
+    assert list((sandbox.root / "state" / "jq" / "logs").glob("pipeline-*.log"))
+
+
+def test_drop_html_removes_html_in_the_cleanup(sandbox, runner, jq):
+    fake_parquet(sandbox)
+    workdir = runner_leftovers(sandbox)
+    ctp._OPTS.update(cleanup=True, drop_html=True)
+    ctp.run_project(jq)
+    assert not (workdir / "html").exists()
+
+
+def test_a_failed_cleanup_makes_the_project_done_dirty(monkeypatch, sandbox, runner, jq):
+    fake_parquet(sandbox)
+    runner_leftovers(sandbox)
+    ctp._OPTS.update(cleanup=True)
+    monkeypatch.setattr(ctp.retain, "clean_workdir", lambda name, drop_html: {
+        "removed": [], "kept": [], "errors": ["memo (Permission denied)"], "bytes_freed": 0})
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE_DIRTY
+    [row] = ledger_rows(sandbox, "jq", "cleanup")
+    assert row["status"] == "failed" and row["cleanup"]["errors"] == ["memo (Permission denied)"]
+    assert ledger_rows(sandbox, "jq", "project")[0]["state"] == "done-dirty"
+
+
+def test_without_cleanup_the_work_files_stay(sandbox, runner, jq):
+    fake_parquet(sandbox)
+    workdir = runner_leftovers(sandbox)
+    ctp.run_project(jq)
+    assert (workdir / "memo").exists() and (workdir / "jq-original.git").exists()
+
+
+@pytest.fixture
+def anonymizer(sandbox):
+    script = sandbox.root / "anonymize_parquet.py"
+    script.write_text("# stand-in\n")
+    ctp._OPTS.update(anonymize=str(script))
+    return script
+
+
+def test_anonymize_runs_after_the_schema_check_and_before_the_join(
+        sandbox, runner, jq, joining, anonymizer):
+    ctp.run_project(jq)
+    assert [c.phase for c in runner.calls] == [
+        "pipeline", "firm", "validate", "schema", "anonymize", "join"]
+    workdir = sandbox.out / "jq"
+    assert runner.argv("anonymize") == ["python3", str(anonymizer), str(workdir / "anon"),
+                                        str(workdir / "jq-dataset.parquet")]
+    [row] = ledger_rows(sandbox, "jq", "anonymize")
+    [out] = row["anonymized"]
+    assert out["path"] == str(workdir / "anon" / "jq-dataset.parquet")
+    assert out["sha256"] == hashlib.sha256(b"PAR1 anon PAR1").hexdigest()
+
+
+def test_anonymize_without_join_still_runs(sandbox, runner, jq, anonymizer):
+    assert ctp.run_project(jq) == ctp.RunOutcome.DONE
+    assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate", "anonymize"]
+
+
+def test_an_anonymizer_that_writes_nothing_fails_the_project(
+        monkeypatch, sandbox, jq, anonymizer):
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(anon_output=False))
+    assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
+    [row] = ledger_rows(sandbox, "jq", "anonymize")
+    assert row["exit_code"] == 1 and "wrote no Parquet" in row["detail"]
+
+
+def test_drop_html_needs_cleanup(must_not_start):
+    with pytest.raises(SystemExit, match="--drop-html deletes html/ in the cleanup"):
+        ctp.cmd_run(run_args(drop_html=True))
+
+
+def test_anonymize_needs_an_existing_script(must_not_start):
+    with pytest.raises(SystemExit, match="is not a file"):
+        ctp.cmd_run(run_args(anonymize="/nonexistent/anon.py"))
+
+
+def test_run_options_carry_cleanup_drop_html_and_the_anonymizer(sandbox, runner_script):
+    runner_script()
+    script = sandbox.root / "anon.py"
+    script.write_text("")
+    opts = ctp.run_options(run_args(cleanup=True, drop_html=True, anonymize=str(script)))
+    assert opts["cleanup"] is True and opts["drop_html"] is True
+    assert opts["anonymize"] == str(script.resolve())
+    defaults = ctp.run_options(run_args())
+    assert (defaults["cleanup"], defaults["drop_html"], defaults["anonymize"]) == (False, False, "")
+
+
+def test_drop_html_and_anonymize_are_off_by_default_on_the_cli(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run"])
+    ctp.main()
+    assert seen["drop_html"] is False and seen["anonymize"] == "" and seen["cleanup"] is False
+
+
+# --------------------------------------------------------------------------- #
+# census: order, gates, stop, resume, retries
+# --------------------------------------------------------------------------- #
+
+def census_args(**over):
+    base = vars(run_args())
+    base.update(workers=1, min_free_mem_gb=0, disk_floor_gb=0, stop_file="", poll=0.01)
+    base.pop("jobs")
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def manifest_rows(*names):
+    return [f"{n}\thttps://example.org/{n}.git\tcommunity\t\\.[ch]$\tS\t{PINNED_SHA}"
+            for n in names]
+
+
+def projects_of(sandbox, *names):
+    return ctp.read_manifest(write_manifest(sandbox.root, *manifest_rows(*names)), None)
+
+
+class FakeProjects:
+    """Stand-in for run_project: records each call, returns scripted outcomes,
+    and can run a hook inside the call."""
+
+    def __init__(self, outcomes=None, hook=None):
+        self.calls: list[tuple] = []
+        self.outcomes = {k: list(v) for k, v in (outcomes or {}).items()}
+        self.hook = hook
+        self.lock = threading.Lock()
+
+    def __call__(self, project, pos=None, total=None, attempt=1, post=False):
+        with self.lock:
+            self.calls.append((project["name"], pos, total, attempt, post))
+        if self.hook:
+            self.hook(project["name"])
+        queue = self.outcomes.get(project["name"])
+        return queue.pop(0) if queue else ctp.RunOutcome.DONE
+
+    def names(self):
+        return [c[0] for c in self.calls]
+
+
+@pytest.fixture
+def fake_projects(monkeypatch):
+    def install(**kw):
+        fake = FakeProjects(**kw)
+        monkeypatch.setattr(ctp, "run_project", fake)
+        return fake
+    return install
+
+
+@pytest.fixture
+def no_gates(monkeypatch):
+    monkeypatch.setattr(ctp, "gate_reason", lambda opts: None)
+
+
+def stamp(sandbox, name):
+    (sandbox.out / name).mkdir(parents=True, exist_ok=True)
+    (sandbox.out / name / f"{name}.validated").write_text("rows=1\n")
+
+
+def history_row(name, state, **extra):
+    return {"project": name, "step": "project", "state": state, **extra}
+
+
+def test_census_runs_in_manifest_order_and_records_the_queue_position(
+        sandbox, fake_projects, no_gates):
+    fake = fake_projects()
+    projects = projects_of(sandbox, "c", "a", "b")
+    results = ctp.schedule(projects, 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.calls == [("c", 1, 3, 1, False), ("a", 2, 3, 1, False), ("b", 3, 3, 1, False)]
+    assert all(v == ctp.RunOutcome.DONE for v in results.values())
+
+
+def test_census_skips_done_projects_and_resumes_the_rest(sandbox, fake_projects, no_gates):
+    log = sandbox.root / "ledger.jsonl"
+    stamp(sandbox, "a")
+    ledger.append(log, history_row("a", "done"))
+    ledger.append(log, history_row("b", "failed", failed_step="pipeline"))
+    stamp(sandbox, "c")
+    ledger.append(log, history_row("c", "done-dirty"))
+    fake = fake_projects()
+    results = ctp.schedule(projects_of(sandbox, "a", "b", "c", "d"), 1, 1,
+                           sandbox.root / "STOP", poll=0.01)
+    assert results["a"] == ctp.RunOutcome.SKIPPED
+    # b failed once: its second attempt. c validated but is dirty: only the later steps.
+    assert fake.calls == [("b", 2, 4, 2, False), ("c", 3, 4, 2, True), ("d", 4, 4, 1, False)]
+
+
+def test_census_gives_up_after_the_retries_across_restarts(
+        sandbox, fake_projects, no_gates, capsys):
+    log = sandbox.root / "ledger.jsonl"
+    for _ in range(2):
+        ledger.append(log, history_row("a", "failed", failed_step="clone"))
+    fake = fake_projects()
+    results = ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
+    assert fake.calls == [] and results["a"] == ctp.RunOutcome.FAILED
+    assert "failed 2 times (last at clone)" in capsys.readouterr().out
+
+
+def test_census_retries_a_failure_within_the_run(sandbox, fake_projects, no_gates):
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED, ctp.RunOutcome.DONE]})
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 1, sandbox.root / "STOP",
+                           poll=0.01)
+    assert fake.names() == ["a", "b", "a"]
+    assert fake.calls[2][3] == 2 and results["a"] == ctp.RunOutcome.DONE
+
+
+def test_census_gives_up_on_a_project_that_keeps_killing_its_run(
+        sandbox, fake_projects, no_gates, capsys):
+    log = sandbox.root / "ledger.jsonl"
+    for run in ("r1", "r2"):
+        ledger.append(log, {"project": "a", "run_id": run, "attempt": 1,
+                            "step": "pipeline", "status": "started"})
+    fake = fake_projects()
+    ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
+    assert fake.calls == []
+    assert "failed 2 times (last at pipeline (interrupted))" in capsys.readouterr().out
+
+
+def test_one_interrupted_run_is_retried(sandbox, fake_projects, no_gates):
+    ledger.append(sandbox.root / "ledger.jsonl", {"project": "a", "run_id": "r1",
+                                                  "attempt": 1, "step": "pipeline",
+                                                  "status": "started"})
+    fake = fake_projects()
+    ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
+    assert fake.calls == [("a", 1, 1, 2, False)]
+
+
+def test_census_without_retries_runs_a_failure_once(sandbox, fake_projects, no_gates):
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED] * 3})
+    results = ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.names() == ["a"] and results["a"] == ctp.RunOutcome.FAILED
+
+
+def test_a_retry_after_validation_resumes_at_the_later_steps(sandbox, fake_projects, no_gates):
+    def failed_after_validating(name):
+        stamp(sandbox, name)
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED, ctp.RunOutcome.DONE]},
+                         hook=failed_after_validating)
+    ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
+    assert [c[4] for c in fake.calls] == [False, True]
+
+
+def test_the_stop_file_lets_the_running_project_finish_and_starts_no_other(
+        sandbox, fake_projects, no_gates, capsys):
+    stop = sandbox.root / "STOP"
+    fake = fake_projects(hook=lambda name: stop.touch())
+    results = ctp.schedule(projects_of(sandbox, "a", "b", "c"), 1, 0, stop, poll=0.01)
+    assert fake.names() == ["a"] and results == {"a": ctp.RunOutcome.DONE}
+    assert f"{stop} exists" in ctp._RUN["stop_reason"]
+    assert "No new project starts" in capsys.readouterr().out
+
+
+def test_a_restart_after_a_stop_continues_with_the_next_project(sandbox, monkeypatch, no_gates):
+    """The real run_project, so the ledger the second census reads is real."""
+    monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
+    monkeypatch.setattr(ctp.subprocess, "run", FakeRunner())
+    stop = sandbox.root / "STOP"
+    projects = projects_of(sandbox, "a", "b")
+    real = ctp.run_project
+
+    def run_then_stop(*a, **k):
+        outcome = real(*a, **k)
+        stop.touch()
+        return outcome
+    monkeypatch.setattr(ctp, "run_project", run_then_stop)
+    first = ctp.schedule(projects, 1, 0, stop, poll=0.01)
+    assert set(first) == {"a"}
+
+    stop.unlink()
+    ctp._RUN.clear()
+    monkeypatch.setattr(ctp, "run_project", real)
+    second = ctp.schedule(projects, 1, 0, stop, poll=0.01)
+    assert second == {"a": ctp.RunOutcome.SKIPPED, "b": ctp.RunOutcome.DONE}
+    finals = [(r["project"], r["state"]) for r in ledger_rows(sandbox, step="project")]
+    assert finals == [("a", "done"), ("b", "done")]
+
+
+def test_a_stop_signal_stops_dispatch(sandbox, fake_projects, no_gates):
+    def signal_during(name):
+        ctp._RUN["stop_reason"] = "signal SIGTERM"
+        ctp._STOP.set()
+    fake = fake_projects(hook=signal_during)
+    try:
+        ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    finally:
+        ctp._STOP.clear()
+    assert fake.names() == ["a"] and ctp._RUN["stop_reason"] == "signal SIGTERM"
+
+
+def test_a_broken_ledger_stops_dispatch(sandbox, fake_projects, no_gates):
+    def break_ledger(name):
+        ctp._RUN["ledger_broken"] = "OSError: disk full"
+    fake = fake_projects(hook=break_ledger)
+    ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.names() == ["a"] and "disk full" in ctp._RUN["stop_reason"]
+
+
+def test_a_closed_gate_waits_then_starts(sandbox, fake_projects, monkeypatch, capsys):
+    answers = iter(["memory 1.0G available, below the 8G floor"] * 3)
+    monkeypatch.setattr(ctp, "gate_reason", lambda opts: next(answers, None))
+    fake = fake_projects()
+    ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.names() == ["a"]
+    out = capsys.readouterr().out
+    assert out.count("waiting to start a: memory 1.0G available") == 1
+
+
+def test_a_closed_gate_and_a_stop_end_the_census_without_starting(
+        sandbox, fake_projects, monkeypatch):
+    stop = sandbox.root / "STOP"
+    calls = []
+
+    def gate(opts):
+        calls.append(1)
+        stop.touch()
+        return "disk 1G free, below the 150G floor"
+    monkeypatch.setattr(ctp, "gate_reason", gate)
+    fake = fake_projects()
+    assert ctp.schedule(projects_of(sandbox, "a"), 1, 0, stop, poll=0.01) == {}
+    assert fake.calls == [] and calls
+
+
+def test_a_deferred_project_is_tried_again_after_the_rest(sandbox, fake_projects, no_gates):
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP",
+                           poll=0.01)
+    assert fake.names() == ["a", "b", "a"] and results["a"] == ctp.RunOutcome.DONE
+
+
+def test_a_lone_deferred_project_waits_a_poll_before_its_next_try(
+        sandbox, fake_projects, no_gates, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(ctp.time, "sleep", lambda s: sleeps.append(s))
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
+    ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.5)
+    assert fake.names() == ["a", "a"] and 0.5 in sleeps
+
+
+def test_a_crashing_worker_fails_only_its_project(sandbox, fake_projects, no_gates, capsys):
+    def crash(name):
+        if name == "a":
+            raise RuntimeError("boom")
+    fake = fake_projects(hook=crash)
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP",
+                           poll=0.01)
+    assert results == {"a": ctp.RunOutcome.FAILED, "b": ctp.RunOutcome.DONE}
+    assert "crashed the worker: RuntimeError: boom" in capsys.readouterr().out
+
+
+def test_census_runs_up_to_workers_projects_at_once(sandbox, fake_projects, no_gates):
+    barrier = threading.Barrier(2, timeout=10)
+    fake = fake_projects(hook=lambda name: barrier.wait())
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 2, 0, sandbox.root / "STOP",
+                           poll=0.01)
+    assert sorted(fake.names()) == ["a", "b"] and not barrier.broken
+    assert set(results.values()) == {ctp.RunOutcome.DONE}
+
+
+@pytest.mark.parametrize("state, failures, stamped, expected", [
+    ("done", 0, True, "skip"),
+    ("done", 0, False, "run"),        # done once, but the outputs are gone
+    ("done-dirty", 0, True, "post"),
+    ("failed", 1, True, "post"),
+    ("failed", 1, False, "run"),
+    ("failed", 2, False, "give-up"),
+    ("", 0, False, "run"),
+])
+def test_plan(sandbox, state, failures, stamped, expected):
+    if stamped:
+        stamp(sandbox, "a")
+    h = ledger.History(state=state, failures=failures)
+    assert ctp.plan({"name": "a"}, h, retries=1) == expected
+
+
+def test_mem_available_reads_proc_meminfo(tmp_path):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal: 32000000 kB\nMemAvailable: 8388608 kB\n")
+    assert ctp.mem_available_gb(meminfo) == 8.0
+    meminfo.write_text("MemTotal: 1 kB\n")
+    assert ctp.mem_available_gb(meminfo) is None
+    assert ctp.mem_available_gb(tmp_path / "absent") is None
+
+
+def test_gate_reason_names_disk_then_memory(sandbox, monkeypatch):
+    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    assert ctp.gate_reason({}).startswith("disk")
+    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 0)
+    monkeypatch.setattr(ctp, "mem_available_gb", lambda: 2.0)
+    assert ctp.gate_reason({"min_free_mem_gb": 4}).startswith("memory 2.0G")
+    assert ctp.gate_reason({"min_free_mem_gb": 1}) is None
+    monkeypatch.setattr(ctp, "mem_available_gb", lambda: None)
+    assert ctp.gate_reason({"min_free_mem_gb": 4}) is None
+
+
+@pytest.fixture
+def census_ready(ready, monkeypatch):
+    write_manifest(ready.root, *manifest_rows("a", "b"))
+    monkeypatch.setattr(ctp, "install_signal_handlers", lambda: None)
+    return ready
+
+
+def test_cmd_census_runs_end_to_end_options(census_ready, fake_projects, no_gates):
+    fake = fake_projects()
+    assert ctp.cmd_census(census_args()) == 0
+    assert fake.names() == ["a", "b"]
+    assert ctp._OPTS["join"] and ctp._OPTS["cleanup"] and ctp._OPTS["own_session"]
+    rows = ledger.read(census_ready.root / "ledger.jsonl")
+    assert rows[0]["command"] == "census" and rows[-1]["step"] == "run-end"
+
+
+def test_cmd_census_exits_3_when_stopped_cleanly(census_ready, fake_projects, no_gates):
+    stop = census_ready.root / "STOP"
+    fake_projects(hook=lambda name: stop.touch())
+    assert ctp.cmd_census(census_args()) == 3
+    assert ledger.read(census_ready.root / "ledger.jsonl")[-1]["stop_reason"]
+
+
+def test_cmd_census_exits_1_on_a_failure(census_ready, fake_projects, no_gates):
+    fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED]})
+    assert ctp.cmd_census(census_args(retries=0)) == 1
+
+
+def test_cmd_census_refuses_to_start_with_a_stop_file(census_ready):
+    (census_ready.root / "STOP").touch()
+    with pytest.raises(SystemExit, match="Remove it to start"):
+        ctp.cmd_census(census_args())
+
+
+def test_cmd_census_takes_a_custom_stop_file(census_ready, fake_projects, no_gates):
+    stop = census_ready.root / "my-stop"
+    stop.touch()
+    with pytest.raises(SystemExit, match="my-stop exists"):
+        ctp.cmd_census(census_args(stop_file=str(stop)))
+
+
+def test_cmd_census_needs_a_worker(census_ready):
+    with pytest.raises(SystemExit, match="--workers"):
+        ctp.cmd_census(census_args(workers=0))
+
+
+def test_cmd_census_sets_the_disk_floor(census_ready, fake_projects, no_gates, monkeypatch):
+    fake_projects()
+    ctp.cmd_census(census_args(disk_floor_gb=77))
+    assert ctp.DISK_FLOOR_GB == 77
+
+
+def test_cmd_census_warns_about_unpinned_projects(census_ready, fake_projects, no_gates, capsys):
+    write_manifest(census_ready.root, VALID_ROW)
+    fake_projects()
+    ctp.cmd_census(census_args())
+    assert "1 of 1 projects are unpinned" in capsys.readouterr().out
+
+
+def test_cmd_census_with_nothing_to_run(census_ready):
+    write_manifest(census_ready.root)
+    assert ctp.cmd_census(census_args()) == 0
+
+
+def test_cmd_census_needs_commit_url_for_a_pinned_manifest(census_ready, runner_script):
+    runner_script(REAL_RUNNER_USAGE.replace("--commit-url", "--commit-link"))
+    with pytest.raises(SystemExit, match="--commit-url"):
+        ctp.cmd_census(census_args())
+
+
+def test_the_first_signal_stops_dispatch_and_the_second_terminates(monkeypatch):
+    handlers = {}
+    monkeypatch.setattr(ctp.signal, "signal", lambda sig, h: handlers.setdefault(sig, h))
+    killed = []
+    monkeypatch.setattr(ctp.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    ctp.install_signal_handlers()
+    ctp._procs["a"] = SimpleNamespace(pid=4242)
+    try:
+        handlers[ctp.signal.SIGTERM](ctp.signal.SIGTERM, None)
+        assert ctp._STOP.is_set() and killed == []
+        assert ctp._RUN["stop_reason"] == "signal SIGTERM"
+        handlers[ctp.signal.SIGINT](ctp.signal.SIGINT, None)
+        assert killed == [(4242, ctp.signal.SIGTERM)]
+    finally:
+        ctp._STOP.clear()
+        ctp._procs.clear()
+
+
+def test_a_vanished_process_group_is_ignored(monkeypatch):
+    handlers = {}
+    monkeypatch.setattr(ctp.signal, "signal", lambda sig, h: handlers.setdefault(sig, h))
+
+    def gone(pid, sig):
+        raise ProcessLookupError(pid)
+    monkeypatch.setattr(ctp.os, "killpg", gone)
+    ctp.install_signal_handlers()
+    ctp._procs["a"] = SimpleNamespace(pid=1)
+    ctp._STOP.set()
+    try:
+        handlers[ctp.signal.SIGTERM](ctp.signal.SIGTERM, None)
+    finally:
+        ctp._STOP.clear()
+        ctp._procs.clear()
+
+
+def test_a_census_child_gets_its_own_session(sandbox, runner, jq):
+    ctp._OPTS.update(own_session=True)
+    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    assert runner.calls[0].kwargs["start_new_session"] is True
+
+
+def test_main_dispatches_census(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ctp, "cmd_census", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "census", "--workers", "3"])
+    assert ctp.main() == 0
+    assert seen["workers"] == 3 and seen["min_free_mem_gb"] == ctp.MIN_FREE_MEM_GB
+    assert seen["drop_html"] is False and seen["anonymize"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# CTP_CONFIG
+# --------------------------------------------------------------------------- #
+
+def test_config_is_forwarded_to_the_steps_when_ctp_config_is_set(monkeypatch, sandbox):
+    cfg = sandbox.root / "e2e.cfg"
+    cfg.write_text("[paths]\n")
+    monkeypatch.setenv("CTP_CONFIG", str(cfg))
+    monkeypatch.setattr(ctp.retain, "CONFIG", cfg)
+    ctp.forward_config()
+    assert ctp._ENV["CTP_CONFIG"] == str(cfg)
+
+
+def test_config_is_not_forwarded_by_default(monkeypatch):
+    monkeypatch.delenv("CTP_CONFIG", raising=False)
+    ctp.forward_config()
+    assert "CTP_CONFIG" not in ctp._ENV
+
+
+def test_run_flags_name_the_config_and_the_directories(sandbox, monkeypatch):
+    cfg = sandbox.root / "e2e.cfg"
+    cfg.write_text("[paths]\n")
+    monkeypatch.setattr(ctp.retain, "CONFIG", cfg)
+    flags = ctp.run_flags(run_args(), write_manifest(sandbox.root, VALID_ROW))
+    assert flags["config_path"] == str(cfg)
+    assert flags["config_sha256"] == hashlib.sha256(b"[paths]\n").hexdigest()
+    assert flags["cregit_dir"] == str(sandbox.cregit) and flags["output_dir"] == str(sandbox.out)
+    monkeypatch.setattr(ctp.retain, "CONFIG", sandbox.root / "absent.cfg")
+    assert ctp.run_flags(run_args(), sandbox.root / "manifest.tsv")["config_sha256"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# census resumes an interrupted project at step 2
+# --------------------------------------------------------------------------- #
+
+def leftover_attempt(sandbox, name="jq"):
+    workdir = sandbox.out / name
+    (workdir / f"{name}-original.git").mkdir(parents=True)
+    (workdir / f"{name}-blobmap.db").write_bytes(b"map")
+    return workdir
+
+
+def test_an_interrupted_pinned_project_resumes_at_step_2(monkeypatch, sandbox, pinned_jq):
+    leftover_attempt(sandbox)
+    r = FakeRunner()
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp._OPTS.update(auto_resume=True, from_step=1)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert runner_argv_tail(r) == "2"
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert row["argv"][-1] == "2"
+
+
+def runner_argv_tail(r):
+    return r.argv("pipeline")[-1]
+
+
+def test_a_clone_of_another_commit_restarts_at_step_1(monkeypatch, sandbox, pinned_jq):
+    leftover_attempt(sandbox)
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    assert ctp.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
+
+
+def test_no_blob_map_means_step_1(sandbox):
+    (sandbox.out / "jq" / "jq-original.git").mkdir(parents=True)
+    assert ctp.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
+
+
+def test_an_unreadable_clone_means_step_1(sandbox, monkeypatch):
+    leftover_attempt(sandbox)
+    monkeypatch.setattr(ctp, "git_head", lambda repo: "")
+    assert ctp.resume_step("jq", sandbox.out / "jq", "") == 1
+
+
+def test_an_unpinned_leftover_resumes_at_step_2(sandbox, monkeypatch):
+    leftover_attempt(sandbox)
+    monkeypatch.setattr(ctp, "git_head", lambda repo: OTHER_SHA)
+    assert ctp.resume_step("jq", sandbox.out / "jq", "") == 2
+
+
+def test_run_without_auto_resume_keeps_step_1(monkeypatch, sandbox, pinned_jq):
+    leftover_attempt(sandbox)
+    r = FakeRunner()
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp.run_project(pinned_jq)
+    assert "2" not in r.argv("pipeline")[-1:]
+
+
+def test_an_explicit_from_step_wins_over_auto_resume(monkeypatch, sandbox, pinned_jq):
+    leftover_attempt(sandbox)
+    r = FakeRunner()
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp._OPTS.update(auto_resume=True, from_step=7)
+    ctp.run_project(pinned_jq)
+    assert r.argv("pipeline")[-1] == "7"
+
+
+def test_next_job_takes_the_first_job_whose_wait_is_over():
+    from collections import deque
+    late = ctp.Job(1, {"name": "a"}, 1, 0, False, not_before=100.0)
+    ready = ctp.Job(2, {"name": "b"}, 1, 0, False)
+    queue = deque([late, ready])
+    assert ctp.next_job(queue, now=50.0) is ready and list(queue) == [late]
+    assert ctp.next_job(queue, now=50.0) is None
+    assert ctp.next_job(queue, now=100.0) is late and not queue
+
+
+def test_a_deferred_project_backs_off(sandbox, fake_projects, no_gates, capsys):
+    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED] * 2 + [ctp.RunOutcome.DONE]})
+    ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=0.01)
+    assert fake.names() == ["a", "a", "a"]
+    out = capsys.readouterr().out
+    assert "deferred; next try in 0s" in out
+
+
+def test_the_deferral_wait_is_capped(monkeypatch, sandbox, fake_projects, no_gates, capsys):
+    monkeypatch.setattr(ctp, "DEFER_MAX_S", 0.05)
+    fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
+    ctp.schedule(projects_of(sandbox, "a"), 1, 0, sandbox.root / "STOP", poll=10)
+    assert "deferred; next try in 0s" in capsys.readouterr().out
+
+
+def test_a_step_2_resume_drops_the_derived_artifacts_first(monkeypatch, sandbox, pinned_jq):
+    workdir = leftover_attempt(sandbox)
+    for entry in ("blame", "jq-original", "jq-cregit"):
+        (workdir / entry).mkdir()
+    for entry in ("jq-cregit.db", "jq-dataset.parquet"):
+        (workdir / entry).write_bytes(b"x")
+    (workdir / "memo").mkdir()
+    (workdir / "jq-cregit.git").mkdir()
+    seen = {}
+    r = FakeRunner()
+
+    def popen(args, **kwargs):
+        if FakeRunner.phase_of(args) == "pipeline":
+            seen["left"] = sorted(p.name for p in workdir.iterdir())
+        return r(args, **kwargs)
+    monkeypatch.setattr(ctp.subprocess, "Popen", popen)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    ctp._OPTS.update(auto_resume=True, from_step=1)
+    ctp.run_project(pinned_jq)
+    # The bare repos, the blob map and the memo stay; the rest is rebuilt.
+    assert seen["left"] == ["jq-blobmap.db", "jq-cregit.git", "jq-original.git", "memo"]
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert row["resume"] == {"from_step": 2, "dropped": [
+        "blame", "jq-original", "jq-cregit", "jq-cregit.db", "jq-dataset.parquet"]}
+
+
+def test_a_resume_that_cannot_drop_fails_without_running_the_pipeline(
+        monkeypatch, sandbox, pinned_jq):
+    workdir = leftover_attempt(sandbox)
+    (workdir / "blame").mkdir()
+    r = FakeRunner()
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    monkeypatch.setattr(ctp.retain, "remove_tree", lambda p: [f"{p} (busy)"])
+    ctp._OPTS.update(auto_resume=True, from_step=1)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    assert "pipeline" not in [c.phase for c in r.calls]
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert "could not drop" in row["detail"]
+
+
+def test_drop_derived_reports_a_file_it_cannot_unlink(monkeypatch, sandbox):
+    workdir = sandbox.out / "jq"
+    workdir.mkdir()
+    (workdir / "jq-cregit.db").write_bytes(b"x")
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name == "jq-cregit.db":
+            raise PermissionError("read-only")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    dropped, errors = ctp.drop_derived("jq", workdir)
+    assert dropped == [] and "read-only" in errors[0]
+
+
+# --latest: pin each project to the remote head when its first attempt starts.
+
+@pytest.fixture
+def latest(monkeypatch, sandbox):
+    monkeypatch.setitem(ctp._OPTS, "latest", True)
+    calls = []
+
+    def remote_head(url, timeout=None):
+        calls.append((url, timeout))
+        return "master", OTHER_SHA
+    monkeypatch.setattr(ctp.pin, "remote_head", remote_head)
+    return calls
+
+
+def test_latest_pins_the_remote_head_and_records_the_snapshot(monkeypatch, sandbox, latest,
+                                                               pinned_jq):
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    argv = r.argv("clone")
+    assert argv[argv.index("--commit") + 1] == OTHER_SHA
+    assert latest == [("https://github.com/jqlang/jq.git", ctp.LATEST_TIMEOUT_S)]
+    [resolve] = ledger_rows(sandbox, "jq", "resolve")
+    assert resolve["resolve"]["resolved_sha"] == OTHER_SHA
+    assert resolve["resolve"]["snapshot_sha"] == PINNED_SHA
+    assert resolve["resolve"]["reused"] is False
+    rows = ledger_rows(sandbox, "jq")
+    assert all(row["pinned_sha"] == OTHER_SHA and row["snapshot_sha"] == PINNED_SHA
+               for row in rows)
+    assert rows[-1]["state"] == "done"
+    saved = json.loads(ctp.latest_path("jq").read_text())
+    assert saved["resolved_sha"] == OTHER_SHA and saved["branch"] == "master"
+
+
+def test_latest_reuses_the_commit_of_an_earlier_attempt(monkeypatch, sandbox, latest,
+                                                         pinned_jq):
+    path = ctp.latest_path("jq")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"resolved_sha": OTHER_SHA, "snapshot_sha": PINNED_SHA}))
+    r = FakeRunner(checkout=OTHER_SHA)
+    monkeypatch.setattr(ctp.subprocess, "Popen", r)
+    monkeypatch.setattr(ctp.subprocess, "run", r)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert latest == []
+    argv = r.argv("clone")
+    assert argv[argv.index("--commit") + 1] == OTHER_SHA
+    [resolve] = ledger_rows(sandbox, "jq", "resolve")
+    assert resolve["resolve"]["reused"] is True
+
+
+def test_latest_fails_the_project_when_the_remote_head_cannot_be_read(
+        monkeypatch, sandbox, runner, pinned_jq):
+    monkeypatch.setitem(ctp._OPTS, "latest", True)
+
+    def unreachable(url, timeout=None):
+        raise ctp.pin.PinError("cannot reach it")
+    monkeypatch.setattr(ctp.pin, "remote_head", unreachable)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
+    assert runner.calls == []
+    [row] = ledger_rows(sandbox, "jq", "resolve")
+    assert row["status"] == "failed" and "cannot reach it" in row["detail"]
+    assert ledger_rows(sandbox, "jq", "project")[0]["failed_step"] == "resolve"
+    assert not ctp.latest_path("jq").exists()
+
+
+def test_without_latest_the_manifest_commit_is_pinned(sandbox, runner, pinned_jq):
+    ctp.run_project(pinned_jq)
+    assert ledger_rows(sandbox, "jq", "resolve") == []
+    assert all("snapshot_sha" not in row for row in ledger_rows(sandbox, "jq"))
+
+
+def test_a_workdir_of_another_commit_is_wiped_with_force_clean(monkeypatch, sandbox, runner,
+                                                               pinned_jq):
+    monkeypatch.setattr(ctp, "git_head", lambda repo: OTHER_SHA
+                        if repo.name == "jq-original.git" else PINNED_SHA)
+    assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
+    assert "--force-clean" in runner.argv("pipeline")
+    [row] = ledger_rows(sandbox, "jq", "pipeline")
+    assert row["resume"] == {"stale_workdir": OTHER_SHA}
+
+
+def test_a_fresh_workdir_is_not_force_cleaned(sandbox, runner, pinned_jq):
+    ctp.run_project(pinned_jq)
+    assert "--force-clean" not in runner.argv("pipeline")
+
+
+def test_a_post_validation_attempt_records_the_latest_commit(monkeypatch, sandbox, runner,
+                                                             pinned_jq, joining):
+    monkeypatch.setitem(ctp._OPTS, "latest", True)
+    monkeypatch.setattr(ctp.pin, "remote_head", lambda url, timeout=None: pytest.fail("read"))
+    path = ctp.latest_path("jq")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"resolved_sha": OTHER_SHA, "snapshot_sha": PINNED_SHA}))
+    fake_parquet(sandbox)
+    (sandbox.out / "jq" / "jq.validated").write_text("rows=7\nbytes=9\n")
+    assert ctp.run_project(pinned_jq, resume_validated=True) == ctp.RunOutcome.DONE
+    rows = ledger_rows(sandbox, "jq")
+    assert rows and all(r["pinned_sha"] == OTHER_SHA and r["snapshot_sha"] == PINNED_SHA
+                        for r in rows)
+
+
+# --tokenizer-worker: the runner's worker pool in step 2.
+
+WORKER_USAGE = REAL_RUNNER_USAGE + "#   --tokenizer-worker  tokenize with long-lived worker processes\n"
+
+
+def test_tokenizer_worker_is_passed_to_the_runner(sandbox, runner, jq):
+    opts = {**ctp._OPTS, "tokenizer_worker": True}
+    argv = ctp.build_pipeline_args(jq, opts, sandbox.out / "jq")
+    assert "--tokenizer-worker" in argv
+    assert "--tokenizer-worker" not in ctp.build_pipeline_args(jq, ctp._OPTS, sandbox.out / "jq")
+
+
+def test_tokenizer_worker_needs_a_runner_that_has_it(must_not_start, runner_script):
+    runner_script(REAL_RUNNER_USAGE)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(tokenizer_worker=True))
+    assert "--tokenizer-worker is not implemented" in str(exc.value)
+
+
+def test_tokenizer_worker_and_shards_are_refused_together(must_not_start, runner_script):
+    runner_script(WORKER_USAGE)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(tokenizer_worker=True, shards=4))
+    assert "--tokenizer-worker needs the runner's pipeline mode" in str(exc.value)
+
+
+def test_tokenizer_worker_is_an_effective_option(sandbox, runner_script):
+    runner_script(WORKER_USAGE)
+    assert ctp.run_options(run_args(tokenizer_worker=True))["tokenizer_worker"] is True
