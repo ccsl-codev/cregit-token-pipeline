@@ -55,6 +55,27 @@ projects plus `torvalds__linux`, which published 2026-09-21 with 199,678,137 row
 188 run-set rows, `tencent__tencentkona-21` has no Parquet and `tencent__tendbcluster-tendb`
 has one that is withheld.
 
+**Dataset v1 (census 2026-10): `kitao__pyxel` is pending, because GitHub suspended its
+owner's account.** The project is in the v1 frame. Its frame commit is `50f9bd77`, from
+the frame snapshot of about 2026-10-05. The census failed to resolve it 4 times; the last
+attempt was 2026-10-12 08:07 UTC (`git ls-remote` exit 128). On 2026-10-13 GitHub
+answered "Repository not found" for the repository and listed no public repositories for
+the owner.
+
+* **Cause (reported, not verified by us):** GitHub suspended the owner's account for a
+  time, after an attacker used the account in a supply chain attack. The attacker pushed
+  a malicious GitHub Actions workflow (`security-audit.yml`) to 27 of the owner's
+  repositories.
+* **No other v1 project has this owner.**
+* **Status:** pending (user decision 2026-10-13). If the account returns, the project
+  runs at the frame commit `50f9bd77`, not at the newest HEAD. So no commit after the
+  snapshot, and none of the attacker's commits after it, enters the dataset. If the
+  account does not return before the v1 freeze, or the commit is gone, v1 excludes the
+  project and keeps the row with this reason.
+* **Effect on the data:** the census reads the history and does not run workflows. A
+  workflow file is also outside the language mask (C, C++, Java, Rust). Until a rerun
+  finishes, the project has no Parquet: count it in the frame, not in the token tables.
+
 **A vendored dependency attributes its whole library to the engineer who imported
 it.** cregit credits the commit that introduced a line, so a wholesale vendor drop
 credits the importing author with every token of third-party code. This is a
