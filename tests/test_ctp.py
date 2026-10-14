@@ -34,6 +34,7 @@ from ctplib import (
     phases,
     pinning,
     project_run,
+    remote_head,
     resources,
     runner_args,
     runtime,
@@ -3305,7 +3306,7 @@ def test_latest_pins_the_remote_head_and_records_the_snapshot(
     assert ctp.run_project(pinned_jq) == project_run.RunOutcome.DONE
     argv = r.argv("clone")
     assert argv[argv.index("--commit") + 1] == OTHER_SHA
-    assert latest == [("https://github.com/jqlang/jq.git", ctp.LATEST_TIMEOUT_S)]
+    assert latest == [("https://github.com/jqlang/jq.git", remote_head.LATEST_TIMEOUT_S)]
     [resolve] = ledger_rows(sandbox, "jq", "resolve")
     assert resolve["resolve"]["resolved_sha"] == OTHER_SHA
     assert resolve["resolve"]["snapshot_sha"] == PINNED_SHA
@@ -3313,12 +3314,12 @@ def test_latest_pins_the_remote_head_and_records_the_snapshot(
     rows = ledger_rows(sandbox, "jq")
     assert all(row["pinned_sha"] == OTHER_SHA and row["snapshot_sha"] == PINNED_SHA for row in rows)
     assert rows[-1]["state"] == "done"
-    saved = json.loads(ctp.latest_path("jq").read_text())
+    saved = json.loads(remote_head.latest_path("jq").read_text())
     assert saved["resolved_sha"] == OTHER_SHA and saved["branch"] == "master"
 
 
 def test_latest_reuses_the_commit_of_an_earlier_attempt(monkeypatch, sandbox, latest, pinned_jq):
-    path = ctp.latest_path("jq")
+    path = remote_head.latest_path("jq")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"resolved_sha": OTHER_SHA, "snapshot_sha": PINNED_SHA}))
     r = FakeRunner(checkout=OTHER_SHA)
@@ -3346,7 +3347,7 @@ def test_latest_fails_the_project_when_the_remote_head_cannot_be_read(
     [row] = ledger_rows(sandbox, "jq", "resolve")
     assert row["status"] == "failed" and "cannot reach it" in row["detail"]
     assert ledger_rows(sandbox, "jq", "project")[0]["failed_step"] == "resolve"
-    assert not ctp.latest_path("jq").exists()
+    assert not remote_head.latest_path("jq").exists()
 
 
 def test_without_latest_the_manifest_commit_is_pinned(sandbox, runner, pinned_jq):
@@ -3379,7 +3380,7 @@ def test_a_post_validation_attempt_records_the_latest_commit(
 ):
     monkeypatch.setitem(runtime.opts, "latest", True)
     monkeypatch.setattr(pin, "remote_head", lambda url, timeout=None: pytest.fail("read"))
-    path = ctp.latest_path("jq")
+    path = remote_head.latest_path("jq")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"resolved_sha": OTHER_SHA, "snapshot_sha": PINNED_SHA}))
     fake_parquet(sandbox)
