@@ -29,7 +29,7 @@ from pathlib import Path
 import ledger
 import pin
 import retain
-from ctplib import config, console, manifest_file, runtime
+from ctplib import config, console, manifest_file, memory, runtime
 from retain import lock_path, state_dir
 
 DEVENV = Path.home() / ".nix-profile/bin/devenv"
@@ -87,69 +87,6 @@ def script_supports(flag: str) -> bool:
     """True when the configured run_pipeline_process.sh advertises `flag`.
     The cache keys on CREGIT too, so it stays right when CREGIT is reassigned."""
     return _script_supports_cached(config.CREGIT, flag)
-
-
-_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s?(B|K|M|G|T|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$")
-_SIZE_UNITS = {
-    "B": 1,
-    "K": 1024,
-    "KB": 1024,
-    "KIB": 1024,
-    "M": 1024**2,
-    "MB": 1024**2,
-    "MIB": 1024**2,
-    "G": 1024**3,
-    "GB": 1024**3,
-    "GIB": 1024**3,
-    "T": 1024**4,
-    "TB": 1024**4,
-    "TIB": 1024**4,
-}
-
-# memory_limit bounds DuckDB's buffer manager, not the process; RSS runs about this much higher.
-SETTLE_RATIO = 1.4
-
-
-def size_to_bytes(text: str) -> int:
-    """Bytes for a DuckDB size string, else ValueError. Mirrors parse_memory_limit()
-    in generate_dataset.py, so a bad value fails before the run, not hours in at step 10."""
-    cleaned = text.strip()
-    if cleaned.endswith("%"):
-        raise ValueError(
-            f"--memory-limit takes an absolute size, not a percentage (got {text!r}). "
-            "A percentage measures total RAM, and only the free part is usable."
-        )
-    m = _SIZE_RE.match(cleaned.upper())
-    if not m:
-        raise ValueError(f"cannot read {text!r} as a memory size. Example: 3GB")
-    return int(float(m.group(1)) * _SIZE_UNITS[m.group(2)])
-
-
-def available_bytes() -> int | None:
-    """MemAvailable from /proc/meminfo, or None when it cannot be read."""
-    try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        return None
-    return None
-
-
-def memory_budget_warning(limit: str, jobs: int) -> str | None:
-    """A warning when SETTLE_RATIO x jobs x limit does not fit in MemAvailable, else None."""
-    available = available_bytes()
-    if available is None:
-        return None
-    want = int(size_to_bytes(limit) * SETTLE_RATIO * jobs)
-    if want <= available:
-        return None
-    return (
-        f"memory budget: {jobs} concurrent x {limit} settles at about "
-        f"{retain.human(want)}, but only {retain.human(available)} is available. "
-        f"Step 10 can exhaust RAM and the kernel or the harness will kill the "
-        f"run. Lower --memory-limit or --jobs."
-    )
 
 
 def capture_devenv_env() -> dict:
@@ -1262,7 +1199,7 @@ def refuse_bad_values(args: argparse.Namespace) -> None:
             sys.exit(f"{flag} cannot be negative (got {value}).")
     if args.memory_limit:
         try:
-            size_to_bytes(args.memory_limit)
+            memory.size_to_bytes(args.memory_limit)
         except ValueError as exc:
             sys.exit(f"--memory-limit: {exc}")
     if args.from_step < 1:
@@ -1440,7 +1377,7 @@ def announce_run(opts: dict, jobs: int) -> None:
             "Parquet's file_mask column will not match this run."
         )
     if opts["memory_limit"]:
-        warning = memory_budget_warning(opts["memory_limit"], jobs)
+        warning = memory.memory_budget_warning(opts["memory_limit"], jobs)
         if warning:
             console.say(f"WARNING: {warning}")
     if opts["from_step"] > 1:
@@ -1733,23 +1670,12 @@ MIN_FREE_MEM_GB = 8
 POLL_S = 15
 
 
-def mem_available_gb(meminfo: Path = Path("/proc/meminfo")) -> float | None:
-    """MemAvailable in GiB, or None where the kernel does not say."""
-    try:
-        for line in meminfo.read_text().splitlines():
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) / 2**20
-    except (OSError, ValueError, IndexError):
-        return None
-    return None
-
-
 def gate_reason(opts: dict) -> str | None:
     """Why a new project may not start now, or None."""
     free_gb = shutil.disk_usage(config.OUT).free / 2**30
     if free_gb < config.DISK_FLOOR_GB:
         return f"disk {free_gb:.0f}G free, below the {config.DISK_FLOOR_GB}G floor"
-    mem = mem_available_gb()
+    mem = memory.mem_available_gb()
     floor = opts.get("min_free_mem_gb", MIN_FREE_MEM_GB)
     if mem is not None and mem < floor:
         return f"memory {mem:.1f}G available, below the {floor}G floor"

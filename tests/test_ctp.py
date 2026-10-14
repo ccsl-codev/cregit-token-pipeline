@@ -25,7 +25,7 @@ import ctp
 import ledger
 import pin
 import retain
-from ctplib import config, console, manifest_file, runtime
+from ctplib import config, console, manifest_file, memory, runtime
 from file_mask import UNIVERSAL_MASK
 
 REAL_TOOL_VERSIONS = ctp.tool_versions
@@ -1157,7 +1157,7 @@ ACCEPTED = [
 @pytest.mark.parametrize("over, opts, said, unsaid, ram", ACCEPTED)
 def test_run_accepts_and_announces(ready, monkeypatch, capsys, over, opts, said, unsaid, ram):
     if ram is not None:
-        monkeypatch.setattr(ctp, "available_bytes", lambda: ram)
+        monkeypatch.setattr(memory, "available_bytes", lambda: ram)
 
     def resolve(value):
         return value(ready.root) if callable(value) else value
@@ -1559,13 +1559,13 @@ def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
 def test_size_to_bytes_reads_every_unit_duckdb_accepts(text, want):
     """The budget arithmetic is only as good as the parse, and DuckDB accepts
     all of these spellings."""
-    assert ctp.size_to_bytes(text) == want
+    assert memory.size_to_bytes(text) == want
 
 
 def test_size_to_bytes_refuses_a_percentage():
     """A percentage measures total RAM; only the free part is usable."""
     with pytest.raises(ValueError) as exc:
-        ctp.size_to_bytes("80%")
+        memory.size_to_bytes("80%")
     assert "not a percentage" in str(exc.value)
 
 
@@ -1573,7 +1573,7 @@ def test_size_to_bytes_refuses_a_percentage():
 def test_size_to_bytes_refuses_anything_it_cannot_read(bad):
     """Guessing at a typo would cap the heap at the wrong number silently."""
     with pytest.raises(ValueError) as exc:
-        ctp.size_to_bytes(bad)
+        memory.size_to_bytes(bad)
     assert "cannot read" in str(exc.value)
 
 
@@ -1598,14 +1598,14 @@ def test_available_bytes_reads_mem_available_or_says_none(tmp_path, monkeypatch,
     path = tmp_path / "meminfo"
     if meminfo is not None:
         path.write_text(meminfo)
-    monkeypatch.setattr(ctp, "Path", lambda _p: path)
-    assert ctp.available_bytes() == want
+    monkeypatch.setattr(memory, "Path", lambda _p: path)
+    assert memory.available_bytes() == want
 
 
 def test_memory_budget_warning_names_the_shortfall(monkeypatch):
     """2 x 8GB at the 1.4 settle ratio against 6 GiB free."""
-    monkeypatch.setattr(ctp, "available_bytes", lambda: 6 * 1024**3)
-    warning = ctp.memory_budget_warning("8GB", 2)
+    monkeypatch.setattr(memory, "available_bytes", lambda: 6 * 1024**3)
+    warning = memory.memory_budget_warning("8GB", 2)
     assert warning is not None
     assert "2 concurrent x 8GB" in warning
     assert "22.4 GiB" in warning, "1.4 x 2 x 8GB, the measured settle ratio"
@@ -1622,8 +1622,8 @@ def test_memory_budget_warning_names_the_shortfall(monkeypatch):
     ],
 )
 def test_memory_budget_warning_multiplies_by_jobs(monkeypatch, free, limit, jobs, warns):
-    monkeypatch.setattr(ctp, "available_bytes", lambda: free)
-    assert (ctp.memory_budget_warning(limit, jobs) is not None) is warns
+    monkeypatch.setattr(memory, "available_bytes", lambda: free)
+    assert (memory.memory_budget_warning(limit, jobs) is not None) is warns
 
 
 # --------------------------------------------------------------------------- #
@@ -2926,20 +2926,20 @@ def test_plan(sandbox, state, failures, stamped, expected):
 def test_mem_available_reads_proc_meminfo(tmp_path):
     meminfo = tmp_path / "meminfo"
     meminfo.write_text("MemTotal: 32000000 kB\nMemAvailable: 8388608 kB\n")
-    assert ctp.mem_available_gb(meminfo) == 8.0
+    assert memory.mem_available_gb(meminfo) == 8.0
     meminfo.write_text("MemTotal: 1 kB\n")
-    assert ctp.mem_available_gb(meminfo) is None
-    assert ctp.mem_available_gb(tmp_path / "absent") is None
+    assert memory.mem_available_gb(meminfo) is None
+    assert memory.mem_available_gb(tmp_path / "absent") is None
 
 
 def test_gate_reason_names_disk_then_memory(sandbox, monkeypatch):
     monkeypatch.setattr(config, "DISK_FLOOR_GB", 10**9)
     assert ctp.gate_reason({}).startswith("disk")
     monkeypatch.setattr(config, "DISK_FLOOR_GB", 0)
-    monkeypatch.setattr(ctp, "mem_available_gb", lambda: 2.0)
+    monkeypatch.setattr(memory, "mem_available_gb", lambda: 2.0)
     assert ctp.gate_reason({"min_free_mem_gb": 4}).startswith("memory 2.0G")
     assert ctp.gate_reason({"min_free_mem_gb": 1}) is None
-    monkeypatch.setattr(ctp, "mem_available_gb", lambda: None)
+    monkeypatch.setattr(memory, "mem_available_gb", lambda: None)
     assert ctp.gate_reason({"min_free_mem_gb": 4}) is None
 
 
