@@ -188,41 +188,13 @@ def cleanup_step(ctx: project_run.ProjectRun) -> bool:
     name = ctx.name
     start = time.time()
     errors = pinning.drop_pinned_clone(name)
-    removed = [] if errors else ([str(pinning.pinned_clone_path(name))] if ctx.pinned else [])
+    removed = [str(pinning.pinned_clone_path(name))] if ctx.pinned and not errors else []
     for err in errors:
         console.say(f"{name} — staging clone not fully removed: {err}")
     if runtime.opts.get("cleanup"):
-        result = retain.clean_workdir(name, drop_html=bool(runtime.opts.get("drop_html")))
-        removed += [r["entry"] for r in result["removed"]]
-        errors += result["errors"]
-        for err in result["errors"]:
-            console.say(f"{name} — cleanup could not remove: {err}")
-        console.say(
-            f"{name} — cleanup freed {retain.human(result['bytes_freed'])}, kept "
-            f"{', '.join(result['kept']) or 'nothing'}"
-        )
-        ctx.record(
-            "cleanup",
-            "ok" if not errors else "failed",
-            start,
-            time.time(),
-            cleanup={
-                "removed": removed,
-                "errors": errors,
-                "kept": result["kept"],
-                "bytes_freed": result["bytes_freed"],
-                "removed_bytes": {r["entry"]: r["bytes"] for r in result["removed"]},
-            },
-        )
-        return not errors
+        return cleanup_workdir(ctx, start, removed, errors)
     if runtime.opts.get("drop_memo"):
-        # prune checks the keepers itself.
-        _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
-        if ok:
-            removed.append("memo")
-        else:
-            errors.append("retain refused to prune memo/ (see the run log)")
-            console.say(f"{name} — memo/ kept, retain refused the prune (see above)")
+        drop_memo(name, removed, errors)
     ctx.record(
         "cleanup",
         "ok" if not errors else "failed",
@@ -231,6 +203,46 @@ def cleanup_step(ctx: project_run.ProjectRun) -> bool:
         cleanup={"removed": removed, "errors": errors},
     )
     return not errors
+
+
+def cleanup_workdir(
+    ctx: project_run.ProjectRun, start: float, removed: list[str], errors: list[str]
+) -> bool:
+    """--cleanup: delete every bulky work file and record what went. True when clean."""
+    name = ctx.name
+    result = retain.clean_workdir(name, drop_html=bool(runtime.opts.get("drop_html")))
+    removed += [r["entry"] for r in result["removed"]]
+    errors += result["errors"]
+    for err in result["errors"]:
+        console.say(f"{name} — cleanup could not remove: {err}")
+    console.say(
+        f"{name} — cleanup freed {retain.human(result['bytes_freed'])}, kept "
+        f"{', '.join(result['kept']) or 'nothing'}"
+    )
+    ctx.record(
+        "cleanup",
+        "ok" if not errors else "failed",
+        start,
+        time.time(),
+        cleanup={
+            "removed": removed,
+            "errors": errors,
+            "kept": result["kept"],
+            "bytes_freed": result["bytes_freed"],
+            "removed_bytes": {r["entry"]: r["bytes"] for r in result["removed"]},
+        },
+    )
+    return not errors
+
+
+def drop_memo(name: str, removed: list[str], errors: list[str]) -> None:
+    """--drop-memo: delete memo/ only. prune checks the keepers itself."""
+    _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
+    if ok:
+        removed.append("memo")
+    else:
+        errors.append("retain refused to prune memo/ (see the run log)")
+        console.say(f"{name} — memo/ kept, retain refused the prune (see above)")
 
 
 def validate_and_publish(
