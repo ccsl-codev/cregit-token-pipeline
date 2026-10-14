@@ -3,6 +3,7 @@ that the ledger records."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -34,8 +35,6 @@ def capture_devenv_env() -> dict:
     )
     if out.returncode != 0:
         sys.exit(f"devenv environment capture failed:\n{out.stdout}\n{out.stderr}")
-    import json
-
     return json.loads(out.stdout.splitlines()[-1])
 
 
