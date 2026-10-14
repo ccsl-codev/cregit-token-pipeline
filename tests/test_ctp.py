@@ -39,6 +39,7 @@ from ctplib import (
     runner_args,
     runtime,
     toolchain,
+    workdir_state,
 )
 from file_mask import UNIVERSAL_MASK
 
@@ -3153,24 +3154,24 @@ def test_a_clone_of_another_commit_restarts_at_step_1(monkeypatch, sandbox, pinn
     leftover_attempt(sandbox)
     r = FakeRunner(checkout=OTHER_SHA)
     monkeypatch.setattr(subprocess, "run", r)
-    assert ctp.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
+    assert workdir_state.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
 
 
 def test_no_blob_map_means_step_1(sandbox):
     (sandbox.out / "jq" / "jq-original.git").mkdir(parents=True)
-    assert ctp.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
+    assert workdir_state.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
 
 
 def test_an_unreadable_clone_means_step_1(sandbox, monkeypatch):
     leftover_attempt(sandbox)
     monkeypatch.setattr(toolchain, "git_head", lambda repo: "")
-    assert ctp.resume_step("jq", sandbox.out / "jq", "") == 1
+    assert workdir_state.resume_step("jq", sandbox.out / "jq", "") == 1
 
 
 def test_an_unpinned_leftover_resumes_at_step_2(sandbox, monkeypatch):
     leftover_attempt(sandbox)
     monkeypatch.setattr(toolchain, "git_head", lambda repo: OTHER_SHA)
-    assert ctp.resume_step("jq", sandbox.out / "jq", "") == 2
+    assert workdir_state.resume_step("jq", sandbox.out / "jq", "") == 2
 
 
 def test_run_without_auto_resume_keeps_step_1(monkeypatch, sandbox, pinned_jq):
@@ -3277,7 +3278,7 @@ def test_drop_derived_reports_a_file_it_cannot_unlink(monkeypatch, sandbox):
         return real_unlink(self, *a, **k)
 
     monkeypatch.setattr(Path, "unlink", unlink)
-    dropped, errors = ctp.drop_derived("jq", workdir)
+    dropped, errors = workdir_state.drop_derived("jq", workdir)
     assert dropped == [] and "read-only" in errors[0]
 
 
