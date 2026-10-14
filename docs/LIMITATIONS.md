@@ -76,6 +76,260 @@ the owner.
   workflow file is also outside the language mask (C, C++, Java, Rust). Until a rerun
   finishes, the project has no Parquet: count it in the frame, not in the token tables.
 
+**Dataset v1: three more frame rows have no Parquet.** The v1 frame has 3,548 projects
+(2026-10-14). The rows below stay in the frame with their reason. Count them in the
+frame, not in the token tables. In the "Dataset v1" entries, the `s2-pool/…` and
+`s7-run/…` paths are in the dataset selection records
+(`2026.2-estudos-pesquisa-sistemas/dataset-selection/` of the ellians-master
+repository). The dataset paper repository copies part of them under `pipeline/`.
+
+| project | frame commit | reason | status (2026-10-14) |
+| --- | --- | --- | --- |
+| `googleapis__discovery-artifact-manager` | `9b6a724` | No in-scope source at the run commit. The run uses the newest head (`--latest`). Head `bb221e1` (2026-10-10) has 1,284 files and 0 C, C++, Java or Rust files, because the project deleted its Java code on 2026-10-07. The frame commit has 559 such files. Blame finds 0 files, and the pipeline stops with "no tokens processed" (4 attempts). | excluded (user decision 2026-10-11) |
+| `signalwire__freeswitch` | `3dee68e` | blobExec stops in step 2 with a `NullPointerException` at `Walker.scala:866` (`CommitBuilder.getCommitter()` is null): it reads a commit with no committer. All 4 attempts gave the same error. A scan of the 40,145 commits found no committer line that breaks git's format, so the cause in blobExec is not known. | excluded (user decision 2026-10-11); tool defect, not fixed |
+| `BRL-CAD__brlcad` | `27ba3c4` | The repository is gone. `git ls-remote` failed first on 2026-10-11 05:16 UTC, and it gives "Repository not found" on 2026-10-14 17:49 UTC. The user wrote to the owners (2026-10-12). | waits for the owners' answer; without the repository before the v1 freeze, v1 excludes the project |
+
+`discovery-artifact-manager` shows a property of the `--latest` rule. The selection
+facts (commit count, languages, license file) come from the frame commit, but the tokens
+come from the newest head at the first run attempt. A project can thus pass selection
+and have no tokens. `kitao__pyxel` (entry above) is the fourth frame row with no Parquet.
+
+**Dataset v1: the 51 GitLab rows (batches 25 and 26) have a later snapshot and other
+selection rules than the GitHub rows.** Find these rows by name in
+`s7-run/manifest.batch25.tsv` and `s7-run/manifest.batch26.tsv` of the selection
+records. Do not use the host prefix of the name: some earlier rows are on GitLab hosts
+too (for example `gitlab.eclipse.org__…`).
+
+* **Snapshot.** The GitHub rows use the frame snapshot of 2026-10-05. For the GitLab
+  rows, the selection read the head of the default branch on 2026-10-14: 01:23-01:27 UTC
+  for the 50 rows of batch 25, and 15:48 UTC for `muttmua/mutt`, batch 26
+  (`s2-pool/gitlab/measure.jsonl`). The manifests were built on 2026-10-14 at 01:37 UTC
+  (batch 25) and 16:37 UTC (batch 26). Thus the selection facts of a GitLab row are 9
+  days younger than those of a GitHub row. Both kinds run at the newest head of their
+  first run attempt (`--latest`).
+* **Fork rule.** On GitHub, only the fork flag removes a row, and it finds nothing (see
+  "GitHub's fork flag finds nothing" below). So GitHub rows that carry the history of
+  another project are kept and flagged. On GitLab, the copy rules of
+  `s2-pool/gitlab/decide.py` remove more rows: copy namespaces (rule R1, 43 rows), copies
+  of a pool project (R2, 2 rows) and forks that share history with a pool project (R3,
+  73 rows, 21 of them Linux trees). The 73 R3 rows stay out of v1 (user decision
+  2026-10-14). An upstream whose root commit only its forks share stays in (R4, 6 rows,
+  for example `mesa/mesa`). Thus, by rule, the GitLab part has no fork of a pool
+  project, but the GitHub part can have one.
+* **License rule.** The rule is now the same. The DP8L v4 near-miss classes C, D and E
+  (2026-10-11) passed GitHub rows only. Since 2026-10-14 about 16:40 UTC they also pass
+  GitLab rows (`s2-pool/gitlab/near_miss_gitlab.py`). `muttmua/mutt` (class C: root
+  `COPYRIGHT` and `GPL`) entered v1 as batch 26 with license `NOASSERTION`.
+  `mesa/demos` (class H: no license evidence) stays out.
+* **Namespaces and stars.** The listing of the 11 GitLab hosts and of the 22 gitlab.com
+  roster groups takes group namespaces only. It removed 20,812 projects in personal
+  namespaces, and it has no stars rule, as the rosters. The gitlab.com-wide search uses
+  stars > 400, the GitHub search rule, and it takes group and personal namespaces (the
+  personal ones since 2026-10-14 about 15:35 UTC), as the GitHub search has no owner
+  rule. That search found 75 projects. The personal namespaces add 1 row, `muttmua/mutt`.
+* **Labels.** The stratum labels of the GitLab rows have no review by hand yet (batch 25:
+  foundation 4, fiscal-sponsor 5, unknown 41; `s7-run/labels.batch25.csv`).
+
+**Dataset v1: some files have blame without copy detection.** v1 uses
+`git blame -C100` (see the re-blame entry below). For the files of this entry, a plain
+`git blame` ran. Plain blame follows a whole-file rename, but it does not follow content
+that moved between files. So the tokens of these files can go to the commit that moved
+them. The effect on these files is not measured. Three mechanisms caused it:
+
+1. **Time limit** (cregit `57551d7`, `9ccead6` and `23e4ccb`, and the running copies
+   that got their `formatBlame.pl`; see the next entry). After 3600 s of `-C100`, the
+   script stops git and runs plain blame. The pipeline log gets the line
+   `PLAIN-BLAME <file> after 3600 s of -C100` (sometimes `3601 s`).
+2. **git exit 128** (cregit `23e4ccb`, `gitlab.inria.fr__cedar__connectionlens` only).
+   `git blame -C100` stops with "unable to generate diff" when a commit moves a blob
+   over 1 GiB (the xdiff limit). The script then runs plain blame and logs
+   `PLAIN-BLAME <file> after git exit 128 of -C100`.
+3. **Manual swap** (2026-10-11, before the time limit existed). For a `-C100` blame that
+   ran for hours, the operator made a plain blame apart, stopped the slow git, and put
+   the plain `.blame` file in its place. **No log line marks these files.** The table
+   at the end of this entry lists them.
+
+Count on 2026-10-14 17:45 UTC, from the pipeline logs on the analysis machine. It has
+3,532 finished projects, and 3,517 of them have their logs there:
+
+| mechanism | projects | files |
+| --- | ---: | ---: |
+| time limit (`PLAIN-BLAME` line) | 81 | 186 |
+| git exit 128 (`PLAIN-BLAME` line) | 1 | 2 |
+| manual swap (no log line) | 11 | 13 |
+| **total** | **93** | **201** |
+
+This count does not include:
+
+* projects with no finished output on that date. For example, `alibaba__AliSQL` runs
+  again (status of 2026-10-14 13:24 UTC), so the manual swap of its 3 files is in no
+  finished Parquet;
+* 15 finished projects whose logs are not on the analysis machine yet: the L7-20b run
+  (`aftermathlabs__llvm-msvc`, `alpinelinux__aports`, `BrowserWorks__waterfox`,
+  `flang-compiler__classic-flang-llvm-project`, `intel__llvm`,
+  `MotorolaMobilityLLC__kernel-msm`, `mozilla__enterprise-firefox`), the L23 run
+  (`archlinuxcn__repo`, `checkedc__checkedc-clang`, `openbsd__ports`, `openbsd__src`,
+  `openucx__ODOS`, `WebKit__WebKit`, `Xilinx__hls-llvm-project`) and the L1r run
+  (`torvalds__linux`).
+
+Find the logged files with `grep -h '^PLAIN-BLAME' state/*/logs/pipeline-*.log` in the
+ctp state of each run part. Projects with 2 or more logged files:
+
+| project | files |
+| --- | ---: |
+| `arangodb__arangodb` | 23 |
+| `EiffelSoftware__EiffelStudio` | 10 |
+| `mamedev__mame` | 8 |
+| `openLuat__LuatOS` | 7 |
+| `wireshark__wireshark` | 7 |
+| `z88dk__z88dk` | 7 |
+| `BlitterStudio__amiberry` | 6 |
+| `googleapis__google-api-java-client-services` | 6 |
+| `IfcOpenShell__IfcOpenShell` | 6 |
+| `vpinball__vpinball` | 6 |
+| `mongodb__mongo` | 5 |
+| `oceanbase__oceanbase` | 5 |
+| `chapel-lang__chapel` | 4 |
+| `KiCad__kicad-source-mirror` | 4 |
+| `openjdk__jfx` | 4 |
+| `illumos__illumos-gate` | 3 |
+| `gitlab.inria.fr__cedar__connectionlens` (git exit 128) | 2 |
+| `joncampbell123__dosbox-x` | 2 |
+| `Kitware__VTK` | 2 |
+| `miranda-ng__miranda-ng` | 2 |
+| `picolibc__picolibc` | 2 |
+| `praat__praat.github.io` | 2 |
+| `qt__qtbase` | 2 |
+| `SakuraEngine__SakuraEngine` | 2 |
+| `TelegramMessenger__Telegram-iOS` | 2 |
+| `Weather-OS__WineGDK` | 2 |
+| `yandex__perforator` | 2 |
+
+Projects with 1 logged file (55): `adoptium__jdk`, `adoptium__jdk21u`,
+`Azure__azure-sdk-for-java`, `BeamMW__beam`, `catboost__catboost`, `citizenfx__fivem`,
+`cocos2d__cocos2d-x`, `corretto__corretto-21`, `corretto__corretto-26`,
+`corretto__corretto-27`, `DrTimothyAldenDavis__GraphBLAS`, `FarGroup__FarManager`,
+`ferrocene__ferrocene`, `gitlab.eclipse.org__eclipse__titan__titan.EclipsePlug-ins`,
+`jeandle__jeandle-jdk`, `JetBrains__JetBrainsRuntime`, `libretro__parallel-n64`,
+`llnl__rose`, `logicalclocks__rondb`, `maplibre__maplibre-native`,
+`microsoft__openjdk-jdk25u`, `mlflow__mlflow`, `mudita__MuditaOS`,
+`mysql__mysql-server`, `netxms__netxms`, `NVIDIA__cuda-gdb`, `omnetpp__omnetpp`,
+`openjdk__jdk`, `OpenRCT2__OpenRCT2`, `pawelsalawa__letos`, `percona__percona-server`,
+`percona__percona-xtrabackup`, `pi-hole__FTL`, `polardb__polardbx-engine`,
+`prusa3d__PrusaSlicer`, `Pzqqt__android_kernel_xiaomi_marble`, `qt-creator__qt-creator`,
+`rbfx__rbfx`, `RosettaCommons__rosetta`, `rust-lang__rust`,
+`schrodinger__pymol-open-source`, `sleuthkit__sleuthkit`, `SoarGroup__Soar`,
+`sourceware.org__git__binutils-gdb`, `stellar__stellar-core`, `Tencent__TencentKona-21`,
+`Tencent__wcdb`, `tnodir__fort`, `tutao__tutanota`, `ugeneunipro__ugene`,
+`UPBGE__upbge`, `wolfpld__tracy`, `wolfSSL__wolfssl`, `ytsaurus__ytsaurus`,
+`zeek__zeek`.
+
+The files of the manual swap (records: `s7-run/plain-swap-spot-a-20261011T1852Z.txt`,
+`s7-run/plain-swap-spot-b-20261011T2003Z.txt`, and the runs log update of 2026-10-11
+04:30 UTC for OpenVSP):
+
+| project | file | `-C100` time before the swap |
+| --- | --- | ---: |
+| `OpenVSP__OpenVSP` | `src/geom_core/humanshape/FemaleGeomData.h` | 38.5 h in step 7 (both files) |
+| `OpenVSP__OpenVSP` | `src/geom_core/humanshape/MaleGeomData.h` | 38.5 h in step 7 (both files) |
+| `avrdudes__avrdude` | `src/urbootlist.c` | 681 min |
+| `hortonworks__cloudbreak` | `usage-collection/src/generated/main/java/com/cloudera/thunderhead/service/common/usage/UsageProto.java` | 650 min |
+| `apache__hive` | `standalone-metastore/metastore-common/src/gen/thrift/gen-javabean/org/apache/hadoop/hive/metastore/api/ThriftHiveMetastore.java` | 636 min |
+| `phalcon__cphalcon` | `build/phalcon/phalcon.zep.c` | 623 min |
+| `Wilfred__difftastic` | `vendored_parsers/tree-sitter-kotlin/src/parser.c` | 434 min |
+| `MoarVM__MoarVM` | `src/strings/unicode_db.c` | 726 min |
+| `KratosMultiphysics__Kratos` | `applications/ContactStructuralMechanicsApplication/custom_conditions/ALM_frictional_mortar_contact_condition.cpp` | 313 min |
+| `OpenMPT__openmpt` | `include/opus/dnn/fargan_data.c` | 243 min |
+| `OpenMPT__openmpt` | `include/opus/dnn/nolace_data.c` | 243 min |
+| `vsg-dev__VulkanSceneGraph` | `src/vsg/utils/shaders/pbr_ShaderSet.cpp` | 232 min |
+| `u3d-community__U3D` | `Source/ThirdParty/SQLite/src/sqlite3.c` | 117 min |
+
+The ledger of each of these 11 projects shows that its finished Parquet comes from the
+run with the swap. The two OpenVSP files have 1 commit each, so plain blame gives every
+line to that commit, as `-C100` would, unless `-C100` finds a copy from another file in
+that commit.
+
+**Dataset v1: for some runs, the ledger names an older cregit commit than the blame code
+that ran.** On 2026-10-11 the blame time limit was put into running cregit copies in
+place. The operator replaced `blameRepo/formatBlame.pl` (old sha256 prefix `bcb80679`)
+with the file of cregit `57551d7` (sha256 `788acb9a…0b435`; `9ccead6` has the same
+file). The ctp ledger records the cregit commit when a run starts. So the ledger of
+these runs still names `95cdc88` or `1f17663`.
+
+| time (UTC) | copies changed |
+| --- | --- |
+| 2026-10-11 20:08:45-20:08:50 | 20: spot a `/w/{batch1resta2, batch10a1-a5, batch6a1, batch9a1}`; spot b `/w/{batch1restb2, batch11b1, batch15b4, batch16b3, batch17b1, batch17b4, batch17b5, batch18b1}`; big EC2 `/b5L`, `/bL7`, `/bL7b`, `/bL22` |
+| 2026-10-11 20:57:16-20:57:19 | 5: spot a `/w/batch11a1`, `/w/batch11a2`; spot b `/w/batch18b2`, `/w/batch18b3`, `/w/batch18b4` |
+| 2026-10-12 01:29 | 1: `/w/batch1resta2` on the new spot a, after a spot relaunch |
+| 2026-10-12 06:31:13 | 1: `/w/batch1restb2` on the new spot b, after a spot relaunch |
+
+Spot a and spot b are the two EC2 spot instances. The big EC2 is a third instance, which
+runs the L runs. On 2026-10-11, 21 changed copies were at `1f17663` and 4 at `95cdc88`.
+The two copies of 2026-10-12 were at `95cdc88`. So there were 27 changes in 25 copy paths. The
+template copies `/data/cregit-ec2` kept the old file. On spot a, the batch 3 part
+(`brave-core`) runs in its template, so its files have no time limit. Records:
+`s7-run/blame-time-limit-deploy-20261011.txt` (the command output),
+`s7-run/blame-time-limit.md` (the plan) and `s7-run/runs-20261009.md`.
+
+* **What changed.** `blameRepoFiles.pl` starts one `formatBlame.pl` process for each
+  file, and Perl reads the script when the process starts. So a file whose blame started
+  after the swap time used the new code. A file whose blame ran at that time kept the
+  old code.
+* **Effect.** The new code changes the output in two cases only. (1) `-C100` runs for
+  more than 3600 s: plain blame follows, with a `PLAIN-BLAME` line (previous entry).
+  (2) git fails: the new code writes no `.blame` file and step 7 fails, so the project
+  fails and runs again. The old code wrote an empty `.blame` file and exited 0. In all
+  other cases, the old and the new script give the same `.blame` bytes (measured on 116
+  real files).
+* **Detect.** In these runs, a file differs from the output of the ledger commit only if
+  the log has a `PLAIN-BLAME` line for it (the manual swap files of the previous entry
+  are a separate case). On 2026-10-14 this is true for 39 files in 9 projects:
+  `arangodb__arangodb` 23 and `chapel-lang__chapel` 4 (ledger `95cdc88`);
+  `IfcOpenShell__IfcOpenShell` 6, `catboost__catboost` 1, `maplibre__maplibre-native` 1,
+  `mudita__MuditaOS` 1, `pi-hole__FTL` 1 and `zeek__zeek` 1 (ledger `1f17663`); and
+  `Pzqqt__android_kernel_xiaomi_marble` 1 (the L7-20 run, copy `/bL7` at `1f17663`).
+  The logs of the L7-20b run (copy `/bL7b`) are not on the analysis machine yet.
+
+**Dataset v1: five cregit commits wrote the Parquets, and one equality is not
+measured.** Source: `tools.lock` of the dataset paper repository (checked 2026-10-14).
+All five commits start from `95cdc88`. Each machine made the libexpat gate Parquet
+(libexpat at `a76b1174`, fixed flags) and compared it before its runs started.
+
+| cregit | what it is | runs | libexpat gate |
+| --- | --- | --- | --- |
+| `95cdc88` | base | batch1rest, batch2, batch3, batch3L, batch4, batch5, batch5L, batch6, batch6L | `40511e0d…`, 2,184,432 B |
+| `9ccead6` | `95cdc88` plus the 3600 s `-C100` limit | batch6, 1 project (`mongodb__mongo`) | `40511e0d…`, 2,184,432 B |
+| `1f17663` | `95cdc88` plus the trailer fix: the `footer_*` columns come from the original log DB, one entry for each person | batch7-batch10, part of batch11-batch18, L7-20, L7-20b, L22, local-a | `14eb5d72…`, 2,196,248 B |
+| `57551d7` | `1f17663` plus the 3600 s `-C100` limit | part of batch11-batch18, batch19-batch26, L23, L1r, local-b, local-c | `14eb5d72…`, 2,196,248 B |
+| `23e4ccb` | `57551d7` plus plain blame after a `-C100` git exit 128 | local-d (`gitlab.inria.fr__cedar__connectionlens` only) | `14eb5d72…`, 2,196,248 B |
+
+A sixth commit, `157cf8b`, wrote the first batch 1 outputs on the local machine. The
+local-c run (49 projects) and the L1r run (`torvalds__linux`, `SAP__project-foxhound`)
+run them again, so v1 has no `157cf8b` Parquet when L1r ends. On 2026-10-14 17:45 UTC
+the analysis machine has no L1r output for `SAP__project-foxhound` yet.
+
+* **Proven equal on the gate.** `95cdc88` and `9ccead6` give the same gate file.
+  `1f17663`, `57551d7` and `23e4ccb` give the same gate file. The gate run has 0
+  `PLAIN-BLAME` lines, so it does not test the fallback paths. The equality holds for
+  files whose `-C100` blame ends within 3600 s with git exit 0.
+* **Different on the gate, by design.** `95cdc88` and `1f17663` differ only in the 15
+  `footer_*` columns. `95cdc88` fills them wrongly: blobExec appends a
+  `Former-commit-id` paragraph to each message, so JGit finds no other trailer.
+* **Not measured.** After the run, `rewrite_footer_columns.py` rewrote the `footer_*`
+  columns of the `95cdc88` Parquets (931 Parquets, status ok in
+  `census-cloud-fixed/manifest.tsv` of the build workspace, 2026-10-14). The tool uses the SQL of the
+  `1f17663` branch, and a test fails if that SQL changes. But no record compares a
+  rewritten `95cdc88` gate Parquet with the `1f17663` gate `14eb5d72…`. So the
+  equality of `95cdc88` plus the rewrite and `1f17663` is not measured. For the 584
+  spot-run projects, the rewrite also built the persons DB again from a pinned clone.
+  This was measured equal on 1 project (`Activiti__Activiti`), except the
+  `emails.dateadded` time.
+* **Open defect: `mongodb__mongo` has the old `footer_*` values.** Its ledger names
+  `9ccead6`, and the rewrite (`s7-run/footer_fix_batches.py`) takes only Parquets
+  whose ledger names `95cdc88`. So the rewrite skipped it (`census-cloud-fixed/pending.txt`: "1 projects not settled"). But
+  `9ccead6` has the trailer code of `95cdc88`. Until the rewrite runs on it, do not use
+  the `footer_*` columns of `mongodb__mongo`.
+
 **A vendored dependency attributes its whole library to the engineer who imported
 it.** cregit credits the commit that introduced a line, so a wholesale vendor drop
 credits the importing author with every token of third-party code. This is a
