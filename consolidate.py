@@ -246,6 +246,32 @@ def connect():
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def schema_failure(name: str, parquet_path: str) -> str:
+    """The FAIL line when the schema of the parquet cannot be read or drifts, else ""."""
+    try:
+        drifts = compare_schema(read_schema(parquet_path))
+    except Exception as exc:  # the join must not guess
+        return f"FAIL {name}: schema not read ({type(exc).__name__}: {exc})"
+    if drifts:
+        return f"FAIL {name}: schema drift ({len(drifts)}): " + "; ".join(map(str, drifts[:3]))
+    return ""
+
+
+def write_join(con, name: str, row, reason: str) -> list[str]:
+    """Replace the rows of one project, and rebuild the tokens view. Returns its files.
+    The parquet joins the view only when there is no reason to keep it out."""
+    con.execute(PROJECTS_DDL.replace("create or replace table", "create table if not exists"))
+    con.execute(JOINED_DDL.replace("create or replace table", "create table if not exists"))
+    con.execute("delete from projects where name = ?", [name])
+    con.execute(PROJECTS_INSERT, list(row.as_tuple()))
+    con.execute("delete from joined where name = ?", [name])
+    if not reason:
+        con.execute(JOINED_INSERT, [name, row.parquet_path, utc_now()])
+    files = [r[0] for r in con.execute("select parquet_path from joined order by name").fetchall()]
+    create_tokens_view(con, files, count=False)
+    return files
+
+
 def join(name: str, manifests: Sequence[Path]) -> int:
     """Add or replace one project in DB, and widen the tokens view to it.
     The projects row is replaced whatever the outcome; the parquet joins the view only
@@ -263,35 +289,15 @@ def join(name: str, manifests: Sequence[Path]) -> int:
     if row.excluded_because:
         reason = f"excluded from publication: {row.excluded_because}"
     else:
-        try:
-            drifts = compare_schema(read_schema(row.parquet_path))
-        except Exception as exc:  # the join must not guess
-            print(f"FAIL {name}: schema not read ({type(exc).__name__}: {exc})", file=sys.stderr)
-            return 1
-        if drifts:
-            print(
-                f"FAIL {name}: schema drift ({len(drifts)}): " + "; ".join(map(str, drifts[:3])),
-                file=sys.stderr,
-            )
+        failure = schema_failure(name, row.parquet_path)
+        if failure:
+            print(failure, file=sys.stderr)
             return 1
         reason = ""
     with db_lock():
         con = connect()
         try:
-            con.execute(
-                PROJECTS_DDL.replace("create or replace table", "create table if not exists")
-            )
-            con.execute(JOINED_DDL.replace("create or replace table", "create table if not exists"))
-            con.execute("delete from projects where name = ?", [name])
-            con.execute(PROJECTS_INSERT, list(row.as_tuple()))
-            con.execute("delete from joined where name = ?", [name])
-            if not reason:
-                con.execute(JOINED_INSERT, [name, row.parquet_path, utc_now()])
-            files = [
-                r[0]
-                for r in con.execute("select parquet_path from joined order by name").fetchall()
-            ]
-            create_tokens_view(con, files, count=False)
+            files = write_join(con, name, row, reason)
         finally:
             con.close()
     print(
