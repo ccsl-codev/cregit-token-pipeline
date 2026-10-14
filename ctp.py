@@ -28,13 +28,18 @@ from pathlib import Path
 import ledger
 import pin
 import retain
-from ctplib import artifacts, config, console, manifest_file, memory, metrics, resources, runtime
+from ctplib import (
+    artifacts,
+    config,
+    console,
+    manifest_file,
+    memory,
+    metrics,
+    resources,
+    runtime,
+    toolchain,
+)
 from retain import lock_path, state_dir
-
-DEVENV = Path.home() / ".nix-profile/bin/devenv"
-# devenv needs the nix daemon env; a bare PATH prepend fails in non-login
-# shells with: error: not an absolute path: "nix"
-NIX_DAEMON_SH = "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
 
 HEARTBEAT_S = 30
 
@@ -61,26 +66,6 @@ def script_supports(flag: str) -> bool:
     """True when the configured run_pipeline_process.sh advertises `flag`.
     The cache keys on CREGIT too, so it stays right when CREGIT is reassigned."""
     return _script_supports_cached(config.CREGIT, flag)
-
-
-def capture_devenv_env() -> dict:
-    """Resolve the devenv shell once and return its full environment."""
-    out = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f'. {NIX_DAEMON_SH}; cd "{config.CREGIT}"; exec "{DEVENV}" shell -- '
-            'python3 -c "import os, json; print(json.dumps(dict(os.environ)))"',
-        ],
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    if out.returncode != 0:
-        sys.exit(f"devenv environment capture failed:\n{out.stdout}\n{out.stderr}")
-    import json
-
-    return json.loads(out.stdout.splitlines()[-1])
 
 
 def shard_class(project: dict) -> bool:
@@ -240,29 +225,6 @@ def pin_args(project: dict, commit: str = "") -> list[str]:
     ]
 
 
-def git_head(repo: Path) -> str:
-    """HEAD of repo, or "" when repo is absent or git cannot read it."""
-    if not repo.exists():
-        return ""
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD^{commit}"],
-            env=runtime.env or None,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    out = (getattr(proc, "stdout", "") or "").strip() if proc.returncode == 0 else ""
-    return out if pin.SHA_RE.match(out) else ""
-
-
-def runner_checkout(name: str, workdir: Path) -> str:
-    """The commit the runner checked out for blame (step 6), from its working clone."""
-    return git_head(workdir / f"{name}-original")
-
-
 def drop_pinned_clone(name: str) -> list[str]:
     """Delete the staging clone. Returns the errors, empty when it is gone."""
     target = pinned_clone_path(name)
@@ -337,7 +299,7 @@ def project_phases(project: dict, opts: dict, workdir: Path, stamp: Path) -> lis
 def checkout_matches(name: str, workdir: Path, pinned: str) -> tuple[bool, str]:
     """(ok, sha): which commit the runner blamed. ok is False when a pinned
     project's checkout is not the pinned commit, or cannot be read."""
-    seen = runner_checkout(name, workdir)
+    seen = toolchain.runner_checkout(name, workdir)
     if not pinned:
         console.say(f"{name} — unpinned, checked out {seen or 'an unreadable HEAD'}")
         return True, seen
@@ -536,7 +498,7 @@ def stale_workdir(name: str, workdir: Path, pinned: str) -> str:
     """The commit an earlier attempt left in the workdir when it is not the pinned
     one, else "". Such a workdir holds work for another commit, so the runner may
     wipe it even when its memo is large (--force-clean)."""
-    head = git_head(workdir / f"{name}-original.git")
+    head = toolchain.git_head(workdir / f"{name}-original.git")
     return head if head and pinned and head != pinned else ""
 
 
@@ -546,7 +508,7 @@ def resume_step(name: str, workdir: Path, pinned: str) -> int:
     bare = workdir / f"{name}-original.git"
     if not (workdir / f"{name}-blobmap.db").is_file() or not bare.is_dir():
         return 1
-    head = git_head(bare)
+    head = toolchain.git_head(bare)
     if not head or (pinned and head != pinned):
         return 1
     return 2
@@ -833,7 +795,7 @@ def run_project(
                         f"{name} — validated earlier; resuming at the steps after validation"
                     )
                     ctx.parquet = artifacts.parquet_info(name)
-                    ctx.checked_out_sha = runner_checkout(name, workdir)
+                    ctx.checked_out_sha = toolchain.runner_checkout(name, workdir)
                 elif not build_steps(ctx, workdir, stamp):
                     return ctx.finish(ledger.FAILED)
                 if (
@@ -1262,50 +1224,6 @@ def run_options(args: argparse.Namespace) -> dict:
     )
 
 
-BLOBEXEC_JAR = Path("blobExec/target/scala-2.13/blobExec-0.1.0-assembly.jar")
-
-
-def _capture(cmd: list[str], cwd: Path | None = None) -> str:
-    """stdout of cmd under the cregit environment, or "" when it fails."""
-    try:
-        proc = subprocess.run(
-            cmd, cwd=cwd, env=runtime.env or None, capture_output=True, text=True, timeout=120
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return (proc.stdout or "").strip() if proc.returncode == 0 else ""
-
-
-def git_describe(repo: Path) -> str:
-    """HEAD sha of repo, with -dirty when a tracked file differs from it."""
-    head = _capture(["git", "-C", str(repo), "rev-parse", "HEAD"])
-    if not head:
-        return ""
-    dirty = _capture(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"])
-    return head + ("-dirty" if dirty else "")
-
-
-def tool_versions() -> dict:
-    """What produced this run's Parquets. Read once per run, after the devenv capture."""
-    jar = config.CREGIT / BLOBEXEC_JAR
-    srcml = (
-        shutil.which("srcml", path=runtime.env.get("PATH"))
-        if runtime.env
-        else shutil.which("srcml")
-    )
-    srcml_out = _capture(["srcml", "--version"])
-    return {
-        "ctp_commit": git_describe(config.CORPUS),
-        "cregit_commit": git_describe(config.CREGIT),
-        # srcML builds from one release line print one version; the path names the build.
-        "srcml_version": srcml_out.splitlines()[0] if srcml_out else "",
-        "srcml_path": str(Path(srcml).resolve()) if srcml else "",
-        "blobexec_jar_sha256": artifacts.sha256_file(jar) if jar.is_file() else "",
-        "git_version": _capture(["git", "--version"]),
-        "ctp_python": sys.version.split()[0],
-    }
-
-
 def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
     """Every option of this run, JSON-safe, with the manifest it read. `effective` is
     what run_project reads after the checks; `cli` is what was typed."""
@@ -1328,18 +1246,12 @@ def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
     return flags
 
 
-def forward_config() -> None:
-    """A step that reads the config (the join, a rebuild) must read this run's file."""
-    if os.environ.get("CTP_CONFIG"):
-        runtime.env["CTP_CONFIG"] = str(retain.CONFIG)
-
-
 def start_ledger_run(args: argparse.Namespace, manifest: Path, command: str) -> None:
     """Fill _RUN, then append the run-start row."""
-    forward_config()
+    toolchain.forward_config()
     runtime.run_info.clear()
     runtime.run_info["run_id"] = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
-    runtime.run_info["tools"] = tool_versions()
+    runtime.run_info["tools"] = toolchain.tool_versions()
     runtime.run_info["flags"] = run_flags(args, manifest)
     now = time.time()
     try:
@@ -1432,7 +1344,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     run_start = time.time()
     console.say("capturing devenv environment (once)...")
-    runtime.env.update(capture_devenv_env())
+    runtime.env.update(toolchain.capture_devenv_env())
     # A deleted or private repository must fail its clone, not wait for a password.
     runtime.env.setdefault("GIT_TERMINAL_PROMPT", "0")
     console.say(f"devenv environment captured ({len(runtime.env)} vars)")
@@ -1691,7 +1603,7 @@ def cmd_census(args: argparse.Namespace) -> int:
 
     run_start = time.time()
     console.say("capturing devenv environment (once)...")
-    runtime.env.update(capture_devenv_env())
+    runtime.env.update(toolchain.capture_devenv_env())
     runtime.env.setdefault("GIT_TERMINAL_PROMPT", "0")
     start_ledger_run(args, manifest, "census")
     install_signal_handlers()
@@ -1874,8 +1786,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
 def cmd_db(args: argparse.Namespace) -> int:
     """Rebuild ctp.duckdb (derived index over stamps/metrics/parquets)."""
     config.OUT.mkdir(parents=True, exist_ok=True)
-    runtime.env.update(capture_devenv_env())
-    forward_config()
+    runtime.env.update(toolchain.capture_devenv_env())
+    toolchain.forward_config()
     manifests = [
         arg
         for m in (getattr(args, "manifest", None) or [])

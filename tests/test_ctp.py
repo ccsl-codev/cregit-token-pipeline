@@ -25,10 +25,10 @@ import ctp
 import ledger
 import pin
 import retain
-from ctplib import config, console, manifest_file, memory, metrics, resources, runtime
+from ctplib import config, console, manifest_file, memory, metrics, resources, runtime, toolchain
 from file_mask import UNIVERSAL_MASK
 
-REAL_TOOL_VERSIONS = ctp.tool_versions
+REAL_TOOL_VERSIONS = toolchain.tool_versions
 
 
 # --------------------------------------------------------------------------- #
@@ -215,7 +215,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "RESOURCES", tmp_path / "resources.tsv")
     monkeypatch.setattr(config, "LEDGER", tmp_path / "ledger.jsonl")
     # tool_versions starts git and srcml; its own tests call REAL_TOOL_VERSIONS.
-    monkeypatch.setattr(ctp, "tool_versions", lambda: {"ctp_commit": "test"})
+    monkeypatch.setattr(toolchain, "tool_versions", lambda: {"ctp_commit": "test"})
     monkeypatch.setattr(retain, "STATE", tmp_path / "state")
     monkeypatch.setattr(retain, "OUT", out)
     # A real disk_usage call stays, but the floor can never trip by accident.
@@ -275,7 +275,7 @@ def ready(sandbox, monkeypatch, runner_script):
     """A sandbox one cmd_run call away from a run that starts no process."""
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
     return sandbox
 
@@ -286,7 +286,7 @@ def must_not_start(sandbox, monkeypatch, runner_script):
     come before the devenv capture."""
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(toolchain, "capture_devenv_env", forbidden)
     monkeypatch.setattr(ctp, "run_project", forbidden)
     return sandbox
 
@@ -526,7 +526,7 @@ def test_no_memo_warns_that_it_does_not_prevent_the_write(sandbox, monkeypatch, 
     BFG_MEMO_DIR. The alias must say so instead of implying prevention."""
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run", "--no-memo"])
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     args = run_args(jobs=1, retries=0, skip_html=False, drop_memo=True)
@@ -874,7 +874,7 @@ def test_capture_devenv_env_returns_the_parsed_environment(monkeypatch):
         return SimpleNamespace(returncode=0, stdout='noise\n{"PATH": "/nix/bin"}\n', stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert ctp.capture_devenv_env() == {"PATH": "/nix/bin"}
+    assert toolchain.capture_devenv_env() == {"PATH": "/nix/bin"}
 
 
 def test_capture_devenv_env_exits_when_devenv_fails(monkeypatch):
@@ -887,7 +887,7 @@ def test_capture_devenv_env_exits_when_devenv_fails(monkeypatch):
         ),
     )
     with pytest.raises(SystemExit) as exc:
-        ctp.capture_devenv_env()
+        toolchain.capture_devenv_env()
     assert "devenv environment capture failed" in str(exc.value)
 
 
@@ -1175,7 +1175,7 @@ def test_run_accepts_and_announces(ready, monkeypatch, capsys, over, opts, said,
 def test_cmd_run_with_an_empty_manifest_does_nothing(sandbox, monkeypatch, capsys):
     """No manifest rows means no devenv capture and no runs.log row."""
     write_manifest(sandbox.root)
-    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(toolchain, "capture_devenv_env", forbidden)
     assert ctp.cmd_run(run_args()) == 0
     assert "nothing to run" in capsys.readouterr().out
     assert not (sandbox.root / "runs.log").exists()
@@ -1185,7 +1185,7 @@ def test_cmd_run_appends_a_start_and_an_end_row_to_runs_log(sandbox, monkeypatch
     """Visibility contract: one start/end row per invocation, appended."""
     write_manifest(sandbox.root, VALID_ROW)
     (sandbox.root / "runs.log").write_text("2026-08-28T03:22:20+00:00\trun-start\tjobs=2\n")
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert ctp.cmd_run(run_args(jobs=2)) == 0
@@ -1199,7 +1199,7 @@ def test_cmd_run_appends_a_start_and_an_end_row_to_runs_log(sandbox, monkeypatch
 def test_cmd_run_returns_one_when_a_project_fails(sandbox, monkeypatch):
     """The exit code is what a cron wrapper or CI checks."""
     write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.FAILED)
     assert ctp.cmd_run(run_args()) == 1
     assert "run-end\trc=1" in (sandbox.root / "runs.log").read_text()
@@ -1218,7 +1218,7 @@ def test_cmd_run_retries_only_the_projects_that_are_not_done(sandbox, monkeypatc
         VALID_ROW,
         "zstd\thttps://github.com/facebook/zstd.git\tenterprise\t\\.[ch]$\tS",
     )
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/x"})
 
     seen: list[str] = []
 
@@ -1325,7 +1325,7 @@ def test_cmd_status_works_without_a_metrics_file(sandbox, capsys):
 
 def test_cmd_db_runs_consolidate_inside_the_captured_environment(sandbox, monkeypatch):
     """consolidate.py needs duckdb, which only the devenv environment provides."""
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/nix/bin"})
+    monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/nix/bin"})
     seen = {}
 
     def fake_run(args, **kwargs):
@@ -1639,7 +1639,7 @@ def test_a_relative_sidecar_path_is_made_absolute(sandbox, monkeypatch, runner_s
     meta = sandbox.root / "project_meta.json"
     meta.write_text("{}")
     monkeypatch.chdir(sandbox.root)
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
     assert (
@@ -1934,7 +1934,7 @@ def test_a_checkout_that_differs_from_the_pin_fails_the_project(monkeypatch, cap
 
 def test_an_unreadable_checkout_fails_a_pinned_project(monkeypatch, pinned_jq):
     monkeypatch.setattr(subprocess, "Popen", FakeRunner())
-    monkeypatch.setattr(ctp, "runner_checkout", lambda name, workdir: "")
+    monkeypatch.setattr(toolchain, "runner_checkout", lambda name, workdir: "")
     assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
 
 
@@ -1958,7 +1958,7 @@ def test_a_symlinked_staging_clone_is_not_followed(sandbox, tmp_path):
 
 
 def test_git_head_is_empty_for_a_missing_repo(tmp_path):
-    assert ctp.git_head(tmp_path / "absent") == ""
+    assert toolchain.git_head(tmp_path / "absent") == ""
 
 
 @pytest.mark.parametrize(
@@ -1971,7 +1971,7 @@ def test_git_head_is_empty_for_a_missing_repo(tmp_path):
 )
 def test_git_head_returns_only_a_full_sha(monkeypatch, tmp_path, result, expected):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: result)
-    assert ctp.git_head(tmp_path) == expected
+    assert toolchain.git_head(tmp_path) == expected
 
 
 def test_git_head_is_empty_when_git_cannot_start(monkeypatch, tmp_path):
@@ -1979,7 +1979,7 @@ def test_git_head_is_empty_when_git_cannot_start(monkeypatch, tmp_path):
         raise OSError("no git")
 
     monkeypatch.setattr(subprocess, "run", boom)
-    assert ctp.git_head(tmp_path) == ""
+    assert toolchain.git_head(tmp_path) == ""
 
 
 def test_a_pinned_manifest_needs_a_runner_with_commit_url(must_not_start, runner_script):
@@ -2288,8 +2288,8 @@ def test_tool_versions_names_every_tool(monkeypatch, sandbox):
         ("srcml", "--version"): "srcml: 1.1.0\nlibsrcml: 1.1.0",
         ("git", "--version"): "git version 2.55.0",
     }
-    monkeypatch.setattr(ctp, "_capture", lambda cmd, cwd=None: outputs.get(tuple(cmd), ""))
-    jar = sandbox.cregit / ctp.BLOBEXEC_JAR
+    monkeypatch.setattr(toolchain, "_capture", lambda cmd, cwd=None: outputs.get(tuple(cmd), ""))
+    jar = sandbox.cregit / toolchain.BLOBEXEC_JAR
     jar.parent.mkdir(parents=True)
     jar.write_bytes(b"jar bytes")
     tools = REAL_TOOL_VERSIONS()
@@ -2301,7 +2301,7 @@ def test_tool_versions_names_every_tool(monkeypatch, sandbox):
 
 
 def test_tool_versions_leaves_a_missing_tool_blank(monkeypatch, sandbox):
-    monkeypatch.setattr(ctp, "_capture", lambda cmd, cwd=None: "")
+    monkeypatch.setattr(toolchain, "_capture", lambda cmd, cwd=None: "")
     runtime.env.update(PATH=str(sandbox.root / "empty-bin"))
     tools = REAL_TOOL_VERSIONS()
     assert tools["ctp_commit"] == "" and tools["srcml_version"] == ""
@@ -2317,7 +2317,7 @@ def test_tool_versions_leaves_a_missing_tool_blank(monkeypatch, sandbox):
 )
 def test_capture_returns_stdout_only_on_success(monkeypatch, result, expected):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: result)
-    assert ctp._capture(["x"]) == expected
+    assert toolchain._capture(["x"]) == expected
 
 
 def test_capture_is_blank_when_the_tool_is_missing(monkeypatch):
@@ -2325,7 +2325,7 @@ def test_capture_is_blank_when_the_tool_is_missing(monkeypatch):
         raise FileNotFoundError("srcml")
 
     monkeypatch.setattr(subprocess, "run", boom)
-    assert ctp._capture(["srcml"]) == ""
+    assert toolchain._capture(["srcml"]) == ""
 
 
 def test_audit_prints_one_line_per_step(sandbox, runner, pinned_jq, capsys):
@@ -2460,7 +2460,7 @@ def test_run_options_carry_join_and_the_absolute_manifest(sandbox, runner_script
 
 
 def test_cmd_db_forwards_each_manifest_as_an_absolute_path(sandbox, monkeypatch):
-    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {})
+    monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {})
     seen = {}
     monkeypatch.setattr(
         subprocess,
@@ -3074,13 +3074,13 @@ def test_config_is_forwarded_to_the_steps_when_ctp_config_is_set(monkeypatch, sa
     cfg.write_text("[paths]\n")
     monkeypatch.setenv("CTP_CONFIG", str(cfg))
     monkeypatch.setattr(retain, "CONFIG", cfg)
-    ctp.forward_config()
+    toolchain.forward_config()
     assert runtime.env["CTP_CONFIG"] == str(cfg)
 
 
 def test_config_is_not_forwarded_by_default(monkeypatch):
     monkeypatch.delenv("CTP_CONFIG", raising=False)
-    ctp.forward_config()
+    toolchain.forward_config()
     assert "CTP_CONFIG" not in runtime.env
 
 
@@ -3138,13 +3138,13 @@ def test_no_blob_map_means_step_1(sandbox):
 
 def test_an_unreadable_clone_means_step_1(sandbox, monkeypatch):
     leftover_attempt(sandbox)
-    monkeypatch.setattr(ctp, "git_head", lambda repo: "")
+    monkeypatch.setattr(toolchain, "git_head", lambda repo: "")
     assert ctp.resume_step("jq", sandbox.out / "jq", "") == 1
 
 
 def test_an_unpinned_leftover_resumes_at_step_2(sandbox, monkeypatch):
     leftover_attempt(sandbox)
-    monkeypatch.setattr(ctp, "git_head", lambda repo: OTHER_SHA)
+    monkeypatch.setattr(toolchain, "git_head", lambda repo: OTHER_SHA)
     assert ctp.resume_step("jq", sandbox.out / "jq", "") == 2
 
 
@@ -3333,7 +3333,9 @@ def test_a_workdir_of_another_commit_is_wiped_with_force_clean(
     monkeypatch, sandbox, runner, pinned_jq
 ):
     monkeypatch.setattr(
-        ctp, "git_head", lambda repo: OTHER_SHA if repo.name == "jq-original.git" else PINNED_SHA
+        toolchain,
+        "git_head",
+        lambda repo: OTHER_SHA if repo.name == "jq-original.git" else PINNED_SHA,
     )
     assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
     assert "--force-clean" in runner.argv("pipeline")
