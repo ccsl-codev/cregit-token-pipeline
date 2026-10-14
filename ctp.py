@@ -6,7 +6,6 @@ Ledgers: metrics.tsv (one row per phase attempt), runs.log, state/<name>/logs (n
 from __future__ import annotations
 
 import argparse
-import configparser
 import contextlib
 import fcntl
 import functools
@@ -30,41 +29,17 @@ from pathlib import Path
 import ledger
 import pin
 import retain
+from ctplib import config
 from file_mask import UNIVERSAL_MASK
 from retain import lock_path, state_dir
-
-# .resolve() canonicalizes to /local/home form — blobExec's meta table refuses
-# resume if the command path string drifts (/home vs /local/home symlink alias).
-CORPUS = Path(__file__).resolve().parent
-_cfg = configparser.ConfigParser()
-# pipeline.cfg here, or the file CTP_CONFIG names; retain and consolidate read the same.
-_cfg.read(retain.CONFIG)
-
-
-def _cfg_path(key: str, default: str) -> Path:
-    raw = _cfg.get("paths", key, fallback=default)
-    return (CORPUS / Path(raw).expanduser()).resolve()
-
-
-CREGIT = _cfg_path("cregit_dir", "../cregit-workspace/cregit")
-OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
-# Not created at import: cmd_run and cmd_db create it when they need it.
-METRICS = CORPUS / "metrics.tsv"
-RUNS_LOG = CORPUS / "runs.log"
-# The audit ledger: one JSON row per project and per step, append-only.
-LEDGER = CORPUS / "ledger.jsonl"
-
 
 DEVENV = Path.home() / ".nix-profile/bin/devenv"
 # devenv needs the nix daemon env; a bare PATH prepend fails in non-login
 # shells with: error: not an absolute path: "nix"
 NIX_DAEMON_SH = "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
 
-DISK_FLOOR_GB = 150
 HEARTBEAT_S = 30
 
-# A separate ledger, because metrics.tsv's seven-field row is a published contract.
-RESOURCES = CORPUS / "resources.tsv"
 RESOURCE_SAMPLE_S = 15
 RESOURCE_FIELDS = (
     "iso",
@@ -144,9 +119,9 @@ def read_manifest(path: Path, only: set | None) -> list[dict]:
 
 def record_metric(project: str, cls: str, phase: str, duration: int, rc: int, log: Path) -> None:
     with _metrics_lock:
-        if not METRICS.exists():
-            METRICS.write_text("iso_start\tproject\tclass\tphase\tduration_s\trc\tlog\n")
-        with METRICS.open("a") as f:
+        if not config.METRICS.exists():
+            config.METRICS.write_text("iso_start\tproject\tclass\tphase\tduration_s\trc\tlog\n")
+        with config.METRICS.open("a") as f:
             f.write(f"{now_iso()}\t{project}\t{cls}\t{phase}\t{duration}\t{rc}\t{log}\n")
 
 
@@ -175,7 +150,7 @@ def _script_supports_cached(cregit: Path, flag: str) -> bool:
 def script_supports(flag: str) -> bool:
     """True when the configured run_pipeline_process.sh advertises `flag`.
     The cache keys on CREGIT too, so it stays right when CREGIT is reassigned."""
-    return _script_supports_cached(CREGIT, flag)
+    return _script_supports_cached(config.CREGIT, flag)
 
 
 _SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s?(B|K|M|G|T|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$")
@@ -247,7 +222,7 @@ def capture_devenv_env() -> dict:
         [
             "bash",
             "-c",
-            f'. {NIX_DAEMON_SH}; cd "{CREGIT}"; exec "{DEVENV}" shell -- '
+            f'. {NIX_DAEMON_SH}; cd "{config.CREGIT}"; exec "{DEVENV}" shell -- '
             'python3 -c "import os, json; print(json.dumps(dict(os.environ)))"',
         ],
         capture_output=True,
@@ -367,7 +342,7 @@ class ResourceSampler:
         cpu_pct = round(100.0 * (busy - prev_busy) / span, 1) if span > 0 else 0.0
         rss_mb, procs = tree_usage(self.pid) if self.pid else (0, 0)
         mem_mb = _mem_used_mb()
-        free_gb = shutil.disk_usage(OUT).free // 2**30
+        free_gb = shutil.disk_usage(config.OUT).free // 2**30
         row = (
             now_iso(),
             self.name,
@@ -393,9 +368,9 @@ class ResourceSampler:
         p["samples"] += 1
 
         with _metrics_lock:
-            if not RESOURCES.exists():
-                RESOURCES.write_text("\t".join(RESOURCE_FIELDS) + "\n")
-            with RESOURCES.open("a") as f:
+            if not config.RESOURCES.exists():
+                config.RESOURCES.write_text("\t".join(RESOURCE_FIELDS) + "\n")
+            with config.RESOURCES.open("a") as f:
                 f.write("\t".join(str(v) for v in row) + "\n")
         return busy, total
 
@@ -443,7 +418,7 @@ def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) 
         if _OPTS.get("own_session"):
             extra["start_new_session"] = True
         proc = subprocess.Popen(
-            args, cwd=CREGIT, env=_ENV, stdout=lf, stderr=subprocess.STDOUT, **extra
+            args, cwd=config.CREGIT, env=_ENV, stdout=lf, stderr=subprocess.STDOUT, **extra
         )
         _procs[name] = proc
         sampler.start(proc.pid)
@@ -526,7 +501,7 @@ def value_args(opts: dict, table: tuple) -> list[str]:
 def pinned_clone_path(name: str) -> Path:
     """Where the clone step stages a pinned project. Outside the workdir, because
     the runner deletes the workdir at step 1."""
-    return OUT / pin.STAGING_DIR / f"{name}.git"
+    return config.OUT / pin.STAGING_DIR / f"{name}.git"
 
 
 def pin_result_path(name: str) -> Path:
@@ -543,7 +518,7 @@ def pin_args(project: dict, commit: str = "") -> list[str]:
     name = project["name"]
     return [
         "python3",
-        str(CORPUS / "pin.py"),
+        str(config.CORPUS / "pin.py"),
         "--url",
         project["url"],
         "--commit",
@@ -583,8 +558,10 @@ def drop_pinned_clone(name: str) -> list[str]:
     target = pinned_clone_path(name)
     if not target.exists() and not target.is_symlink():
         return []
-    if target.is_symlink() or target.resolve().parent != (OUT / pin.STAGING_DIR).resolve():
-        return [f"refusing to delete {target}: not a directory inside {OUT / pin.STAGING_DIR}"]
+    if target.is_symlink() or target.resolve().parent != (config.OUT / pin.STAGING_DIR).resolve():
+        return [
+            f"refusing to delete {target}: not a directory inside {config.OUT / pin.STAGING_DIR}"
+        ]
     return retain.remove_tree(target)
 
 
@@ -638,12 +615,12 @@ def project_phases(project: dict, opts: dict, workdir: Path, stamp: Path) -> lis
             "firm",
             [
                 "python3",
-                str(CORPUS / "firm_attribution.py"),
+                str(config.CORPUS / "firm_attribution.py"),
                 parquet,
                 *value_args(opts, _FIRM_VALUE_FLAGS),
             ],
         ),
-        ("validate", ["python3", str(CORPUS / "validate.py"), parquet, str(stamp)]),
+        ("validate", ["python3", str(config.CORPUS / "validate.py"), parquet, str(stamp)]),
     ]
 
 
@@ -675,7 +652,7 @@ def sha256_text(text: str) -> str:
 
 def parquet_info(name: str) -> dict:
     """Path, size, sha256 and validated row count of a project's Parquet."""
-    workdir = OUT / name
+    workdir = config.OUT / name
     parquet = workdir / f"{name}-dataset.parquet"
     stamp = workdir / f"{name}.validated"
     info: dict = {"path": str(parquet)}
@@ -757,7 +734,7 @@ class ProjectRun:
         )
         row.update(extra)
         try:
-            ledger.append(LEDGER, row)
+            ledger.append(config.LEDGER, row)
         except OSError as exc:
             # The audit trail is the point of the run: stop handing out new projects.
             _RUN["ledger_broken"] = f"{type(exc).__name__}: {exc}"
@@ -1024,7 +1001,7 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
 
 
 def anon_outputs(name: str) -> list[dict]:
-    anon = OUT / name / retain.ANON_DIR
+    anon = config.OUT / name / retain.ANON_DIR
     if not anon.is_dir():
         return []
     return [
@@ -1037,10 +1014,12 @@ def publish_steps(ctx: ProjectRun) -> bool:
     """schema (validate_schema.py), anonymize (only with --anonymize), then join
     (an incremental consolidate into ctp.duckdb). True when every step passes."""
     name = ctx.name
-    parquet = OUT / name / f"{name}-dataset.parquet"
+    parquet = config.OUT / name / f"{name}-dataset.parquet"
     if (
         _OPTS.get("join")
-        and run_step(ctx, "schema", ["python3", str(CORPUS / "validate_schema.py"), str(parquet)])
+        and run_step(
+            ctx, "schema", ["python3", str(config.CORPUS / "validate_schema.py"), str(parquet)]
+        )
         != 0
     ):
         return False
@@ -1057,7 +1036,12 @@ def publish_steps(ctx: ProjectRun) -> bool:
             run_step(
                 ctx,
                 "anonymize",
-                ["python3", _OPTS["anonymize"], str(OUT / name / retain.ANON_DIR), str(parquet)],
+                [
+                    "python3",
+                    _OPTS["anonymize"],
+                    str(config.OUT / name / retain.ANON_DIR),
+                    str(parquet),
+                ],
                 after_anonymize,
             )
             != 0
@@ -1071,7 +1055,7 @@ def publish_steps(ctx: ProjectRun) -> bool:
             "join",
             [
                 "python3",
-                str(CORPUS / "consolidate.py"),
+                str(config.CORPUS / "consolidate.py"),
                 "--join",
                 name,
                 "--manifest",
@@ -1150,7 +1134,7 @@ def run_project(
         # An attempt that only runs the steps after validation clones nothing, so
         # its rows carry the commit the validated run chose.
         ctx.latest = recorded_latest(name)
-    workdir = OUT / name
+    workdir = config.OUT / name
     stamp = workdir / f"{name}.validated"
     post_only = stamp.exists()
     if post_only and not resume_validated:
@@ -1169,9 +1153,9 @@ def run_project(
 
         _lock_fds[name] = lockfile.fileno()
         try:
-            if not post_only and shutil.disk_usage(OUT).free < DISK_FLOOR_GB * 2**30:
-                say(f"{name} — disk below {DISK_FLOOR_GB}G floor, deferred")
-                return ctx.finish(ledger.DEFERRED, detail=f"disk below {DISK_FLOOR_GB}G")
+            if not post_only and shutil.disk_usage(config.OUT).free < config.DISK_FLOOR_GB * 2**30:
+                say(f"{name} — disk below {config.DISK_FLOOR_GB}G floor, deferred")
+                return ctx.finish(ledger.DEFERRED, detail=f"disk below {config.DISK_FLOOR_GB}G")
 
             if not post_only and not check_memo_dir(name, _OPTS, workdir):
                 ctx.failed_step = "preflight"
@@ -1207,7 +1191,7 @@ def heartbeat(stop: threading.Event, results: dict) -> None:
         running = ", ".join(
             f"{n}({p} {int(time.time() - t)}s)" for n, (p, t) in sorted(_live.items())
         )
-        free_gb = shutil.disk_usage(OUT).free // 2**30
+        free_gb = shutil.disk_usage(config.OUT).free // 2**30
         done = sum(1 for v in results.values() if v.is_success)
         failed = sum(1 for v in results.values() if v == RunOutcome.FAILED)
         say(f"♥ running: {running or '—'} | done {done} failed {failed} | disk {free_gb}G free")
@@ -1275,7 +1259,7 @@ def preflight_runner_flags(args: argparse.Namespace) -> tuple[bool, str]:
     missing = [f for f in REQUIRED_RUNNER_FLAGS if not script_supports(f)]
     if missing:
         sys.exit(
-            f"{CREGIT}/run_pipeline_process.sh does not accept: {', '.join(missing)}.\n"
+            f"{config.CREGIT}/run_pipeline_process.sh does not accept: {', '.join(missing)}.\n"
             "ctp.py passes these to every project and the runner exits 2 on an\n"
             "unknown flag. Check pipeline.cfg points at the right checkout, or\n"
             "update REQUIRED_RUNNER_FLAGS and run_project together."
@@ -1372,10 +1356,11 @@ def refuse_unsupported_flags(flags: list[str]) -> None:
         if flag in CHECKS:
             sys.exit(
                 f"{flag} needs {', '.join(gap)}, which "
-                f"{CREGIT}/run_pipeline_process.sh does not advertise.\n{REQUIRES[flag]}"
+                f"{config.CREGIT}/run_pipeline_process.sh does not advertise.\n{REQUIRES[flag]}"
             )
         sys.exit(
-            f"{flag} is not implemented by {CREGIT}/run_pipeline_process.sh.\n{REQUIRES[flag]}"
+            f"{flag} is not implemented by {config.CREGIT}/run_pipeline_process.sh."
+            f"\n{REQUIRES[flag]}"
         )
 
 
@@ -1420,7 +1405,7 @@ def refuse_unless_runner_accepts(flag: str, needed: tuple[str, ...], consequence
     if missing:
         sys.exit(
             f"{flag} needs {', '.join(missing)}, which "
-            f"{CREGIT}/run_pipeline_process.sh does not accept.{consequence}"
+            f"{config.CREGIT}/run_pipeline_process.sh does not accept.{consequence}"
         )
 
 
@@ -1596,7 +1581,7 @@ def run_options(args: argparse.Namespace) -> dict:
         mask=args.mask,
         project_meta=project_meta,
         join=bool(getattr(args, "join", False)),
-        manifest=str((CORPUS / args.manifest).resolve()),
+        manifest=str((config.CORPUS / args.manifest).resolve()),
         cleanup=bool(getattr(args, "cleanup", False)),
         drop_html=bool(getattr(args, "drop_html", False)),
         anonymize=anonymize,
@@ -1628,12 +1613,12 @@ def git_describe(repo: Path) -> str:
 
 def tool_versions() -> dict:
     """What produced this run's Parquets. Read once per run, after the devenv capture."""
-    jar = CREGIT / BLOBEXEC_JAR
+    jar = config.CREGIT / BLOBEXEC_JAR
     srcml = shutil.which("srcml", path=_ENV.get("PATH")) if _ENV else shutil.which("srcml")
     srcml_out = _capture(["srcml", "--version"])
     return {
-        "ctp_commit": git_describe(CORPUS),
-        "cregit_commit": git_describe(CREGIT),
+        "ctp_commit": git_describe(config.CORPUS),
+        "cregit_commit": git_describe(config.CREGIT),
         # srcML builds from one release line print one version; the path names the build.
         "srcml_version": srcml_out.splitlines()[0] if srcml_out else "",
         "srcml_path": str(Path(srcml).resolve()) if srcml else "",
@@ -1656,8 +1641,8 @@ def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
     flags["manifest_path"] = str(manifest)
     flags["config_path"] = str(retain.CONFIG)
     flags["config_sha256"] = sha256_file(retain.CONFIG) if retain.CONFIG.is_file() else ""
-    flags["cregit_dir"] = str(CREGIT)
-    flags["output_dir"] = str(OUT)
+    flags["cregit_dir"] = str(config.CREGIT)
+    flags["output_dir"] = str(config.OUT)
     try:
         flags["manifest_sha256"] = sha256_file(manifest)
     except OSError:
@@ -1681,7 +1666,7 @@ def start_ledger_run(args: argparse.Namespace, manifest: Path, command: str) -> 
     now = time.time()
     try:
         ledger.append(
-            LEDGER,
+            config.LEDGER,
             {
                 "v": ledger.VERSION,
                 "run_id": _RUN["run_id"],
@@ -1693,8 +1678,8 @@ def start_ledger_run(args: argparse.Namespace, manifest: Path, command: str) -> 
             },
         )
     except OSError as exc:
-        sys.exit(f"cannot write the ledger {LEDGER}: {exc}")
-    say(f"ledger: {LEDGER} (run {_RUN['run_id']})")
+        sys.exit(f"cannot write the ledger {config.LEDGER}: {exc}")
+    say(f"ledger: {config.LEDGER} (run {_RUN['run_id']})")
 
 
 def end_ledger_run(rc: int, started: float, results: dict) -> None:
@@ -1703,7 +1688,7 @@ def end_ledger_run(rc: int, started: float, results: dict) -> None:
         counts[str(outcome)] = counts.get(str(outcome), 0) + 1
     try:
         ledger.append(
-            LEDGER,
+            config.LEDGER,
             {
                 "v": ledger.VERSION,
                 "run_id": _RUN.get("run_id", ""),
@@ -1717,7 +1702,7 @@ def end_ledger_run(rc: int, started: float, results: dict) -> None:
             },
         )
     except OSError as exc:
-        say(f"WARNING: cannot write the run-end row to {LEDGER}: {exc}")
+        say(f"WARNING: cannot write the run-end row to {config.LEDGER}: {exc}")
 
 
 def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
@@ -1745,9 +1730,9 @@ def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    OUT.mkdir(parents=True, exist_ok=True)
+    config.OUT.mkdir(parents=True, exist_ok=True)
     projects = read_manifest(
-        CORPUS / args.manifest, set(args.only.split(",")) if args.only else None
+        config.CORPUS / args.manifest, set(args.only.split(",")) if args.only else None
     )
     if not projects:
         say("nothing to run (empty manifest / --only filter matched nothing)")
@@ -1769,15 +1754,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     # A deleted or private repository must fail its clone, not wait for a password.
     _ENV.setdefault("GIT_TERMINAL_PROMPT", "0")
     say(f"devenv environment captured ({len(_ENV)} vars)")
-    start_ledger_run(args, CORPUS / args.manifest, "run")
-    with RUNS_LOG.open("a") as f:
+    start_ledger_run(args, config.CORPUS / args.manifest, "run")
+    with config.RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-start\tjobs={args.jobs}\tprojects={len(projects)}\n")
 
     results = run_passes(projects, args.jobs, args.retries)
 
     rc = 0 if all(v.is_success for v in results.values()) else 1
     end_ledger_run(rc, run_start, results)
-    with RUNS_LOG.open("a") as f:
+    with config.RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
 
     say(f"run finished rc={rc} — " + " ".join(f"{n}:{v}" for n, v in sorted(results.items())))
@@ -1810,9 +1795,9 @@ def mem_available_gb(meminfo: Path = Path("/proc/meminfo")) -> float | None:
 
 def gate_reason(opts: dict) -> str | None:
     """Why a new project may not start now, or None."""
-    free_gb = shutil.disk_usage(OUT).free / 2**30
-    if free_gb < DISK_FLOOR_GB:
-        return f"disk {free_gb:.0f}G free, below the {DISK_FLOOR_GB}G floor"
+    free_gb = shutil.disk_usage(config.OUT).free / 2**30
+    if free_gb < config.DISK_FLOOR_GB:
+        return f"disk {free_gb:.0f}G free, below the {config.DISK_FLOOR_GB}G floor"
     mem = mem_available_gb()
     floor = opts.get("min_free_mem_gb", MIN_FREE_MEM_GB)
     if mem is not None and mem < floor:
@@ -1836,7 +1821,7 @@ SKIP, POST, RUN, GIVE_UP = "skip", "post", "run", "give-up"
 
 def plan(project: dict, history: ledger.History, retries: int) -> str:
     name = project["name"]
-    stamped = (OUT / name / f"{name}.validated").exists()
+    stamped = (config.OUT / name / f"{name}.validated").exists()
     if history.state == ledger.DONE and stamped:
         return SKIP
     if history.failures + history.interrupted > retries:
@@ -1877,7 +1862,7 @@ def schedule(
 ) -> dict:
     """Run projects in manifest order with up to `workers` at once. Returns name -> outcome."""
     total = len(projects)
-    histories = ledger.histories(ledger.read(LEDGER))
+    histories = ledger.histories(ledger.read(config.LEDGER))
     results: dict = {}
     queue: deque = deque()
     for pos, project in enumerate(projects, 1):
@@ -1947,7 +1932,7 @@ def schedule(
                         if job.failures <= retries:
                             say(f"{name} — failed, retry {job.failures} of {retries} queued")
                             job.attempt += 1
-                            job.post = (OUT / name / f"{name}.validated").exists()
+                            job.post = (config.OUT / name / f"{name}.validated").exists()
                             queue.append(job)
                     elif outcome == RunOutcome.DEFERRED:
                         # Another process holds it: try again later, waiting longer each time.
@@ -1985,14 +1970,13 @@ def install_signal_handlers() -> None:
 
 def cmd_census(args: argparse.Namespace) -> int:
     """Every project of the manifest, end to end, in manifest order."""
-    global DISK_FLOOR_GB
-    stop_file = Path(args.stop_file).resolve() if args.stop_file else CORPUS / STOP_NAME
+    stop_file = Path(args.stop_file).resolve() if args.stop_file else config.CORPUS / STOP_NAME
     if stop_file.exists():
         sys.exit(f"{stop_file} exists, so the census would stop at once. Remove it to start.")
     if args.workers < 1:
         sys.exit("--workers must be at least 1")
-    OUT.mkdir(parents=True, exist_ok=True)
-    manifest = CORPUS / args.manifest
+    config.OUT.mkdir(parents=True, exist_ok=True)
+    manifest = config.CORPUS / args.manifest
     projects = read_manifest(manifest, set(args.only.split(",")) if args.only else None)
     if not projects:
         say("nothing to run (empty manifest / --only filter matched nothing)")
@@ -2017,7 +2001,7 @@ def cmd_census(args: argparse.Namespace) -> int:
             "--latest: each project pins the remote head of its default branch when its "
             "first attempt starts; the ledger records it and the manifest commit"
         )
-    DISK_FLOOR_GB = args.disk_floor_gb
+    config.DISK_FLOOR_GB = args.disk_floor_gb
     if len(projects) > unpinned:
         refuse_unless_runner_accepts(
             "a pinned manifest",
@@ -2034,7 +2018,7 @@ def cmd_census(args: argparse.Namespace) -> int:
     _ENV.setdefault("GIT_TERMINAL_PROMPT", "0")
     start_ledger_run(args, manifest, "census")
     install_signal_handlers()
-    with RUNS_LOG.open("a") as f:
+    with config.RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\tcensus-start\tworkers={args.workers}\tprojects={len(projects)}\n")
 
     results = schedule(projects, args.workers, args.retries, stop_file, args.poll)
@@ -2044,7 +2028,7 @@ def cmd_census(args: argparse.Namespace) -> int:
     if stopped and all(v.is_success for v in results.values()):
         rc = 3
     end_ledger_run(rc, run_start, results)
-    with RUNS_LOG.open("a") as f:
+    with config.RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\tcensus-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
     counts: dict = {}
     for v in results.values():
@@ -2058,23 +2042,26 @@ def cmd_census(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    projects = read_manifest(CORPUS / args.manifest, None)
+    projects = read_manifest(config.CORPUS / args.manifest, None)
     last: dict = {}
-    if METRICS.exists():
-        for line in METRICS.read_text().splitlines()[1:]:
+    if config.METRICS.exists():
+        for line in config.METRICS.read_text().splitlines()[1:]:
             ts, name, _cls, phase, dur, rc, _log = line.split("\t")
             last[name] = f"{ts} {phase}({dur}s,rc={rc})"
 
     print(f"{'PROJECT':<16} {'CLASS':<6} {'STATE':<9} LAST_ACTIVITY")
     done = 0
     for p in projects:
-        state = retain.project_state(p["name"], OUT / p["name"])
+        state = retain.project_state(p["name"], config.OUT / p["name"])
         if state == "DONE":
             done += 1
         print(f"{p['name']:<16} {p['size_class']:<6} {state:<9} {last.get(p['name'], '—')}")
 
     # Before the first run OUT may not exist; measure the file system it will be on.
-    free_gb = shutil.disk_usage(next(p for p in (OUT, *OUT.parents) if p.exists())).free // 2**30
+    free_gb = (
+        shutil.disk_usage(next(p for p in (config.OUT, *config.OUT.parents) if p.exists())).free
+        // 2**30
+    )
     print(f"\nprogress: {done}/{len(projects)} validated | disk {free_gb}G free")
     return 0
 
@@ -2090,10 +2077,10 @@ def bar(done: int, total: int, width: int = BAR_WIDTH) -> str:
 
 def finished_runs() -> list[tuple]:
     """(name, cls, duration_s) for every successful pipeline run, oldest first."""
-    if not METRICS.exists():
+    if not config.METRICS.exists():
         return []
     runs = []
-    for line in METRICS.read_text().splitlines()[1:]:
+    for line in config.METRICS.read_text().splitlines()[1:]:
         _ts, name, cls, phase, dur, rc, _log = line.split("\t")
         if phase == "pipeline" and rc == "0":
             runs.append((name, cls, int(dur)))
@@ -2113,8 +2100,8 @@ def class_breakdown(projects: list[dict], states: dict) -> str:
 
 def cmd_progress(args: argparse.Namespace) -> int:
     """A one-screen progress bar and the last finished projects."""
-    projects = read_manifest(CORPUS / args.manifest, None)
-    states = {p["name"]: retain.project_state(p["name"], OUT / p["name"]) for p in projects}
+    projects = read_manifest(config.CORPUS / args.manifest, None)
+    states = {p["name"]: retain.project_state(p["name"], config.OUT / p["name"]) for p in projects}
     by_state: dict[str, list[dict]] = {}
     for p in projects:
         by_state.setdefault(states[p["name"]], []).append(p)
@@ -2194,9 +2181,9 @@ def interrupted(rows: list[dict]) -> list[dict]:
 
 def cmd_audit(args: argparse.Namespace) -> int:
     """Print one project's ledger rows; --json prints every row whole."""
-    rows = ledger.project_rows(ledger.read(LEDGER), args.project)
+    rows = ledger.project_rows(ledger.read(config.LEDGER), args.project)
     if not rows:
-        print(f"{args.project}: no rows in {LEDGER}", file=sys.stderr)
+        print(f"{args.project}: no rows in {config.LEDGER}", file=sys.stderr)
         return 1
     for row in rows if args.json else interrupted(rows):
         print(json.dumps(row, ensure_ascii=False) if args.json else audit_line(row))
@@ -2205,16 +2192,16 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 def cmd_db(args: argparse.Namespace) -> int:
     """Rebuild ctp.duckdb (derived index over stamps/metrics/parquets)."""
-    OUT.mkdir(parents=True, exist_ok=True)
+    config.OUT.mkdir(parents=True, exist_ok=True)
     _ENV.update(capture_devenv_env())
     forward_config()
     manifests = [
         arg
         for m in (getattr(args, "manifest", None) or [])
-        for arg in ("--manifest", str((CORPUS / m).resolve()))
+        for arg in ("--manifest", str((config.CORPUS / m).resolve()))
     ]
     return subprocess.run(
-        ["python3", str(CORPUS / "consolidate.py"), *manifests], cwd=CREGIT, env=_ENV
+        ["python3", str(config.CORPUS / "consolidate.py"), *manifests], cwd=config.CREGIT, env=_ENV
     ).returncode
 
 
@@ -2411,10 +2398,10 @@ def main() -> int:
     ce_p.add_argument(
         "--disk-floor-gb",
         type=int,
-        default=DISK_FLOOR_GB,
+        default=config.DISK_FLOOR_GB,
         metavar="G",
         help=f"start a project only with this much free disk in the output "
-        f"directory (default {DISK_FLOOR_GB})",
+        f"directory (default {config.DISK_FLOOR_GB})",
     )
     ce_p.add_argument(
         "--stop-file",

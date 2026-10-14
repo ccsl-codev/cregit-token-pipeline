@@ -43,7 +43,8 @@ ignore = ["C408"]
 max-complexity = 10
 
 [tool.setuptools]
-# The scripts sit at the repository root and form no package.
+# The scripts sit at the repository root. ctplib holds the parts of ctp.py.
+packages = ["ctplib"]
 py-modules = [
     "build_manifest",
     "consolidate",

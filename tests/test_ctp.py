@@ -25,6 +25,7 @@ import ctp
 import ledger
 import pin
 import retain
+from ctplib import config
 from file_mask import UNIVERSAL_MASK
 
 REAL_TOOL_VERSIONS = ctp.tool_versions
@@ -206,19 +207,19 @@ def sandbox(tmp_path, monkeypatch):
     # An empty CREGIT would give cmd_run's flag preflight nothing to read.
     (cregit / "run_pipeline_process.sh").write_text(REAL_RUNNER_USAGE)
 
-    monkeypatch.setattr(ctp, "CORPUS", tmp_path)
-    monkeypatch.setattr(ctp, "OUT", out)
-    monkeypatch.setattr(ctp, "CREGIT", cregit)
-    monkeypatch.setattr(ctp, "METRICS", tmp_path / "metrics.tsv")
-    monkeypatch.setattr(ctp, "RUNS_LOG", tmp_path / "runs.log")
-    monkeypatch.setattr(ctp, "RESOURCES", tmp_path / "resources.tsv")
-    monkeypatch.setattr(ctp, "LEDGER", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(config, "CORPUS", tmp_path)
+    monkeypatch.setattr(config, "OUT", out)
+    monkeypatch.setattr(config, "CREGIT", cregit)
+    monkeypatch.setattr(config, "METRICS", tmp_path / "metrics.tsv")
+    monkeypatch.setattr(config, "RUNS_LOG", tmp_path / "runs.log")
+    monkeypatch.setattr(config, "RESOURCES", tmp_path / "resources.tsv")
+    monkeypatch.setattr(config, "LEDGER", tmp_path / "ledger.jsonl")
     # tool_versions starts git and srcml; its own tests call REAL_TOOL_VERSIONS.
     monkeypatch.setattr(ctp, "tool_versions", lambda: {"ctp_commit": "test"})
     monkeypatch.setattr(retain, "STATE", tmp_path / "state")
     monkeypatch.setattr(retain, "OUT", out)
     # A real disk_usage call stays, but the floor can never trip by accident.
-    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 0)
+    monkeypatch.setattr(config, "DISK_FLOOR_GB", 0)
     monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
     monkeypatch.setattr(subprocess, "run", forbidden)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
@@ -842,7 +843,7 @@ def test_run_project_return_state(monkeypatch, jq, pipeline_rc, validate_rc, exp
 def test_run_project_defers_below_the_disk_floor(monkeypatch, runner, jq):
     """Deferring beats filling the disk: a truncated workdir would validate as
     FAILED and waste the tokenizer time already spent."""
-    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    monkeypatch.setattr(config, "DISK_FLOOR_GB", 10**9)
     assert ctp.run_project(jq) == "deferred"
     assert runner.calls == []
 
@@ -1302,7 +1303,7 @@ def test_cmd_status_classifies_every_project_state(sandbox, capsys, held_lock):
 
 def test_cmd_status_works_before_the_output_dir_exists(sandbox, monkeypatch, capsys):
     write_manifest(sandbox.root, VALID_ROW)
-    monkeypatch.setattr(ctp, "OUT", sandbox.out / "not-yet")
+    monkeypatch.setattr(config, "OUT", sandbox.out / "not-yet")
     assert ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
     assert "G free" in capsys.readouterr().out
 
@@ -2149,7 +2150,7 @@ def test_a_held_lock_is_recorded_as_deferred(sandbox, runner, jq, held_lock):
 
 
 def test_the_disk_floor_is_recorded_as_deferred(monkeypatch, sandbox, runner, jq):
-    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    monkeypatch.setattr(config, "DISK_FLOOR_GB", 10**9)
     assert ctp.run_project(jq) == ctp.RunOutcome.DEFERRED
     assert ledger_rows(sandbox, "jq")[0]["detail"].startswith("disk below")
 
@@ -2441,7 +2442,7 @@ def test_a_validated_project_is_still_skipped_by_default(sandbox, runner, jq, jo
 
 def test_resuming_ignores_the_disk_floor(monkeypatch, sandbox, runner, jq, joining):
     """The steps after validation write almost nothing; the floor guards a new clone."""
-    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    monkeypatch.setattr(config, "DISK_FLOOR_GB", 10**9)
     (sandbox.out / "jq").mkdir()
     (sandbox.out / "jq" / "jq.validated").write_text("rows=7\n")
     assert ctp.run_project(jq, resume_validated=True) == ctp.RunOutcome.DONE
@@ -2929,9 +2930,9 @@ def test_mem_available_reads_proc_meminfo(tmp_path):
 
 
 def test_gate_reason_names_disk_then_memory(sandbox, monkeypatch):
-    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
+    monkeypatch.setattr(config, "DISK_FLOOR_GB", 10**9)
     assert ctp.gate_reason({}).startswith("disk")
-    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 0)
+    monkeypatch.setattr(config, "DISK_FLOOR_GB", 0)
     monkeypatch.setattr(ctp, "mem_available_gb", lambda: 2.0)
     assert ctp.gate_reason({"min_free_mem_gb": 4}).startswith("memory 2.0G")
     assert ctp.gate_reason({"min_free_mem_gb": 1}) is None
@@ -2988,7 +2989,7 @@ def test_cmd_census_needs_a_worker(census_ready):
 def test_cmd_census_sets_the_disk_floor(census_ready, fake_projects, no_gates, monkeypatch):
     fake_projects()
     ctp.cmd_census(census_args(disk_floor_gb=77))
-    assert ctp.DISK_FLOOR_GB == 77
+    assert config.DISK_FLOOR_GB == 77
 
 
 def test_cmd_census_warns_about_unpinned_projects(census_ready, fake_projects, no_gates, capsys):

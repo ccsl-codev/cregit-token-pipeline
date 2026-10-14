@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-import ctp
+from ctplib import config
 from file_mask import TOKENIZABLE_EXTENSIONS, UNIVERSAL_MASK
 
-TOKENIZE_DIR = ctp.CREGIT / "tokenize"
+TOKENIZE_DIR = config.CREGIT / "tokenize"
 FILE_MASK_PL = TOKENIZE_DIR / "fileMask.pl"
 LANGUAGES_PM = TOKENIZE_DIR / "CregitLanguages.pm"
 
@@ -126,13 +126,13 @@ def test_m4_is_routed_but_not_masked():
 def test_the_configured_cregit_checkout_is_the_one_the_pipeline_runs():
     """If pipeline.cfg pointed somewhere else, everything above would be checking
     a tokenizer no run uses."""
-    assert (ctp.CREGIT / "run_pipeline_process.sh").exists(), (
-        f"{ctp.CREGIT} does not look like a cregit checkout; pipeline.cfg is stale"
+    assert (config.CREGIT / "run_pipeline_process.sh").exists(), (
+        f"{config.CREGIT} does not look like a cregit checkout; pipeline.cfg is stale"
     )
 
 
 def test_the_runner_takes_its_default_mask_from_the_same_table():
     """A project run without --mask must get the mask the manifest records."""
-    runner = (ctp.CREGIT / "run_pipeline_process.sh").read_text()
+    runner = (config.CREGIT / "run_pipeline_process.sh").read_text()
     assert "tokenize/fileMask.pl" in runner
     assert r"MASK='\.[ch]$'" not in runner
