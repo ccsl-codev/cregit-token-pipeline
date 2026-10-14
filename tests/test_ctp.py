@@ -21,11 +21,11 @@ from types import SimpleNamespace
 
 import pytest
 
-import ctp
 import ledger
 import pin
 import retain
 from ctplib import (
+    cli,
     config,
     console,
     manifest_file,
@@ -538,7 +538,7 @@ def test_no_memo_is_an_alias_for_drop_memo(monkeypatch):
     seen = {}
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run", "--no-memo"])
     monkeypatch.setattr(passes, "cmd_run", lambda args: seen.update(vars(args)) or 0)
-    assert ctp.main() == 0
+    assert cli.main() == 0
     assert seen["drop_memo"] is True
 
 
@@ -1377,7 +1377,7 @@ def test_main_dispatches_each_subcommand(monkeypatch, argv, owner, target):
     called = []
     monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setattr(owner, target, lambda args: called.append(target) or 0)
-    assert ctp.main() == 0
+    assert cli.main() == 0
     assert called == [target]
 
 
@@ -1385,7 +1385,7 @@ def test_main_requires_a_subcommand(monkeypatch):
     """`./ctp.py` with no verb must not fall through to a default action."""
     monkeypatch.setattr(sys, "argv", ["ctp.py"])
     with pytest.raises(SystemExit):
-        ctp.main()
+        cli.main()
 
 
 def test_say_prefixes_every_line_with_a_timestamp(capsys, clock):
@@ -1706,12 +1706,12 @@ def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
     monkeypatch.setattr(passes, "cmd_run", lambda args: seen.update(vars(args)) or 0)
 
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run"])
-    assert ctp.main() == 0
+    assert cli.main() == 0
     assert seen["allow_empty_provenance"] is False
 
     seen.clear()
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run", "--allow-empty-provenance"])
-    assert ctp.main() == 0
+    assert cli.main() == 0
     assert seen["allow_empty_provenance"] is True
 
 
@@ -1744,7 +1744,7 @@ def test_ctp_run_refuses_a_flag_it_does_not_own(monkeypatch, capsys, flag):
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run", flag, "x"])
     monkeypatch.setattr(passes, "cmd_run", forbidden)
     with pytest.raises(SystemExit) as exc:
-        ctp.main()
+        cli.main()
     assert exc.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
 
@@ -2649,7 +2649,7 @@ def test_drop_html_and_anonymize_are_off_by_default_on_the_cli(monkeypatch):
     seen = {}
     monkeypatch.setattr(passes, "cmd_run", lambda args: seen.update(vars(args)) or 0)
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run"])
-    ctp.main()
+    cli.main()
     assert seen["drop_html"] is False and seen["anonymize"] == "" and seen["cleanup"] is False
 
 
@@ -3100,7 +3100,7 @@ def test_main_dispatches_census(monkeypatch):
     seen = {}
     monkeypatch.setattr(scheduler, "cmd_census", lambda args: seen.update(vars(args)) or 0)
     monkeypatch.setattr(sys, "argv", ["ctp.py", "census", "--workers", "3"])
-    assert ctp.main() == 0
+    assert cli.main() == 0
     assert seen["workers"] == 3 and seen["min_free_mem_gb"] == scheduler.MIN_FREE_MEM_GB
     assert seen["drop_html"] is False and seen["anonymize"] == ""
 
