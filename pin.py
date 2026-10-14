@@ -169,6 +169,7 @@ def prepare(url: str, sha: str, dest: Path) -> dict:
         return {**found, "reused": True}
 
     branch, remote_sha = remote_head(url)
+    kept = branch or FALLBACK_BRANCH
     tmp = dest.with_name(dest.name + ".tmp")
     for stale in (tmp, dest):
         if stale.exists():
@@ -177,15 +178,15 @@ def prepare(url: str, sha: str, dest: Path) -> dict:
     tmp.parent.mkdir(parents=True, exist_ok=True)
     git(["init", "--quiet", "--bare", str(tmp)])
     method = fetch_pinned(tmp, url, sha)
-    keep_only(tmp, branch or FALLBACK_BRANCH, sha)
+    keep_only(tmp, kept, sha)
     head, refs = checked_out(tmp)
-    if head != sha or refs != [f"refs/heads/{branch or FALLBACK_BRANCH}"]:
+    if head != sha or refs != [f"refs/heads/{kept}"]:
         raise PinError(f"after pinning, HEAD is {head} with refs {refs}; expected {sha} alone")
     result = {
         "url": url,
         "pinned_sha": sha,
         "checked_out_sha": head,
-        "branch": branch or FALLBACK_BRANCH,
+        "branch": kept,
         "remote_default_branch": branch,
         "remote_head_sha": remote_sha,
         "remote_head_moved": bool(remote_sha) and remote_sha != sha,
