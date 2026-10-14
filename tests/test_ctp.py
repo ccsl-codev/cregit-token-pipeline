@@ -38,6 +38,7 @@ from ctplib import (
     project_run,
     project_steps,
     remote_head,
+    report,
     resources,
     run_ledger,
     runner_args,
@@ -677,7 +678,7 @@ def test_status_reports_failed_after_the_runner_wiped_the_workdir(sandbox, monke
     project_steps.run_project(jq)
 
     write_manifest(sandbox.root, VALID_ROW)
-    ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv"))
+    report.cmd_status(argparse.Namespace(manifest="manifest.tsv"))
     line = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("jq "))
     assert "FAILED" in line
 
@@ -1319,7 +1320,7 @@ def test_cmd_status_classifies_every_project_state(sandbox, capsys, held_lock):
     metrics.record_metric("done", "S", "validate", 3, 0, Path("/logs/validate-1.log"))
 
     with held_lock(retain.lock_path("running")):
-        assert ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
+        assert report.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
 
     out = capsys.readouterr().out
     states = {line.split()[0]: line.split()[2] for line in out.splitlines()[1:5]}
@@ -1331,14 +1332,14 @@ def test_cmd_status_classifies_every_project_state(sandbox, capsys, held_lock):
 def test_cmd_status_works_before_the_output_dir_exists(sandbox, monkeypatch, capsys):
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(config, "OUT", sandbox.out / "not-yet")
-    assert ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
+    assert report.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
     assert "G free" in capsys.readouterr().out
 
 
 def test_cmd_status_works_without_a_metrics_file(sandbox, capsys):
     """A fresh checkout has no ledger yet; status must not crash."""
     write_manifest(sandbox.root, VALID_ROW)
-    assert ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
+    assert report.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0
     assert "—" in capsys.readouterr().out
 
 
@@ -1357,7 +1358,7 @@ def test_cmd_db_runs_consolidate_inside_the_captured_environment(sandbox, monkey
         return SimpleNamespace(returncode=7)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert ctp.cmd_db(argparse.Namespace()) == 7
+    assert report.cmd_db(argparse.Namespace()) == 7
     assert seen["args"] == ["python3", str(sandbox.root / "consolidate.py")]
     assert seen["cwd"] == sandbox.cregit
     assert seen["env"] == {"PATH": "/nix/bin"}
@@ -1367,8 +1368,8 @@ def test_cmd_db_runs_consolidate_inside_the_captured_environment(sandbox, monkey
     "argv, owner, target",
     [
         pytest.param(["ctp.py", "run"], passes, "cmd_run", id="run"),
-        pytest.param(["ctp.py", "status"], ctp, "cmd_status", id="status"),
-        pytest.param(["ctp.py", "db"], ctp, "cmd_db", id="db"),
+        pytest.param(["ctp.py", "status"], report, "cmd_status", id="status"),
+        pytest.param(["ctp.py", "db"], report, "cmd_db", id="db"),
     ],
 )
 def test_main_dispatches_each_subcommand(monkeypatch, argv, owner, target):
@@ -1780,7 +1781,7 @@ def write_metrics(tmp_path: Path, *rows: tuple) -> Path:
 )
 def test_bar_fills_in_proportion(done, total, filled):
     """A bar is 30 cells wide whatever the numbers."""
-    out = ctp.bar(done, total)
+    out = report.bar(done, total)
     assert len(out) == 30
     assert out.count("█") == filled
 
@@ -1794,7 +1795,7 @@ def test_finished_runs_keeps_only_successful_pipeline_rows(sandbox):
         ("b", "M", "pipeline", 200, 1),
         ("c", "M", "pipeline", 300, 0),
     )
-    assert ctp.finished_runs() == [("a", "S", 100), ("c", "M", 300)]
+    assert report.finished_runs() == [("a", "S", 100), ("c", "M", 300)]
 
 
 def test_progress_prints_a_bar_and_the_class_breakdown(sandbox, capsys):
@@ -1806,7 +1807,7 @@ def test_progress_prints_a_bar_and_the_class_breakdown(sandbox, capsys):
     (sandbox.out / "a").mkdir()
     (sandbox.out / "a" / "a.validated").write_text("rows=1\n")
 
-    assert ctp.cmd_progress(progress_args()) == 0
+    assert report.cmd_progress(progress_args()) == 0
     out = capsys.readouterr().out
     assert "1/2" in out
     assert "50.0%" in out
@@ -1822,7 +1823,7 @@ def test_progress_lists_the_running_and_counts_the_failed(sandbox, capsys, held_
     )
     retain.state_dir("b").mkdir(parents=True)
     with held_lock(retain.lock_path("a")):
-        assert ctp.cmd_progress(progress_args()) == 0
+        assert report.cmd_progress(progress_args()) == 0
     out = capsys.readouterr().out
     assert "FAILED 1" in out
     assert "\nrunning\n  a " in out
@@ -1836,7 +1837,7 @@ def test_progress_lists_the_last_finished_newest_first(sandbox, capsys):
         ("two", "S", "pipeline", 120, 0),
         ("three", "S", "pipeline", 60, 0),
     )
-    assert ctp.cmd_progress(progress_args(last=2)) == 0
+    assert report.cmd_progress(progress_args(last=2)) == 0
     out = capsys.readouterr().out
     assert out.index("three") < out.index("two")
     assert "2.0 min" in out
@@ -1847,7 +1848,7 @@ def test_progress_survives_an_empty_manifest(sandbox, capsys):
     """--only can match nothing, and a crash here would be a poor status tool."""
     write_manifest(sandbox.root)
 
-    assert ctp.cmd_progress(progress_args()) == 0
+    assert report.cmd_progress(progress_args()) == 0
     out = capsys.readouterr().out
     assert "0/0" in out
     assert "0.0%" in out
@@ -2356,7 +2357,7 @@ def test_capture_is_blank_when_the_tool_is_missing(monkeypatch):
 def test_audit_prints_one_line_per_step(sandbox, runner, pinned_jq, capsys):
     project_steps.run_project(pinned_jq)
     capsys.readouterr()
-    assert ctp.cmd_audit(argparse.Namespace(project="jq", json=False)) == 0
+    assert report.cmd_audit(argparse.Namespace(project="jq", json=False)) == 0
     out = capsys.readouterr().out.splitlines()
     assert [line.split()[1] for line in out] == [
         "clone",
@@ -2374,7 +2375,7 @@ def test_audit_json_prints_whole_rows(sandbox, runner, jq, capsys):
     fake_parquet(sandbox)
     project_steps.run_project(jq)
     capsys.readouterr()
-    ctp.cmd_audit(argparse.Namespace(project="jq", json=True))
+    report.cmd_audit(argparse.Namespace(project="jq", json=True))
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert rows[-1]["state"] == "done"
     [validated] = [r for r in rows if r["step"] == "validate" and r["status"] == "ok"]
@@ -2388,19 +2389,19 @@ def test_audit_marks_a_step_that_never_ended(sandbox, capsys):
     ledger.append(path, {**base, "step": "clone", "status": "started"})
     ledger.append(path, {**base, "step": "clone", "status": "ok"})
     ledger.append(path, {**base, "step": "pipeline", "status": "started"})
-    ctp.cmd_audit(argparse.Namespace(project="jq", json=False))
+    report.cmd_audit(argparse.Namespace(project="jq", json=False))
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 2
     assert "pipeline  interrupted" in lines[1] and "the run died here" in lines[1]
 
 
 def test_audit_of_an_unknown_project_fails(sandbox, capsys):
-    assert ctp.cmd_audit(argparse.Namespace(project="nope", json=False)) == 1
+    assert report.cmd_audit(argparse.Namespace(project="nope", json=False)) == 1
     assert "no rows" in capsys.readouterr().err
 
 
 def test_audit_line_shows_a_failure_and_its_detail():
-    line = ctp.audit_line(
+    line = report.audit_line(
         {"step": "project", "state": "failed", "failed_step": "clone", "detail": "commit missing"}
     )
     assert "state=failed" in line and "failed_step=clone" in line and "commit missing" in line
@@ -2492,7 +2493,7 @@ def test_cmd_db_forwards_each_manifest_as_an_absolute_path(sandbox, monkeypatch)
         "run",
         lambda args, **k: seen.update(args=args) or SimpleNamespace(returncode=0),
     )
-    assert ctp.cmd_db(argparse.Namespace(manifest=["a.tsv", "b.tsv"])) == 0
+    assert report.cmd_db(argparse.Namespace(manifest=["a.tsv", "b.tsv"])) == 0
     assert seen["args"][2:] == [
         "--manifest",
         str(sandbox.root / "a.tsv"),
