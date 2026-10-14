@@ -1,13 +1,6 @@
 """The audit ledger: one JSON object per line, one line per project and per step.
-
-The file is append-only. Each row is written whole, under an exclusive flock, and
-fsynced before the call returns, so two runs or two threads never interleave a row
-and a crash loses at most the row being written. Nothing rewrites or truncates it.
-
-Every row carries enough to audit its step alone: the run, the manifest row, the
-pinned and checked-out commits, the tool versions and the flags. A project's last
-row has step "project" and gives its state: done, done-dirty, failed, deferred or
-skipped. done-dirty means the Parquet is valid but the cleanup did not finish."""
+Append-only: each row is written whole under an exclusive flock and fsynced.
+A project's last row has step "project" and a state. Fields and states: docs/E2E.md."""
 
 from __future__ import annotations
 

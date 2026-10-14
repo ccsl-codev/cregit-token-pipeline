@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Build ctp.duckdb, a derived index over the manifests, stamps and metrics.tsv; rerunnable.
-Usage: consolidate.py [--manifest PATH]... (default manifest.tsv). The tokens view takes
-only parquets that match EXPECTED_COLUMNS. Exit 1 when a stamp's rows= is unreadable.
-       consolidate.py --join NAME --manifest PATH  adds one validated project to the
-existing database, for ctp.py census; exit 1 when it cannot, 2 for an unknown name."""
+Usage: consolidate.py [--manifest PATH]... | --join NAME --manifest PATH (adds one project).
+Exit 1 when a stamp's rows= is unreadable or a join fails; 2 for an unknown name."""
 
 from __future__ import annotations
 

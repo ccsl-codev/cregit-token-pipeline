@@ -1,31 +1,7 @@
 #!/usr/bin/env python3
 """Build a pinned manifest and its project_meta.json from a selection frame.
 Usage: build_manifest.py FRAME.csv --manifest OUT.tsv --project-meta OUT.json
-       [--order OUT.order.tsv] [--limit N]
-
-The frame is a CSV file with a header row. This script reads these columns:
-
-  slug           owner/repo on its host, e.g. jqlang/jq. The column may be called
-                 name_with_owner instead. It seeds the random number u.
-  host           e.g. github.com
-  repo_url       the clone URL
-  head_oid       the commit to analyse: 40 lowercase hex digits
-  u              the permanent random number of the row, a float in [0, 1).
-                 It must equal u_of(slug), see below, or the build stops.
-  size_class     S, M or L, as in the manifest
-  labels         free text. It becomes the manifest category, unless the
-                 frame also has a category column.
-
-Optional columns: category, file_filter (blank means the universal mask), and
-included. When included is present, only rows where it is 1, true or yes are
-kept. Any column named like one of the 29 provenance fields fills that field.
-
-u_of(slug) takes sha256 of "20261110:" + slug, and reads its first 53 bits as
-a fraction of 2**53. So u is exact in a float, and always below 1.
-
-The manifest lists the rows in u order, lowest first, so any finished prefix
-of a run is a random sample of the frame. Its sixth column pins each project to
-head_oid. The order file maps each queue position to slug, u and head_oid."""
+[--order OUT.order.tsv] [--limit N]. docs/E2E.md gives the frame contract and the outputs."""
 
 from __future__ import annotations
 

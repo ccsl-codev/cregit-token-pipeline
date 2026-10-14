@@ -313,12 +313,8 @@ def disk_bytes(path: Path) -> int:
 
 def clean_workdir(name: str, *, drop_html: bool = False) -> dict:
     """Delete every entry of a finished project's workdir except the keepers.
-    Returns {"removed": [{"entry", "bytes"}], "kept": [...], "errors": [...],
-    "bytes_freed": n}. Errors are collected, never raised: a failed cleanup must
-    leave the Parquet and say what it could not delete.
-
-    pipeline.log goes only when ctp's own log of the pipeline exists, because
-    ctp's log holds every line the runner tees into it."""
+    Returns {"removed", "kept", "errors", "bytes_freed"}. Errors are collected, never raised.
+    pipeline.log goes only when ctp's own pipeline log exists: that log holds the same lines."""
     result: dict = {"removed": [], "kept": [], "errors": [], "bytes_freed": 0}
     if _prune_keeper(name) is None:
         result["errors"].append(f"{name} is not a finished, idle project (see the log)")

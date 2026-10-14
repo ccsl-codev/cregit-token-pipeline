@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """Prepare a bare clone that holds exactly one pinned commit and its history.
 Usage: pin.py --url URL --commit SHA --dest DIR.git --result FILE.json
-ctp.py runs this as the `clone` step, then hands DIR.git to the runner as --repo-url.
-
-The clone keeps one branch, named after the remote's default branch, pointing at the
-pinned commit. Every other branch and tag is deleted, so the runner tokenizes and
-blames the history of that commit and nothing else.
-
-Exit 0 writes the result JSON. Exit 3 means the commit is not on the remote. Exit 1 is
-any other git failure. Exit 2 is a usage error."""
+Exit 0 writes the result JSON; 1 git failure; 2 usage; 3 commit not on the remote."""
 
 from __future__ import annotations
 
