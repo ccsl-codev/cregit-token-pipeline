@@ -11,7 +11,7 @@ import signal
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -260,13 +260,45 @@ def install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, handler)
 
 
-def cmd_census(args: argparse.Namespace) -> int:
-    """Every project of the manifest, end to end, in manifest order."""
+def stop_file_of(args: argparse.Namespace) -> Path:
+    """The stop file, after the checks that refuse to start: it must not exist yet."""
     stop_file = Path(args.stop_file).resolve() if args.stop_file else config.CORPUS / STOP_NAME
     if stop_file.exists():
         sys.exit(f"{stop_file} exists, so the census would stop at once. Remove it to start.")
     if args.workers < 1:
         sys.exit("--workers must be at least 1")
+    return stop_file
+
+
+def set_run_options(args: argparse.Namespace) -> None:
+    """Join and clean up every project, resume a leftover workdir, gate on memory."""
+    args.join, args.cleanup = True, True
+    runtime.opts.update(preflight.run_options(args))
+    runtime.opts.update(
+        own_session=True,
+        min_free_mem_gb=args.min_free_mem_gb,
+        auto_resume=True,
+        latest=bool(getattr(args, "latest", False)),
+    )
+    if runtime.opts["latest"]:
+        console.say(
+            "--latest: each project pins the remote head of its default branch when its "
+            "first attempt starts; the ledger records it and the manifest commit"
+        )
+    config.DISK_FLOOR_GB = args.disk_floor_gb
+
+
+def run_exit_code(results: dict, stopped: bool) -> int:
+    """0 when every project succeeded, 3 when they did but a stop cut the run short, else 1."""
+    rc = 0 if all(v.is_success for v in results.values()) and not stopped else 1
+    if stopped and all(v.is_success for v in results.values()):
+        rc = 3
+    return rc
+
+
+def cmd_census(args: argparse.Namespace) -> int:
+    """Every project of the manifest, end to end, in manifest order."""
+    stop_file = stop_file_of(args)
     config.OUT.mkdir(parents=True, exist_ok=True)
     manifest = config.CORPUS / args.manifest
     projects = manifest_file.read_manifest(
@@ -282,20 +314,7 @@ def cmd_census(args: argparse.Namespace) -> int:
             "remote HEAD of its clone day, and the ledger says so"
         )
 
-    args.join, args.cleanup = True, True
-    runtime.opts.update(preflight.run_options(args))
-    runtime.opts.update(
-        own_session=True,
-        min_free_mem_gb=args.min_free_mem_gb,
-        auto_resume=True,
-        latest=bool(getattr(args, "latest", False)),
-    )
-    if runtime.opts["latest"]:
-        console.say(
-            "--latest: each project pins the remote head of its default branch when its "
-            "first attempt starts; the ledger records it and the manifest commit"
-        )
-    config.DISK_FLOOR_GB = args.disk_floor_gb
+    set_run_options(args)
     if len(projects) > unpinned:
         preflight.refuse_unless_runner_accepts(
             "a pinned manifest",
@@ -320,17 +339,13 @@ def cmd_census(args: argparse.Namespace) -> int:
     results = schedule(projects, args.workers, args.retries, stop_file, args.poll)
 
     stopped = bool(runtime.run_info.get("stop_reason"))
-    rc = 0 if all(v.is_success for v in results.values()) and not stopped else 1
-    if stopped and all(v.is_success for v in results.values()):
-        rc = 3
+    rc = run_exit_code(results, stopped)
     run_ledger.end_ledger_run(rc, run_start, results)
     with config.RUNS_LOG.open("a") as f:
         f.write(
             f"{console.now_iso()}\tcensus-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n"
         )
-    counts: dict = {}
-    for v in results.values():
-        counts[str(v)] = counts.get(str(v), 0) + 1
+    counts = Counter(str(v) for v in results.values())
     console.say(
         f"census finished rc={rc}: "
         + ", ".join(f"{k} {n}" for k, n in sorted(counts.items()))
