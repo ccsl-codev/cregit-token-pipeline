@@ -25,7 +25,7 @@ import ctp
 import ledger
 import pin
 import retain
-from ctplib import config, console, runtime
+from ctplib import config, console, manifest_file, runtime
 from file_mask import UNIVERSAL_MASK
 
 REAL_TOOL_VERSIONS = ctp.tool_versions
@@ -297,7 +297,7 @@ def must_not_start(sandbox, monkeypatch, runner_script):
 
 
 def test_manifest_parses_a_valid_row(tmp_path):
-    projects = ctp.read_manifest(write_manifest(tmp_path, VALID_ROW), None)
+    projects = manifest_file.read_manifest(write_manifest(tmp_path, VALID_ROW), None)
     assert projects == [
         dict(
             name="jq",
@@ -311,12 +311,12 @@ def test_manifest_parses_a_valid_row(tmp_path):
 
 def test_manifest_skips_comment_lines(tmp_path):
     path = write_manifest(tmp_path, "# name  url  category  filter  class", VALID_ROW)
-    assert [p["name"] for p in ctp.read_manifest(path, None)] == ["jq"]
+    assert [p["name"] for p in manifest_file.read_manifest(path, None)] == ["jq"]
 
 
 def test_manifest_skips_blank_and_whitespace_only_lines(tmp_path):
     path = write_manifest(tmp_path, "", "   ", VALID_ROW, "\t", "")
-    assert len(ctp.read_manifest(path, None)) == 1
+    assert len(manifest_file.read_manifest(path, None)) == 1
 
 
 @pytest.mark.parametrize(
@@ -329,24 +329,24 @@ def test_manifest_skips_blank_and_whitespace_only_lines(tmp_path):
 def test_manifest_rejects_a_row_without_exactly_five_fields(tmp_path, row, fields):
     """A short or long row is a corrupt manifest that would mislabel projects."""
     with pytest.raises(ValueError):
-        ctp.read_manifest(write_manifest(tmp_path, row), None)
+        manifest_file.read_manifest(write_manifest(tmp_path, row), None)
 
 
 def test_manifest_error_names_the_offending_line(tmp_path):
     path = write_manifest(tmp_path, VALID_ROW, "zstd\thttps://z.git\tenterprise\t\\.[ch]$")
     with pytest.raises(ValueError) as exc:
-        ctp.read_manifest(path, None)
+        manifest_file.read_manifest(path, None)
     assert "zstd" in str(exc.value)
 
 
 def test_manifest_rejects_a_bad_size_class(tmp_path):
     row = "jq\thttps://x.git\tcommunity\t\\.[ch]$\tXL"
     with pytest.raises(ValueError):
-        ctp.read_manifest(write_manifest(tmp_path, row), None)
+        manifest_file.read_manifest(write_manifest(tmp_path, row), None)
 
 
 def test_manifest_empty_returns_no_projects(tmp_path):
-    assert ctp.read_manifest(write_manifest(tmp_path), None) == []
+    assert manifest_file.read_manifest(write_manifest(tmp_path), None) == []
 
 
 def test_manifest_only_filter_keeps_just_the_named_projects(tmp_path):
@@ -356,7 +356,7 @@ def test_manifest_only_filter_keeps_just_the_named_projects(tmp_path):
         "zstd\thttps://github.com/facebook/zstd.git\tenterprise\t\\.[ch]$\tS",
         "tmux\thttps://github.com/tmux/tmux.git\tcommunity\t\\.[ch]$\tS",
     )
-    assert [p["name"] for p in ctp.read_manifest(path, {"zstd"})] == ["zstd"]
+    assert [p["name"] for p in manifest_file.read_manifest(path, {"zstd"})] == ["zstd"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1836,7 +1836,7 @@ def test_progress_survives_an_empty_manifest(sandbox, capsys):
 def test_a_blank_file_filter_column_falls_back_to_the_universal_mask(tmp_path):
     """blobExec rejects an empty mask, so a blank column means the universal one."""
     row = "jq\thttps://github.com/jqlang/jq.git\tcommunity\t\tS"
-    projects = ctp.read_manifest(write_manifest(tmp_path, row), None)
+    projects = manifest_file.read_manifest(write_manifest(tmp_path, row), None)
     assert projects[0]["file_filter"] == UNIVERSAL_MASK
 
 
@@ -1867,24 +1867,24 @@ def pinned_jq(jq):
 
 
 def test_manifest_reads_a_sixth_column_as_the_pinned_commit(tmp_path):
-    [row] = ctp.read_manifest(write_manifest(tmp_path, PINNED_ROW), None)
+    [row] = manifest_file.read_manifest(write_manifest(tmp_path, PINNED_ROW), None)
     assert row["commit"] == PINNED_SHA
 
 
 def test_manifest_without_the_column_is_unpinned(tmp_path):
-    [row] = ctp.read_manifest(write_manifest(tmp_path, VALID_ROW), None)
+    [row] = manifest_file.read_manifest(write_manifest(tmp_path, VALID_ROW), None)
     assert "commit" not in row
 
 
 @pytest.mark.parametrize("commit", ["abc123", PINNED_SHA.upper(), PINNED_SHA + "0", ""])
 def test_manifest_rejects_a_commit_that_is_not_a_full_sha(tmp_path, commit):
     with pytest.raises(ValueError, match="40-character"):
-        ctp.read_manifest(write_manifest(tmp_path, f"{VALID_ROW}\t{commit}"), None)
+        manifest_file.read_manifest(write_manifest(tmp_path, f"{VALID_ROW}\t{commit}"), None)
 
 
 def test_manifest_rejects_seven_fields(tmp_path):
     with pytest.raises(ValueError, match="pinned commit"):
-        ctp.read_manifest(write_manifest(tmp_path, f"{PINNED_ROW}\textra"), None)
+        manifest_file.read_manifest(write_manifest(tmp_path, f"{PINNED_ROW}\textra"), None)
 
 
 def test_a_pinned_project_clones_first_then_runs_from_the_staging_clone(sandbox, runner, pinned_jq):
@@ -2647,7 +2647,7 @@ def manifest_rows(*names):
 
 
 def projects_of(sandbox, *names):
-    return ctp.read_manifest(write_manifest(sandbox.root, *manifest_rows(*names)), None)
+    return manifest_file.read_manifest(write_manifest(sandbox.root, *manifest_rows(*names)), None)
 
 
 class FakeProjects:

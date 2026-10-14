@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 import build_manifest as bm
-import ctp
 import validate_schema
+from ctplib import manifest_file
 from file_mask import UNIVERSAL_MASK
 
 FIXTURE = Path(__file__).parent / "fixtures" / "frame.sample.csv"
@@ -59,7 +59,7 @@ def test_u_is_always_below_one():
 
 def test_the_fixture_builds_a_manifest_in_u_order(tmp_path):
     manifest, _, _ = build_files(tmp_path, FIXTURE)
-    projects = ctp.read_manifest(manifest, None)
+    projects = manifest_file.read_manifest(manifest, None)
     assert [p["name"] for p in projects] == [
         "zserge__jsmn",
         "DaveGamble__cJSON",
@@ -75,7 +75,7 @@ def test_the_fixture_builds_a_manifest_in_u_order(tmp_path):
 
 def test_every_manifest_row_is_pinned_to_head_oid(tmp_path):
     manifest, _, _ = build_files(tmp_path, FIXTURE)
-    projects = {p["name"]: p for p in ctp.read_manifest(manifest, None)}
+    projects = {p["name"]: p for p in manifest_file.read_manifest(manifest, None)}
     assert projects["antirez__kilo"]["commit"] == "0099562d0e79aea0c6deedfa1ee0ef4a3a8883b7"
     assert all(len(p["commit"]) == 40 for p in projects.values())
 
@@ -89,7 +89,7 @@ def test_a_row_not_included_is_dropped(tmp_path):
 def test_labels_become_the_category_and_the_manifest_category(tmp_path):
     manifest, meta, _ = build_files(tmp_path, FIXTURE)
     gitlab = "gitlab.com__example-group__example-lib"
-    [row] = [p for p in ctp.read_manifest(manifest, None) if p["name"] == gitlab]
+    [row] = [p for p in manifest_file.read_manifest(manifest, None) if p["name"] == gitlab]
     assert row["category"] == "company;Example Corp"
     assert json.loads(meta.read_text())[gitlab]["manifest_category"] == "company;Example Corp"
 
@@ -97,7 +97,7 @@ def test_labels_become_the_category_and_the_manifest_category(tmp_path):
 def test_a_category_column_wins_over_labels(tmp_path):
     frame = write_frame(tmp_path, [frame_row(category="foundation")])
     manifest, _meta, _ = build_files(tmp_path, frame)
-    assert ctp.read_manifest(manifest, None)[0]["category"] == "foundation"
+    assert manifest_file.read_manifest(manifest, None)[0]["category"] == "foundation"
 
 
 def test_project_meta_holds_the_29_fields_the_generator_reads(tmp_path):
@@ -127,7 +127,7 @@ def test_the_order_file_maps_queue_position_to_slug_and_u(tmp_path):
 
 def test_limit_keeps_the_lowest_u_rows(tmp_path):
     manifest, meta, _ = build_files(tmp_path, FIXTURE, "--limit", "2")
-    assert [p["name"] for p in ctp.read_manifest(manifest, None)] == [
+    assert [p["name"] for p in manifest_file.read_manifest(manifest, None)] == [
         "zserge__jsmn",
         "DaveGamble__cJSON",
     ]
@@ -138,7 +138,7 @@ def test_name_with_owner_is_accepted_as_the_slug_column(tmp_path):
     row = frame_row()
     row["name_with_owner"] = row.pop("slug")
     manifest, _, _ = build_files(tmp_path, write_frame(tmp_path, [row]))
-    assert ctp.read_manifest(manifest, None)[0]["name"] == "jqlang__jq"
+    assert manifest_file.read_manifest(manifest, None)[0]["name"] == "jqlang__jq"
 
 
 def test_the_manifest_header_names_the_frame_and_its_hash(tmp_path):

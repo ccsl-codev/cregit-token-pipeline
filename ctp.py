@@ -29,8 +29,7 @@ from pathlib import Path
 import ledger
 import pin
 import retain
-from ctplib import config, console, runtime
-from file_mask import UNIVERSAL_MASK
+from ctplib import config, console, manifest_file, runtime
 from retain import lock_path, state_dir
 
 DEVENV = Path.home() / ".nix-profile/bin/devenv"
@@ -62,47 +61,8 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 # exits 0 having done nothing, so such a run cannot publish a blank Parquet.
 DATASET_STEP = 10
 
-MANIFEST_FIELDS = ("name", "url", "category", "file_filter", "size_class")
-# An optional sixth column pins the commit to analyse. A five-column row runs the
-# remote's HEAD at clone time, and the record says "unpinned".
-PINNED_FIELD = "commit"
-UNPINNED = "unpinned"
-SIZE_CLASSES = ("S", "M", "L")
 
 _metrics_lock = threading.Lock()
-
-
-def read_manifest(path: Path, only: set | None) -> list[dict]:
-    projects = []
-    for lineno, line in enumerate(path.read_text().splitlines(), 1):
-        if not line.strip() or line.startswith("#"):
-            continue
-        fields = line.split("\t")
-        if len(fields) not in (len(MANIFEST_FIELDS), len(MANIFEST_FIELDS) + 1):
-            raise ValueError(
-                f"{path}:{lineno}: expected {len(MANIFEST_FIELDS)} tab-separated"
-                f" fields, or {len(MANIFEST_FIELDS) + 1} with a pinned commit,"
-                f" got {len(fields)}: {line!r}"
-            )
-        row = dict(zip(MANIFEST_FIELDS, fields, strict=False))
-        if len(fields) > len(MANIFEST_FIELDS):
-            row[PINNED_FIELD] = fields[-1]
-            if not pin.SHA_RE.match(row[PINNED_FIELD]):
-                raise ValueError(
-                    f"{path}:{lineno}: commit {row[PINNED_FIELD]!r} is not a"
-                    " 40-character lowercase hex SHA"
-                )
-        if row["size_class"] not in SIZE_CLASSES:
-            raise ValueError(
-                f"{path}:{lineno}: size_class {row['size_class']!r}"
-                f" is not one of {', '.join(SIZE_CLASSES)}"
-            )
-        if only and row["name"] not in only:
-            continue
-        # blobExec rejects an empty mask; a blank column means the universal one.
-        row["file_filter"] = row["file_filter"] or UNIVERSAL_MASK
-        projects.append(row)
-    return projects
 
 
 def record_metric(project: str, cls: str, phase: str, duration: int, rc: int, log: Path) -> None:
@@ -500,7 +460,7 @@ def pin_args(project: dict, commit: str = "") -> list[str]:
         "--url",
         project["url"],
         "--commit",
-        commit or project[PINNED_FIELD],
+        commit or project[manifest_file.PINNED_FIELD],
         "--dest",
         str(pinned_clone_path(name)),
         "--result",
@@ -547,7 +507,7 @@ def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     """The run_pipeline_process.sh argv for one project. Assumes check_memo_dir
     has already refused an unsafe --memo-dir."""
     name = project["name"]
-    pinned = bool(project.get(PINNED_FIELD))
+    pinned = bool(project.get(manifest_file.PINNED_FIELD))
     pipeline_args = [
         "./run_pipeline_process.sh",
         "--repo-url",
@@ -677,7 +637,7 @@ class ProjectRun:
 
     @property
     def pinned(self) -> str:
-        return self.latest or self.project.get(PINNED_FIELD, "")
+        return self.latest or self.project.get(manifest_file.PINNED_FIELD, "")
 
     def base(self) -> dict:
         mask = runtime.opts.get("mask") or self.project["file_filter"]
@@ -689,9 +649,13 @@ class ProjectRun:
             "queue_total": self.queue_total,
             "attempt": self.attempt,
             "manifest_row": dict(self.project),
-            "pinned_sha": self.pinned or UNPINNED,
+            "pinned_sha": self.pinned or manifest_file.UNPINNED,
             # The manifest commit, when --latest pinned another one.
-            **({"snapshot_sha": self.project.get(PINNED_FIELD, "")} if self.latest else {}),
+            **(
+                {"snapshot_sha": self.project.get(manifest_file.PINNED_FIELD, "")}
+                if self.latest
+                else {}
+            ),
             "checked_out_sha": self.checked_out_sha,
             "file_mask_sha256": sha256_text(mask),
             "tools": runtime.run_info.get("tools", {}),
@@ -809,7 +773,7 @@ def resolve_latest(ctx: ProjectRun) -> bool:
             return False
         rec = {
             "url": ctx.project["url"],
-            "snapshot_sha": ctx.project.get(PINNED_FIELD, ""),
+            "snapshot_sha": ctx.project.get(manifest_file.PINNED_FIELD, ""),
             "resolved_sha": sha,
             "branch": branch,
             "resolved_at": console.now_iso(),
@@ -1101,7 +1065,7 @@ def run_project(
     validation run (schema, join, cleanup), as after a crash between them."""
     ctx = ProjectRun(project, queue_pos, queue_total, attempt)
     name = project["name"]
-    if runtime.opts.get("latest") and project.get(PINNED_FIELD):
+    if runtime.opts.get("latest") and project.get(manifest_file.PINNED_FIELD):
         # An attempt that only runs the steps after validation clones nothing, so
         # its rows carry the commit the validated run chose.
         ctx.latest = recorded_latest(name)
@@ -1718,7 +1682,7 @@ def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
 
 def cmd_run(args: argparse.Namespace) -> int:
     config.OUT.mkdir(parents=True, exist_ok=True)
-    projects = read_manifest(
+    projects = manifest_file.read_manifest(
         config.CORPUS / args.manifest, set(args.only.split(",")) if args.only else None
     )
     if not projects:
@@ -1726,7 +1690,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     runtime.opts.update(run_options(args))
-    if any(p.get(PINNED_FIELD) for p in projects):
+    if any(p.get(manifest_file.PINNED_FIELD) for p in projects):
         refuse_unless_runner_accepts(
             "a pinned manifest",
             ("--commit-url",),
@@ -1968,11 +1932,13 @@ def cmd_census(args: argparse.Namespace) -> int:
         sys.exit("--workers must be at least 1")
     config.OUT.mkdir(parents=True, exist_ok=True)
     manifest = config.CORPUS / args.manifest
-    projects = read_manifest(manifest, set(args.only.split(",")) if args.only else None)
+    projects = manifest_file.read_manifest(
+        manifest, set(args.only.split(",")) if args.only else None
+    )
     if not projects:
         console.say("nothing to run (empty manifest / --only filter matched nothing)")
         return 0
-    unpinned = sum(1 for p in projects if not p.get(PINNED_FIELD))
+    unpinned = sum(1 for p in projects if not p.get(manifest_file.PINNED_FIELD))
     if unpinned:
         console.say(
             f"WARNING: {unpinned} of {len(projects)} projects are unpinned: each runs the "
@@ -2037,7 +2003,7 @@ def cmd_census(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    projects = read_manifest(config.CORPUS / args.manifest, None)
+    projects = manifest_file.read_manifest(config.CORPUS / args.manifest, None)
     last: dict = {}
     if config.METRICS.exists():
         for line in config.METRICS.read_text().splitlines()[1:]:
@@ -2085,7 +2051,7 @@ def finished_runs() -> list[tuple]:
 def class_breakdown(projects: list[dict], states: dict) -> str:
     """ "S 3/10  M 1/4": validated over total, for each size class present."""
     per_class = []
-    for cls in SIZE_CLASSES:
+    for cls in manifest_file.SIZE_CLASSES:
         members = [p for p in projects if p["size_class"] == cls]
         if members:
             hits = sum(1 for p in members if states[p["name"]] == "DONE")
@@ -2095,7 +2061,7 @@ def class_breakdown(projects: list[dict], states: dict) -> str:
 
 def cmd_progress(args: argparse.Namespace) -> int:
     """A one-screen progress bar and the last finished projects."""
-    projects = read_manifest(config.CORPUS / args.manifest, None)
+    projects = manifest_file.read_manifest(config.CORPUS / args.manifest, None)
     states = {p["name"]: retain.project_state(p["name"], config.OUT / p["name"]) for p in projects}
     by_state: dict[str, list[dict]] = {}
     for p in projects:
