@@ -33,6 +33,7 @@ from ctplib import (
     metrics,
     phases,
     pinning,
+    preflight,
     project_run,
     project_steps,
     remote_head,
@@ -644,7 +645,7 @@ def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
     ]
     assert runner.calls[0].kwargs["cwd"] == sandbox.cregit
     sent = {a for a in runner.argv("pipeline") if a.startswith("--")}
-    assert sent == set(ctp.REQUIRED_RUNNER_FLAGS), "the preflight constant drifted"
+    assert sent == set(preflight.REQUIRED_RUNNER_FLAGS), "the preflight constant drifted"
 
 
 class WipingRunner(FakeRunner):
@@ -2473,10 +2474,10 @@ def test_resuming_ignores_the_disk_floor(monkeypatch, sandbox, runner, jq, joini
 
 def test_run_options_carry_join_and_the_absolute_manifest(sandbox, runner_script):
     runner_script()
-    opts = ctp.run_options(run_args(join=True))
+    opts = preflight.run_options(run_args(join=True))
     assert opts["join"] is True
     assert opts["manifest"] == str((sandbox.root / "manifest.tsv").resolve())
-    assert ctp.run_options(run_args())["join"] is False
+    assert preflight.run_options(run_args())["join"] is False
 
 
 def test_cmd_db_forwards_each_manifest_as_an_absolute_path(sandbox, monkeypatch):
@@ -2632,10 +2633,10 @@ def test_run_options_carry_cleanup_drop_html_and_the_anonymizer(sandbox, runner_
     runner_script()
     script = sandbox.root / "anon.py"
     script.write_text("")
-    opts = ctp.run_options(run_args(cleanup=True, drop_html=True, anonymize=str(script)))
+    opts = preflight.run_options(run_args(cleanup=True, drop_html=True, anonymize=str(script)))
     assert opts["cleanup"] is True and opts["drop_html"] is True
     assert opts["anonymize"] == str(script.resolve())
-    defaults = ctp.run_options(run_args())
+    defaults = preflight.run_options(run_args())
     assert (defaults["cleanup"], defaults["drop_html"], defaults["anonymize"]) == (False, False, "")
 
 
@@ -3428,4 +3429,4 @@ def test_tokenizer_worker_and_shards_are_refused_together(must_not_start, runner
 
 def test_tokenizer_worker_is_an_effective_option(sandbox, runner_script):
     runner_script(WORKER_USAGE)
-    assert ctp.run_options(run_args(tokenizer_worker=True))["tokenizer_worker"] is True
+    assert preflight.run_options(run_args(tokenizer_worker=True))["tokenizer_worker"] is True
