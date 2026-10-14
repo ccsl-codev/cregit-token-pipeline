@@ -31,6 +31,7 @@ from ctplib import (
     manifest_file,
     memory,
     metrics,
+    passes,
     phases,
     pinning,
     preflight,
@@ -534,7 +535,7 @@ def test_no_memo_is_an_alias_for_drop_memo(monkeypatch):
     memo/ and fills the disk."""
     seen = {}
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run", "--no-memo"])
-    monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.setattr(passes, "cmd_run", lambda args: seen.update(vars(args)) or 0)
     assert ctp.main() == 0
     assert seen["drop_memo"] is True
 
@@ -548,7 +549,7 @@ def test_no_memo_warns_that_it_does_not_prevent_the_write(sandbox, monkeypatch, 
     monkeypatch.setattr(project_steps, "run_project", lambda p: project_run.RunOutcome.DONE)
 
     args = run_args(jobs=1, retries=0, skip_html=False, drop_memo=True)
-    ctp.cmd_run(args)
+    passes.cmd_run(args)
     out = capsys.readouterr().out
     assert "alias for --drop-memo" in out
     assert "does NOT prevent the write" in out
@@ -1094,7 +1095,7 @@ def test_run_refuses_before_anything_starts(must_not_start, runner_script, usage
         runner_script(usage)
     over = {k: v(must_not_start.root) if callable(v) else v for k, v in over.items()}
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(**over))
+        passes.cmd_run(run_args(**over))
     for text in said:
         assert text in str(exc.value)
     assert not (must_not_start.root / "runs.log").exists()
@@ -1180,7 +1181,7 @@ def test_run_accepts_and_announces(ready, monkeypatch, capsys, over, opts, said,
     def resolve(value):
         return value(ready.root) if callable(value) else value
 
-    assert ctp.cmd_run(run_args(**{k: resolve(v) for k, v in over.items()})) == 0
+    assert passes.cmd_run(run_args(**{k: resolve(v) for k, v in over.items()})) == 0
     for key, value in opts.items():
         assert runtime.opts[key] == resolve(value)
     out = capsys.readouterr().out
@@ -1194,7 +1195,7 @@ def test_cmd_run_with_an_empty_manifest_does_nothing(sandbox, monkeypatch, capsy
     """No manifest rows means no devenv capture and no runs.log row."""
     write_manifest(sandbox.root)
     monkeypatch.setattr(toolchain, "capture_devenv_env", forbidden)
-    assert ctp.cmd_run(run_args()) == 0
+    assert passes.cmd_run(run_args()) == 0
     assert "nothing to run" in capsys.readouterr().out
     assert not (sandbox.root / "runs.log").exists()
 
@@ -1206,7 +1207,7 @@ def test_cmd_run_appends_a_start_and_an_end_row_to_runs_log(sandbox, monkeypatch
     monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(project_steps, "run_project", lambda p: project_run.RunOutcome.DONE)
 
-    assert ctp.cmd_run(run_args(jobs=2)) == 0
+    assert passes.cmd_run(run_args(jobs=2)) == 0
     lines = (sandbox.root / "runs.log").read_text().splitlines()
     assert len(lines) == 3
     assert lines[0].endswith("jobs=2")
@@ -1219,12 +1220,12 @@ def test_cmd_run_returns_one_when_a_project_fails(sandbox, monkeypatch):
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(toolchain, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(project_steps, "run_project", lambda p: project_run.RunOutcome.FAILED)
-    assert ctp.cmd_run(run_args()) == 1
+    assert passes.cmd_run(run_args()) == 1
     assert "run-end\trc=1" in (sandbox.root / "runs.log").read_text()
 
 
 def test_cmd_run_starts_no_retry_pass_once_every_project_is_done(ready, capsys):
-    assert ctp.cmd_run(run_args(retries=3)) == 0
+    assert passes.cmd_run(run_args(retries=3)) == 0
     assert "retry pass" not in capsys.readouterr().out
 
 
@@ -1247,7 +1248,7 @@ def test_cmd_run_retries_only_the_projects_that_are_not_done(sandbox, monkeypatc
         return project_run.RunOutcome.DONE
 
     monkeypatch.setattr(project_steps, "run_project", flaky)
-    assert ctp.cmd_run(run_args(retries=1)) == 0
+    assert passes.cmd_run(run_args(retries=1)) == 0
     assert seen == ["jq", "zstd", "zstd"]
     assert "retry pass 1: ['zstd']" in capsys.readouterr().out
 
@@ -1261,9 +1262,9 @@ def beat_once(results: dict) -> str:
     stop = threading.Event()
     lines: list[str] = []
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(ctp, "HEARTBEAT_S", 0)
+        mp.setattr(passes, "HEARTBEAT_S", 0)
         mp.setattr(console, "say", lambda msg: (lines.append(msg), stop.set()))
-        ctp.heartbeat(stop, results)
+        passes.heartbeat(stop, results)
     assert len(lines) == 1
     return lines[0]
 
@@ -1292,7 +1293,7 @@ def test_heartbeat_returns_immediately_when_already_stopped():
     stop.set()
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(console, "say", forbidden)
-        ctp.heartbeat(stop, {})
+        passes.heartbeat(stop, {})
 
 
 # --------------------------------------------------------------------------- #
@@ -1362,18 +1363,18 @@ def test_cmd_db_runs_consolidate_inside_the_captured_environment(sandbox, monkey
 
 
 @pytest.mark.parametrize(
-    "argv, target",
+    "argv, owner, target",
     [
-        pytest.param(["ctp.py", "run"], "cmd_run", id="run"),
-        pytest.param(["ctp.py", "status"], "cmd_status", id="status"),
-        pytest.param(["ctp.py", "db"], "cmd_db", id="db"),
+        pytest.param(["ctp.py", "run"], passes, "cmd_run", id="run"),
+        pytest.param(["ctp.py", "status"], ctp, "cmd_status", id="status"),
+        pytest.param(["ctp.py", "db"], ctp, "cmd_db", id="db"),
     ],
 )
-def test_main_dispatches_each_subcommand(monkeypatch, argv, target):
+def test_main_dispatches_each_subcommand(monkeypatch, argv, owner, target):
     """A broken dispatch table makes the CLI silently do the wrong thing."""
     called = []
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(ctp, target, lambda args: called.append(target) or 0)
+    monkeypatch.setattr(owner, target, lambda args: called.append(target) or 0)
     assert ctp.main() == 0
     assert called == [target]
 
@@ -1665,7 +1666,8 @@ def test_a_relative_sidecar_path_is_made_absolute(sandbox, monkeypatch, runner_s
     monkeypatch.setattr(project_steps, "run_project", lambda p: project_run.RunOutcome.DONE)
 
     assert (
-        ctp.cmd_run(run_args(project_meta="project_meta.json", allow_empty_provenance=False)) == 0
+        passes.cmd_run(run_args(project_meta="project_meta.json", allow_empty_provenance=False))
+        == 0
     )
     assert Path(runtime.opts["project_meta"]).is_absolute()
     assert Path(runtime.opts["project_meta"]) == meta.resolve()
@@ -1680,7 +1682,7 @@ def test_a_run_without_the_sidecar_is_refused_and_names_the_columns(must_not_sta
     """ "provenance" alone does not say what is blank, and a refusal that does not
     name its escape hatch sends the operator to read the source."""
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(allow_empty_provenance=False))
+        passes.cmd_run(run_args(allow_empty_provenance=False))
     message = str(exc.value)
     for text in (
         "refusing this run",
@@ -1699,7 +1701,7 @@ def test_a_run_without_the_sidecar_is_refused_and_names_the_columns(must_not_sta
 def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
     """It must never arrive by default."""
     seen: dict = {}
-    monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.setattr(passes, "cmd_run", lambda args: seen.update(vars(args)) or 0)
 
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run"])
     assert ctp.main() == 0
@@ -1715,7 +1717,7 @@ def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start)
     """Left in a launcher script, the hatch would silence the guard on the next
     run that does omit a flag."""
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(
+        passes.cmd_run(
             run_args(allow_empty_provenance=True, project_meta=sidecar(must_not_start.root))
         )
     assert "nothing to allow" in str(exc.value)
@@ -1727,7 +1729,7 @@ def test_a_sidecar_path_that_is_not_a_file_is_refused_by_its_own_check(must_not_
     would send the operator looking for a flag they did pass."""
     typo = str(must_not_start.root / "typo")
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(allow_empty_provenance=False, project_meta=typo))
+        passes.cmd_run(run_args(allow_empty_provenance=False, project_meta=typo))
     message = str(exc.value)
     assert "--project-meta" in message and "does not exist" in message
     assert "refusing this run" not in message
@@ -1738,7 +1740,7 @@ def test_ctp_run_refuses_a_flag_it_does_not_own(monkeypatch, capsys, flag):
     """run_project derives --project-key from the manifest name. cregit master
     has no firm columns, so ctp takes no firm flags."""
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run", flag, "x"])
-    monkeypatch.setattr(ctp, "cmd_run", forbidden)
+    monkeypatch.setattr(passes, "cmd_run", forbidden)
     with pytest.raises(SystemExit) as exc:
         ctp.main()
     assert exc.value.code == 2
@@ -2008,12 +2010,12 @@ def test_a_pinned_manifest_needs_a_runner_with_commit_url(must_not_start, runner
     runner_script(REAL_RUNNER_USAGE.replace("--commit-url", "--commit-link"))
     write_manifest(must_not_start.root, PINNED_ROW)
     with pytest.raises(SystemExit, match="--commit-url"):
-        ctp.cmd_run(run_args())
+        passes.cmd_run(run_args())
 
 
 def test_a_pinned_manifest_runs_on_a_runner_with_commit_url(ready):
     write_manifest(ready.root, PINNED_ROW)
-    assert ctp.cmd_run(run_args()) == 0
+    assert passes.cmd_run(run_args()) == 0
 
 
 @pytest.mark.parametrize(
@@ -2211,7 +2213,7 @@ def test_done_dirty_is_a_success_that_a_retry_pass_does_not_rerun(monkeypatch, j
         return project_run.RunOutcome.DONE_DIRTY
 
     monkeypatch.setattr(project_steps, "run_project", fake)
-    results = ctp.run_passes([jq], jobs=1, retries=2)
+    results = passes.run_passes([jq], jobs=1, retries=2)
     assert results == {"jq": project_run.RunOutcome.DONE_DIRTY} and calls == ["jq"]
 
 
@@ -2249,7 +2251,7 @@ def test_run_phase_without_kept_fds_passes_none(sandbox, runner, jq):
 
 
 def test_cmd_run_writes_run_start_and_run_end_rows(ready):
-    assert ctp.cmd_run(run_args(jobs=2)) == 0
+    assert passes.cmd_run(run_args(jobs=2)) == 0
     rows = ledger.read(ready.root / "ledger.jsonl")
     assert [r["step"] for r in rows] == ["run-start", "run-end"]
     start, end = rows
@@ -2271,7 +2273,7 @@ def test_cmd_run_stops_when_the_ledger_cannot_be_written(ready, monkeypatch):
 
     monkeypatch.setattr(ledger, "append", boom)
     with pytest.raises(SystemExit, match="cannot write the ledger"):
-        ctp.cmd_run(run_args())
+        passes.cmd_run(run_args())
 
 
 def test_end_ledger_run_survives_a_failed_write(monkeypatch, capsys):
@@ -2622,12 +2624,12 @@ def test_an_anonymizer_that_writes_nothing_fails_the_project(monkeypatch, sandbo
 
 def test_drop_html_needs_cleanup(must_not_start):
     with pytest.raises(SystemExit, match="--drop-html deletes html/ in the cleanup"):
-        ctp.cmd_run(run_args(drop_html=True))
+        passes.cmd_run(run_args(drop_html=True))
 
 
 def test_anonymize_needs_an_existing_script(must_not_start):
     with pytest.raises(SystemExit, match="is not a file"):
-        ctp.cmd_run(run_args(anonymize="/nonexistent/anon.py"))
+        passes.cmd_run(run_args(anonymize="/nonexistent/anon.py"))
 
 
 def test_run_options_carry_cleanup_drop_html_and_the_anonymizer(sandbox, runner_script):
@@ -2643,7 +2645,7 @@ def test_run_options_carry_cleanup_drop_html_and_the_anonymizer(sandbox, runner_
 
 def test_drop_html_and_anonymize_are_off_by_default_on_the_cli(monkeypatch):
     seen = {}
-    monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
+    monkeypatch.setattr(passes, "cmd_run", lambda args: seen.update(vars(args)) or 0)
     monkeypatch.setattr(sys, "argv", ["ctp.py", "run"])
     ctp.main()
     assert seen["drop_html"] is False and seen["anonymize"] == "" and seen["cleanup"] is False
@@ -3417,14 +3419,14 @@ def test_tokenizer_worker_is_passed_to_the_runner(sandbox, runner, jq):
 def test_tokenizer_worker_needs_a_runner_that_has_it(must_not_start, runner_script):
     runner_script(REAL_RUNNER_USAGE)
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(tokenizer_worker=True))
+        passes.cmd_run(run_args(tokenizer_worker=True))
     assert "--tokenizer-worker is not implemented" in str(exc.value)
 
 
 def test_tokenizer_worker_and_shards_are_refused_together(must_not_start, runner_script):
     runner_script(WORKER_USAGE)
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(tokenizer_worker=True, shards=4))
+        passes.cmd_run(run_args(tokenizer_worker=True, shards=4))
     assert "--tokenizer-worker needs the runner's pipeline mode" in str(exc.value)
 
 
