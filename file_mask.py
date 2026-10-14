@@ -1,6 +1,7 @@
 """The universal file mask. Authority: cregit's tokenize/CregitLanguages.pm, held equal by
 tests/test_mask_drift.py. Left out: .am .ac (broken m4 lexer), .go .md .yaml (no parser),
 .ixx .inl .cppm .cxxm .ipp (srcML 1.1.0 writes an empty token file and exits 0)."""
+
 from __future__ import annotations
 
 import re
@@ -18,10 +19,10 @@ TOKENIZABLE_EXTENSIONS: tuple[str, ...] = (
     "h++",
     "hh",
     "hpp",
-    "hxx",      # verified against srcML 1.1.0
+    "hxx",  # verified against srcML 1.1.0
     "java",
     "rs",
-    "tcc",      # verified against srcML 1.1.0
+    "tcc",  # verified against srcML 1.1.0
 )
 
 # For a reader; the mask does not branch on language.

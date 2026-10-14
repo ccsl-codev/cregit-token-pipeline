@@ -79,8 +79,10 @@ def run_in_subprocess(tmp_path, *argv, flags=("-O",)):
     (stubdir / "duckdb.py").write_text(DUCKDB_STUB)
     return subprocess.run(
         [sys.executable, *flags, str(SCRIPT), *map(str, argv)],
-        capture_output=True, text=True,
-        env={**os.environ, "PYTHONPATH": str(stubdir)})
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(stubdir)},
+    )
 
 
 @pytest.fixture
@@ -99,18 +101,21 @@ def stamp(tmp_path):
 @pytest.fixture
 def invoke(monkeypatch):
     """Run validate.main() with a chosen argv and a chosen duckdb.sql double."""
+
     def _invoke(*argv, sql=None):
         fake = sql if sql is not None else FakeSql()
         monkeypatch.setattr(validate.duckdb, "sql", fake, raising=False)
         monkeypatch.setattr(validate.sys, "argv", ["validate.py", *map(str, argv)])
         validate.main()
         return fake
+
     return _invoke
 
 
 # --------------------------------------------------------------------------- #
 # the happy path
 # --------------------------------------------------------------------------- #
+
 
 def test_a_good_parquet_writes_the_completion_stamp(invoke, parquet, stamp):
     """Idempotence contract: the stamp is the only thing that makes ctp skip a
@@ -146,15 +151,21 @@ def test_the_stamp_is_overwritten_not_appended(invoke, parquet, stamp):
 # rejection paths
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("size, count, reason", [
-    # A truncated parquet means the tokenizer died late; retain.py would delete memo/.
-    pytest.param(4, 4321, "FAIL parquet suspiciously small: 4 bytes", id="too-small"),
-    pytest.param(10_000, 4321, "FAIL parquet suspiciously small: 10000 bytes",
-                 id="floor-is-exclusive"),
-    pytest.param(20_000, 0, "FAIL parquet has zero rows", id="zero-rows"),
-])
+
+@pytest.mark.parametrize(
+    "size, count, reason",
+    [
+        # A truncated parquet means the tokenizer died late; retain.py would delete memo/.
+        pytest.param(4, 4321, "FAIL parquet suspiciously small: 4 bytes", id="too-small"),
+        pytest.param(
+            10_000, 4321, "FAIL parquet suspiciously small: 10000 bytes", id="floor-is-exclusive"
+        ),
+        pytest.param(20_000, 0, "FAIL parquet has zero rows", id="zero-rows"),
+    ],
+)
 def test_a_bad_parquet_is_rejected_and_left_unstamped(
-        invoke, tmp_path, stamp, capsys, size, count, reason):
+    invoke, tmp_path, stamp, capsys, size, count, reason
+):
     """No stamp means the next ctp pass retries the project."""
     bad = tmp_path / "jq-dataset.parquet"
     bad.write_bytes(b"\0" * size)
@@ -175,11 +186,14 @@ def test_a_missing_parquet_raises_before_any_query(invoke, tmp_path, stamp):
     assert not stamp.exists()
 
 
-@pytest.mark.parametrize("argv", [
-    pytest.param((), id="no-arguments"),
-    pytest.param(("only-the-parquet",), id="missing-stamp-path"),
-    pytest.param(("parquet", "stamp", "extra"), id="extra-arguments"),
-])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param((), id="no-arguments"),
+        pytest.param(("only-the-parquet",), id="missing-stamp-path"),
+        pytest.param(("parquet", "stamp", "extra"), id="extra-arguments"),
+    ],
+)
 def test_a_wrong_invocation_prints_usage_and_exits_two(monkeypatch, capsys, argv):
     """Usage, and an exit code distinct from a rejected parquet."""
     monkeypatch.setattr(validate.sys, "argv", ["validate.py", *argv])
@@ -193,6 +207,7 @@ def test_a_wrong_invocation_prints_usage_and_exits_two(monkeypatch, capsys, argv
 # --------------------------------------------------------------------------- #
 # path handling
 # --------------------------------------------------------------------------- #
+
 
 @pytest.mark.parametrize("folder", ["plain", "we'ird", "'; drop table x; --"])
 def test_the_parquet_path_is_bound_not_interpolated(invoke, tmp_path, folder):
@@ -217,10 +232,14 @@ def test_the_parquet_path_is_bound_not_interpolated(invoke, tmp_path, folder):
 # with the assertions compiled out
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("size, reason", [
-    pytest.param(4, "parquet suspiciously small: 4 bytes", id="too-small"),
-    pytest.param(20_000, "parquet has zero rows", id="zero-rows"),
-])
+
+@pytest.mark.parametrize(
+    "size, reason",
+    [
+        pytest.param(4, "parquet suspiciously small: 4 bytes", id="too-small"),
+        pytest.param(20_000, "parquet has zero rows", id="zero-rows"),
+    ],
+)
 def test_a_bad_parquet_still_fails_under_o(tmp_path, size, reason):
     """`python -O` must not remove the checks. The stub duckdb reports zero
     rows, so both rejections are reachable."""

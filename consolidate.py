@@ -4,6 +4,7 @@ Usage: consolidate.py [--manifest PATH]... (default manifest.tsv). The tokens vi
 only parquets that match EXPECTED_COLUMNS. Exit 1 when a stamp's rows= is unreadable.
        consolidate.py --join NAME --manifest PATH  adds one validated project to the
 existing database, for ctp.py census; exit 1 when it cannot, 2 for an unknown name."""
+
 from __future__ import annotations
 
 import argparse
@@ -24,8 +25,12 @@ from validate_schema import EXPECTED_COLUMNS, compare_schema, read_schema
 CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
 _cfg.read(CONFIG)
-OUT = (CORPUS / Path(_cfg.get("paths", "output_dir",
-       fallback="../cregit-workspace/corpus-files")).expanduser()).resolve()
+OUT = (
+    CORPUS
+    / Path(
+        _cfg.get("paths", "output_dir", fallback="../cregit-workspace/corpus-files")
+    ).expanduser()
+).resolve()
 DB = CORPUS / "ctp.duckdb"
 # Every writer of DB holds this first: a full rebuild and each census join.
 DB_LOCK = CORPUS / "ctp.duckdb.lock"
@@ -38,11 +43,13 @@ PROJECTS_DDL = (
     "create or replace table projects (name text primary key, url text, "
     "category text, size_class text, state text, token_rows bigint, "
     "parquet_path text, rows_unreadable boolean, parquet_missing boolean, "
-    "excluded_because text)")
+    "excluded_because text)"
+)
 PROJECTS_INSERT = "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 # The parquets in the tokens view: every schema-checked, publishable project.
-JOINED_DDL = ("create or replace table joined (name text primary key, "
-              "parquet_path text, joined_utc text)")
+JOINED_DDL = (
+    "create or replace table joined (name text primary key, parquet_path text, joined_utc text)"
+)
 JOINED_INSERT = "insert into joined values (?, ?, ?)"
 
 
@@ -50,6 +57,7 @@ JOINED_INSERT = "insert into joined values (?, ?, ?)"
 class ProjectRow:
     """One `projects` row by name. Fields are declared in PROJECTS_DDL column order,
     which as_tuple() relies on for executemany."""
+
     name: str
     url: str
     category: str
@@ -101,13 +109,15 @@ def manifest_entries(manifests: Sequence[Path]):
             fields = line.split("\t")
             # A sixth column, the pinned commit, is optional and not indexed here.
             if len(fields) not in (5, 6):
-                raise ValueError(f"{manifest}: expected 5 or 6 tab-separated fields, "
-                                 f"got {len(fields)}: {line!r}")
+                raise ValueError(
+                    f"{manifest}: expected 5 or 6 tab-separated fields, got {len(fields)}: {line!r}"
+                )
             name, url, category, _file_filter, size_class = fields[:5]
             if name in seen:
-                print(f"  ! {name} is named twice, "
-                      f"the later row in {Path(manifest).name} is ignored",
-                      file=sys.stderr)
+                print(
+                    f"  ! {name} is named twice, the later row in {Path(manifest).name} is ignored",
+                    file=sys.stderr,
+                )
                 continue
             seen.add(name)
             yield name, url, category, size_class
@@ -120,8 +130,10 @@ def stamp_rows(name: str, stamp: Path) -> tuple[int | None, bool]:
     try:
         return int(raw), False
     except ValueError:
-        print(f"  ! {name}: stamp rows={raw!r} is not an integer, "
-              "token_rows left null", file=sys.stderr)
+        print(
+            f"  ! {name}: stamp rows={raw!r} is not an integer, token_rows left null",
+            file=sys.stderr,
+        )
         return None, True
 
 
@@ -133,12 +145,17 @@ def project_row(name: str, url: str, category: str, size_class: str) -> ProjectR
     n_rows, rows_unreadable = stamp_rows(name, stamp) if validated else (None, False)
     has_parquet = parquet.exists()
     return ProjectRow(
-        name=name, url=url, category=category, size_class=size_class,
-        state=project_state(name, workdir), token_rows=n_rows,
+        name=name,
+        url=url,
+        category=category,
+        size_class=size_class,
+        state=project_state(name, workdir),
+        token_rows=n_rows,
         parquet_path=str(parquet) if has_parquet else None,
         rows_unreadable=rows_unreadable,
         parquet_missing=validated and not has_parquet,
-        excluded_because=PUBLICATION_EXCLUSIONS.get(name))
+        excluded_because=PUBLICATION_EXCLUSIONS.get(name),
+    )
 
 
 def project_rows(manifests: Sequence[Path] | None = None) -> list[ProjectRow]:
@@ -157,7 +174,7 @@ def schema_split(paths: Sequence[str]) -> tuple[list[str], list, list]:
     for path in paths:
         try:
             actual = read_schema(str(path))
-        except Exception as exc:                     # not this gate's defect
+        except Exception as exc:  # not this gate's defect
             unread.append((path, f"{type(exc).__name__}: {exc}"))
             usable.append(path)
             continue
@@ -170,16 +187,19 @@ def schema_split(paths: Sequence[str]) -> tuple[list[str], list, list]:
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Rebuild ctp.duckdb over one or more manifests.")
+    parser = argparse.ArgumentParser(description="Rebuild ctp.duckdb over one or more manifests.")
     parser.add_argument(
-        "--manifest", action="append", metavar="PATH",
+        "--manifest",
+        action="append",
+        metavar="PATH",
         help="manifest to index, repeatable. A relative path is resolved "
-             f"against this repo. Default: {DEFAULT_MANIFEST}.")
+        f"against this repo. Default: {DEFAULT_MANIFEST}.",
+    )
     parser.add_argument(
-        "--join", metavar="NAME",
-        help="add one validated project to the existing database instead of "
-             "rebuilding it")
+        "--join",
+        metavar="NAME",
+        help="add one validated project to the existing database instead of rebuilding it",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -221,8 +241,9 @@ def connect():
         except busy as exc:
             if attempt == CONNECT_TRIES:
                 raise
-            print(f"  ! {DB} is busy ({exc}); retry {attempt} in {CONNECT_WAIT_S}s",
-                  file=sys.stderr)
+            print(
+                f"  ! {DB} is busy ({exc}); retry {attempt} in {CONNECT_WAIT_S}s", file=sys.stderr
+            )
             time.sleep(CONNECT_WAIT_S)
     raise AssertionError("unreachable")  # pragma: no cover
 
@@ -237,73 +258,88 @@ def join(name: str, manifests: Sequence[Path]) -> int:
         return 2
     row = project_row(*entries[name])
     if row.state != "DONE" or not row.parquet_path:
-        print(f"FAIL {name} is {row.state}, not a validated project with a parquet",
-              file=sys.stderr)
+        print(
+            f"FAIL {name} is {row.state}, not a validated project with a parquet", file=sys.stderr
+        )
         return 1
     if row.excluded_because:
         reason = f"excluded from publication: {row.excluded_because}"
     else:
         try:
             drifts = compare_schema(read_schema(row.parquet_path))
-        except Exception as exc:                     # the join must not guess
-            print(f"FAIL {name}: schema not read ({type(exc).__name__}: {exc})",
-                  file=sys.stderr)
+        except Exception as exc:  # the join must not guess
+            print(f"FAIL {name}: schema not read ({type(exc).__name__}: {exc})", file=sys.stderr)
             return 1
         if drifts:
-            print(f"FAIL {name}: schema drift ({len(drifts)}): "
-                  + "; ".join(map(str, drifts[:3])), file=sys.stderr)
+            print(
+                f"FAIL {name}: schema drift ({len(drifts)}): " + "; ".join(map(str, drifts[:3])),
+                file=sys.stderr,
+            )
             return 1
         reason = ""
     with db_lock():
         con = connect()
         try:
-            con.execute(PROJECTS_DDL.replace("create or replace table",
-                                             "create table if not exists"))
-            con.execute(JOINED_DDL.replace("create or replace table",
-                                           "create table if not exists"))
+            con.execute(
+                PROJECTS_DDL.replace("create or replace table", "create table if not exists")
+            )
+            con.execute(JOINED_DDL.replace("create or replace table", "create table if not exists"))
             con.execute("delete from projects where name = ?", [name])
             con.execute(PROJECTS_INSERT, list(row.as_tuple()))
             con.execute("delete from joined where name = ?", [name])
             if not reason:
                 con.execute(JOINED_INSERT, [name, row.parquet_path, utc_now()])
-            files = [r[0] for r in con.execute(
-                "select parquet_path from joined order by name").fetchall()]
+            files = [
+                r[0]
+                for r in con.execute("select parquet_path from joined order by name").fetchall()
+            ]
             create_tokens_view(con, files, count=False)
         finally:
             con.close()
-    print(f"OK joined {name}: {row.token_rows} rows"
-          + (f" (row only, {reason})" if reason else "")
-          + f"; the tokens view now spans {len(files)} projects")
+    print(
+        f"OK joined {name}: {row.token_rows} rows"
+        + (f" (row only, {reason})" if reason else "")
+        + f"; the tokens view now spans {len(files)} projects"
+    )
     return 0
 
 
 def print_schema_problems(drifted: list, unread: list, n_validated: int) -> None:
     if drifted:
         named = ", ".join(f"{Path(p).name} ({n} columns)" for p, n, _ in drifted)
-        print(f"  schema mismatch, left out of the tokens view: "
-              f"{len(drifted)} of {n_validated} "
-              f"({named}): the contract is "
-              f"{len(EXPECTED_COLUMNS)} columns, see validate_schema.py")
+        print(
+            f"  schema mismatch, left out of the tokens view: "
+            f"{len(drifted)} of {n_validated} "
+            f"({named}): the contract is "
+            f"{len(EXPECTED_COLUMNS)} columns, see validate_schema.py"
+        )
     if unread:
         named = ", ".join(f"{Path(p).name}: {why}" for p, why in unread)
-        print(f"  ! schema not read for {len(unread)} of {n_validated} "
-              f"parquet(s) ({named}): left in the tokens view, "
-              "run validate_schema.py on them", file=sys.stderr)
+        print(
+            f"  ! schema not read for {len(unread)} of {n_validated} "
+            f"parquet(s) ({named}): left in the tokens view, "
+            "run validate_schema.py on them",
+            file=sys.stderr,
+        )
 
 
 FLAG_NOTES = (
-    ("parquet_missing", "DONE but parquet missing",
-     "flagged parquet_missing, left out of the tokens view"),
-    ("rows_unreadable", "unreadable rows= in stamp",
-     "flagged rows_unreadable, token_rows is null"),
+    (
+        "parquet_missing",
+        "DONE but parquet missing",
+        "flagged parquet_missing, left out of the tokens view",
+    ),
+    ("rows_unreadable", "unreadable rows= in stamp", "flagged rows_unreadable, token_rows is null"),
 )
 
 
 def print_project_flags(projects: list[ProjectRow]) -> None:
     excluded = [(p.name, p.excluded_because) for p in projects if p.excluded_because]
     if excluded:
-        print(f"  publication exclusions: {len(excluded)} "
-              "(row kept in projects, left out of the tokens view)")
+        print(
+            f"  publication exclusions: {len(excluded)} "
+            "(row kept in projects, left out of the tokens view)"
+        )
         for name, why in excluded:
             print(f"    - {name}: {why}")
     for attr, label, note in FLAG_NOTES:
@@ -320,14 +356,18 @@ def print_state_counts(projects: list[ProjectRow]) -> None:
 
 
 def publishable_parquets(projects: list[ProjectRow]) -> list[str]:
-    return [p.parquet_path for p in projects
-            if p.state == "DONE" and p.parquet_path and not p.excluded_because]
+    return [
+        p.parquet_path
+        for p in projects
+        if p.state == "DONE" and p.parquet_path and not p.excluded_because
+    ]
 
 
 def main(argv: Sequence[str] = ()) -> None:
     args = parse_args(argv)
-    manifests = ([resolve_manifest(v) for v in args.manifest]
-                 if args.manifest else default_manifests())
+    manifests = (
+        [resolve_manifest(v) for v in args.manifest] if args.manifest else default_manifests()
+    )
     if args.join:
         sys.exit(join(args.join, manifests))
     with db_lock():
@@ -342,7 +382,7 @@ def rebuild(manifests: Sequence[Path]) -> None:
     con.executemany(PROJECTS_INSERT, [p.as_tuple() for p in projects])
 
     con.execute(f"""create or replace table phase_metrics as
-        select * from read_csv('{CORPUS / 'metrics.tsv'}', delim='\t', header=true)""")
+        select * from read_csv('{CORPUS / "metrics.tsv"}', delim='\t', header=true)""")
 
     validated = publishable_parquets(projects)
     usable, drifted, unread = schema_split(validated)

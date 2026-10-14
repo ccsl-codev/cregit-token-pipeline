@@ -23,8 +23,9 @@ def own_repositories(monkeypatch):
 
 
 def sh(*args: str, cwd: Path) -> str:
-    return subprocess.run(["git", *args], cwd=cwd, check=True, text=True,
-                          capture_output=True).stdout.strip()
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, text=True, capture_output=True
+    ).stdout.strip()
 
 
 @pytest.fixture
@@ -148,16 +149,36 @@ def test_a_leftover_tmp_dir_is_replaced(source, dest):
 def test_main_writes_the_result_file(source, dest, tmp_path):
     src, shas = source
     out = tmp_path / "pin.json"
-    rc = pin.main(["--url", f"file://{src}", "--commit", shas["c1"],
-                   "--dest", str(dest), "--result", str(out)])
+    rc = pin.main(
+        [
+            "--url",
+            f"file://{src}",
+            "--commit",
+            shas["c1"],
+            "--dest",
+            str(dest),
+            "--result",
+            str(out),
+        ]
+    )
     assert rc == 0
     assert json.loads(out.read_text())["checked_out_sha"] == shas["c1"]
 
 
 def test_main_returns_the_error_exit_code(source, dest, tmp_path, capsys):
     src, _ = source
-    rc = pin.main(["--url", f"file://{src}", "--commit", "1" * 40,
-                   "--dest", str(dest), "--result", str(tmp_path / "r.json")])
+    rc = pin.main(
+        [
+            "--url",
+            f"file://{src}",
+            "--commit",
+            "1" * 40,
+            "--dest",
+            str(dest),
+            "--result",
+            str(tmp_path / "r.json"),
+        ]
+    )
     assert rc == pin.EXIT_MISSING
     assert "FAIL" in capsys.readouterr().err
     assert not (tmp_path / "r.json").exists()
@@ -186,6 +207,7 @@ def test_a_remote_without_a_default_branch_uses_the_fallback_name(source, dest, 
 def test_a_git_call_that_does_not_end_is_a_pin_error(monkeypatch):
     def slow(*args, **kwargs):
         raise pin.subprocess.TimeoutExpired(cmd="git", timeout=kwargs["timeout"])
+
     monkeypatch.setattr(pin.subprocess, "run", slow)
     with pytest.raises(pin.PinError, match="did not end in 5 s"):
         pin.remote_head("https://example.invalid/r.git", timeout=5)

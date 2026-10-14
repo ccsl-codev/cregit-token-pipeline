@@ -2,6 +2,7 @@
 """Schema gate: every parquet must carry EXPECTED_COLUMNS, cregit's 67 then ctp's 3 firm ones.
 Usage: validate_schema.py <parquet>...  |  --emit-contract <parquet> (print, no check).
 Exit 0 all match, 1 any drift (all drifts printed), 2 usage. duckdb is imported lazily."""
+
 from __future__ import annotations
 
 import argparse
@@ -100,7 +101,7 @@ EXPECTED_COLUMNS = CREGIT_COLUMNS + FIRM_COLUMNS
 class Drift:
     """One disagreement between a file and the contract."""
 
-    kind: str      # missing | unexpected | type | order
+    kind: str  # missing | unexpected | type | order
     column: str
     detail: str
 
@@ -122,8 +123,7 @@ def compare_schema(
         if name not in actual_types:
             drifts.append(Drift("missing", name, f"contract expects {want}"))
         elif actual_types[name] != want:
-            drifts.append(
-                Drift("type", name, f"expected {want}, found {actual_types[name]}"))
+            drifts.append(Drift("type", name, f"expected {want}, found {actual_types[name]}"))
 
     for name, found in actual:
         if name not in expected_types:
@@ -138,8 +138,7 @@ def read_schema(path: str) -> list[tuple[str, str]]:
     """(name, type) per column, in file order. Needs duckdb."""
     import duckdb
 
-    rows = duckdb.sql("describe select * from read_parquet(?)",
-                      params=[path]).fetchall()
+    rows = duckdb.sql("describe select * from read_parquet(?)", params=[path]).fetchall()
     return [(r[0], r[1]) for r in rows]
 
 
@@ -155,17 +154,18 @@ def check(paths: list[str]) -> int:
     for path in paths:
         try:
             actual = read_schema(path)
-        except Exception as e:                       # unreadable is a drift too
-            print(f"FAIL {path}\n  unreadable   {type(e).__name__}: {e}",
-                  file=sys.stderr)
+        except Exception as e:  # unreadable is a drift too
+            print(f"FAIL {path}\n  unreadable   {type(e).__name__}: {e}", file=sys.stderr)
             worst = EXIT_DRIFT
             continue
         drifts = compare_schema(actual)
         if drifts:
             worst = EXIT_DRIFT
-            print(f"FAIL {path}  ({len(actual)} columns, "
-                  f"{len(drifts)} drift{'s' if len(drifts) > 1 else ''})",
-                  file=sys.stderr)
+            print(
+                f"FAIL {path}  ({len(actual)} columns, "
+                f"{len(drifts)} drift{'s' if len(drifts) > 1 else ''})",
+                file=sys.stderr,
+            )
             for d in drifts:
                 print(f"  {d}", file=sys.stderr)
         else:
@@ -176,8 +176,11 @@ def check(paths: list[str]) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """No --help: the usage and error text in main() is the contract."""
     ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--emit-contract", action="store_true",
-                    help="print one file's schema as a paste-ready contract block")
+    ap.add_argument(
+        "--emit-contract",
+        action="store_true",
+        help="print one file's schema as a paste-ready contract block",
+    )
     ap.add_argument("paths", nargs="*", help="parquet files to check")
     return ap
 

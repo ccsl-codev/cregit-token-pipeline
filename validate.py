@@ -2,6 +2,7 @@
 """Post-run gate. Usage: validate.py <dataset.parquet> <stamp-file>
 Exit 0 writes the stamp (ctp skips the project), 1 rejects, 2 is a usage error.
 Plain `if`s, not `assert` (gone under `python -O`); the path is a bound SQL parameter."""
+
 import os
 import sys
 

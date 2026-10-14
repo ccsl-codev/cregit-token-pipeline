@@ -60,9 +60,14 @@ def test_read_skips_a_torn_last_line(tmp_path, capsys):
 
 
 def test_histories_take_the_last_final_state_and_count_failures():
-    rows = [final("a", "failed", failed_step="clone"), {"project": "a", "step": "clone"},
-            final("a", "failed", failed_step="pipeline"), final("a", "done"),
-            final("b", "deferred"), {"step": "run-start"}]
+    rows = [
+        final("a", "failed", failed_step="clone"),
+        {"project": "a", "step": "clone"},
+        final("a", "failed", failed_step="pipeline"),
+        final("a", "done"),
+        final("b", "deferred"),
+        {"step": "run-start"},
+    ]
     h = ledger.histories(rows)
     assert h["a"].state == "done" and h["a"].failures == 2 and h["a"].attempts == 3
     assert h["a"].last_failed_step == "pipeline" and len(h["a"].rows) == 4
@@ -71,13 +76,13 @@ def test_histories_take_the_last_final_state_and_count_failures():
 
 
 def test_an_attempt_that_died_mid_step_counts_as_interrupted():
-    rows = [{"project": "a", "run_id": "r1", "attempt": 1, "step": "clone", "status": "started"},
-            {"project": "a", "run_id": "r1", "attempt": 1, "step": "clone", "status": "ok"},
-            {"project": "a", "run_id": "r1", "attempt": 1, "step": "pipeline",
-             "status": "started"},
-            {"project": "a", "run_id": "r2", "attempt": 1, "step": "pipeline",
-             "status": "started"},
-            {"project": "a", "run_id": "r2", "attempt": 1, "step": "project", "state": "done"}]
+    rows = [
+        {"project": "a", "run_id": "r1", "attempt": 1, "step": "clone", "status": "started"},
+        {"project": "a", "run_id": "r1", "attempt": 1, "step": "clone", "status": "ok"},
+        {"project": "a", "run_id": "r1", "attempt": 1, "step": "pipeline", "status": "started"},
+        {"project": "a", "run_id": "r2", "attempt": 1, "step": "pipeline", "status": "started"},
+        {"project": "a", "run_id": "r2", "attempt": 1, "step": "project", "state": "done"},
+    ]
     h = ledger.histories(rows)["a"]
     assert h.interrupted == 1 and h.attempts == 2 and h.failures == 0
     assert h.last_failed_step == "pipeline (interrupted)" and h.state == "done"

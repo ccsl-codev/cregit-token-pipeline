@@ -1,6 +1,7 @@
 """The universal mask. Each property guards a failure that would not announce
 itself: srcML exits 0 on an unknown extension, and blobExec compares the mask
 string character for character, so a reorder forces a full rebuild."""
+
 from __future__ import annotations
 
 import re
@@ -28,24 +29,48 @@ def test_the_mask_is_case_insensitive():
     assert re.search(UNIVERSAL_MASK, "Widget.Hxx")
 
 
-@pytest.mark.parametrize("name", [
-    # No parser at all.
-    "main.go", "README.md", "ci.yaml", "ci.yml",
-    # srcML 1.1.0 ignores -l C++ for these and emits an empty token file, exit 0.
-    "mod.ixx", "impl.inl", "mod.cppm", "mod.cxxm", "detail.ipp",
-    # M4 is routed by the tokenizer but excluded from the mask: m4.py's lexer
-    # mis-lexes real autotools quoting.
-    "Makefile.am", "configure.ac",
-    # Never tokenizable.
-    "setup.py", "notes.txt", "App.cs", "lib.rb", "index.ts", "data.json",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        # No parser at all.
+        "main.go",
+        "README.md",
+        "ci.yaml",
+        "ci.yml",
+        # srcML 1.1.0 ignores -l C++ for these and emits an empty token file, exit 0.
+        "mod.ixx",
+        "impl.inl",
+        "mod.cppm",
+        "mod.cxxm",
+        "detail.ipp",
+        # M4 is routed by the tokenizer but excluded from the mask: m4.py's lexer
+        # mis-lexes real autotools quoting.
+        "Makefile.am",
+        "configure.ac",
+        # Never tokenizable.
+        "setup.py",
+        "notes.txt",
+        "App.cs",
+        "lib.rb",
+        "index.ts",
+        "data.json",
+    ],
+)
 def test_the_mask_rejects_what_the_tokenizer_cannot_parse(name):
     assert not re.search(UNIVERSAL_MASK, name), name
 
 
-@pytest.mark.parametrize("name", [
-    "x.cpp.orig", "x.cpp.bak", "x.h.in", "x.java.tmpl", "x.cppp", "x.c++x",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "x.cpp.orig",
+        "x.cpp.bak",
+        "x.h.in",
+        "x.java.tmpl",
+        "x.cppp",
+        "x.c++x",
+    ],
+)
 def test_the_mask_is_anchored_at_the_end(name):
     """`x.h.in` is autoconf input, not a header."""
     assert not re.search(UNIVERSAL_MASK, name), name

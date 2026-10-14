@@ -26,6 +26,7 @@ a fraction of 2**53. So u is exact in a float, and always below 1.
 The manifest lists the rows in u order, lowest first, so any finished prefix
 of a run is a random sample of the frame. Its sixth column pins each project to
 head_oid. The order file maps each queue position to slug, u and head_oid."""
+
 from __future__ import annotations
 
 import argparse
@@ -55,14 +56,35 @@ DEFAULT_HOST = "github.com"
 # cregit's generate_dataset.py; tests/test_build_manifest.py holds them equal
 # to validate_schema.EXPECTED_COLUMNS.
 META_FIELDS = (
-    "clone_url", "provenance_status",
-    "source", "stratum", "fact", "contested", "label_date",
-    "owner", "repo", "roster_name", "roster_lang",
-    "language", "commits", "size_class", "size_kb", "stars", "pushed_at",
-    "license", "owner_type", "archived", "fork",
-    "history_cluster", "history_shared_with", "history_relation",
-    "history_includes", "history_first", "history_created",
-    "manifest_category", "file_mask",
+    "clone_url",
+    "provenance_status",
+    "source",
+    "stratum",
+    "fact",
+    "contested",
+    "label_date",
+    "owner",
+    "repo",
+    "roster_name",
+    "roster_lang",
+    "language",
+    "commits",
+    "size_class",
+    "size_kb",
+    "stars",
+    "pushed_at",
+    "license",
+    "owner_type",
+    "archived",
+    "fork",
+    "history_cluster",
+    "history_shared_with",
+    "history_relation",
+    "history_includes",
+    "history_first",
+    "history_created",
+    "manifest_category",
+    "file_mask",
 )
 ORDER_FIELDS = ("queue_pos", "name", "slug", "host", "u", "head_oid", "labels")
 
@@ -87,8 +109,10 @@ def project_name(host: str, slug: str) -> str:
         parts.insert(0, host)
     name = "__".join(parts)
     if not NAME_RE.match(name) or ".." in name:
-        raise FrameError(f"slug {slug!r} on {host} gives the name {name!r}, which is not "
-                         "one plain directory name")
+        raise FrameError(
+            f"slug {slug!r} on {host} gives the name {name!r}, which is not "
+            "one plain directory name"
+        )
     return name
 
 
@@ -133,8 +157,10 @@ def check_row(row: dict, slug_col: str, where: str) -> dict:
         raise FrameError(f"{where}: u {u} is outside [0, 1)")
     expected = u_of(slug)
     if abs(u - expected) > U_TOLERANCE:
-        raise FrameError(f"{where}: u {u!r} does not match u_of({slug!r}) = {expected!r}. "
-                         "The frame used another salt or another formula.")
+        raise FrameError(
+            f"{where}: u {u!r} does not match u_of({slug!r}) = {expected!r}. "
+            "The frame used another salt or another formula."
+        )
     size_class = row["size_class"].strip()
     if size_class not in SIZE_CLASSES:
         raise FrameError(f"{where}: size_class {size_class!r} is not one of S, M, L")
@@ -147,9 +173,16 @@ def check_row(row: dict, slug_col: str, where: str) -> dict:
     except FrameError as exc:
         raise FrameError(f"{where}: {exc}") from None
     return {
-        "row": row, "where": where, "slug": slug, "host": host,
-        "name": name, "url": url, "sha": sha, "u": expected,
-        "size_class": size_class, "labels": row["labels"].strip(),
+        "row": row,
+        "where": where,
+        "slug": slug,
+        "host": host,
+        "name": name,
+        "url": url,
+        "sha": sha,
+        "u": expected,
+        "size_class": size_class,
+        "labels": row["labels"].strip(),
         "category": plain(category, "category", where),
         "file_filter": plain((row.get("file_filter") or "").strip(), "file_filter", where),
     }
@@ -209,15 +242,29 @@ def build(frame: Path, limit: int | None = None) -> tuple[str, dict, str, dict]:
         f"# Built by build_manifest.py from {frame.name} (sha256 {digest}) at {stamp}.\n"
         f"# {len(queue)} projects in u order; u = first {U_BITS} bits of "
         f"sha256({SALT!r} + slug).\n"
-        "# Columns: name  url  category  file_filter  size_class  commit\n")
-    lines = [f"{r['name']}\t{r['url']}\t{r['category']}\t{r['file_filter']}\t"
-             f"{r['size_class']}\t{r['sha']}\n" for r in queue]
+        "# Columns: name  url  category  file_filter  size_class  commit\n"
+    )
+    lines = [
+        f"{r['name']}\t{r['url']}\t{r['category']}\t{r['file_filter']}\t"
+        f"{r['size_class']}\t{r['sha']}\n"
+        for r in queue
+    ]
     meta = {r["name"]: meta_record(r, status) for r in queue}
-    order = "\t".join(ORDER_FIELDS) + "\n" + "".join(
-        f"{i}\t{r['name']}\t{r['slug']}\t{r['host']}\t{r['u']!r}\t{r['sha']}\t{r['labels']}\n"
-        for i, r in enumerate(queue, 1))
-    summary = dict(frame=str(frame), frame_sha256=digest, rows=len(rows),
-                   dropped_by_included=dropped, written=len(queue))
+    order = (
+        "\t".join(ORDER_FIELDS)
+        + "\n"
+        + "".join(
+            f"{i}\t{r['name']}\t{r['slug']}\t{r['host']}\t{r['u']!r}\t{r['sha']}\t{r['labels']}\n"
+            for i, r in enumerate(queue, 1)
+        )
+    )
+    summary = dict(
+        frame=str(frame),
+        frame_sha256=digest,
+        rows=len(rows),
+        dropped_by_included=dropped,
+        written=len(queue),
+    )
     return header + "".join(lines), meta, order, summary
 
 
@@ -226,11 +273,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("frame", type=Path)
     ap.add_argument("--manifest", required=True, type=Path)
     ap.add_argument("--project-meta", required=True, type=Path)
-    ap.add_argument("--order", type=Path,
-                    help="queue position, slug, u and head_oid per project "
-                         "(default: the manifest path with .order.tsv)")
-    ap.add_argument("--limit", type=int, metavar="N",
-                    help="keep only the first N projects in u order")
+    ap.add_argument(
+        "--order",
+        type=Path,
+        help="queue position, slug, u and head_oid per project "
+        "(default: the manifest path with .order.tsv)",
+    )
+    ap.add_argument(
+        "--limit", type=int, metavar="N", help="keep only the first N projects in u order"
+    )
     args = ap.parse_args(argv)
     if args.limit is not None and args.limit < 1:
         ap.error("--limit must be at least 1")
@@ -243,9 +294,11 @@ def main(argv: list[str] | None = None) -> int:
     write_atomic(args.manifest, manifest)
     write_atomic(args.project_meta, json.dumps(meta, indent=1, ensure_ascii=False) + "\n")
     write_atomic(order_path, order)
-    print(f"OK {summary['written']} projects from {summary['rows']} frame rows "
-          f"({summary['dropped_by_included']} not included): {args.manifest}, "
-          f"{args.project_meta}, {order_path}")
+    print(
+        f"OK {summary['written']} projects from {summary['rows']} frame rows "
+        f"({summary['dropped_by_included']} not included): {args.manifest}, "
+        f"{args.project_meta}, {order_path}"
+    )
     return 0
 
 

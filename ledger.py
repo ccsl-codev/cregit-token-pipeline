@@ -8,6 +8,7 @@ Every row carries enough to audit its step alone: the run, the manifest row, the
 pinned and checked-out commits, the tool versions and the flags. A project's last
 row has step "project" and gives its state: done, done-dirty, failed, deferred or
 skipped. done-dirty means the Parquet is valid but the cleanup did not finish."""
+
 from __future__ import annotations
 
 import fcntl
@@ -60,19 +61,19 @@ def read(path: Path) -> list[dict]:
         try:
             rows.append(json.loads(line))
         except ValueError:
-            print(f"ledger: {path}:{lineno} is not a whole JSON row, skipped",
-                  file=sys.stderr)
+            print(f"ledger: {path}:{lineno} is not a whole JSON row, skipped", file=sys.stderr)
     return rows
 
 
 @dataclass
 class History:
     """What the ledger says about one project."""
-    state: str = ""            # the last final row's state, "" when there is none
-    failures: int = 0          # final rows with state failed
-    attempts: int = 0          # final rows of any state except skipped and deferred
+
+    state: str = ""  # the last final row's state, "" when there is none
+    failures: int = 0  # final rows with state failed
+    attempts: int = 0  # final rows of any state except skipped and deferred
     last_failed_step: str = ""
-    interrupted: int = 0       # runs whose attempt started a step and never finished
+    interrupted: int = 0  # runs whose attempt started a step and never finished
     rows: list = field(default_factory=list)
 
 
@@ -91,7 +92,7 @@ def histories(rows: list[dict]) -> dict[str, History]:
         h.rows.append(row)
         key = (name, row.get("run_id"), row.get("attempt"))
         if row.get("status") == "started":
-            started[key] = row.get("step", "")   # the last step it started
+            started[key] = row.get("step", "")  # the last step it started
         if row.get("step") != FINAL_STEP:
             continue
         finished.add(key)

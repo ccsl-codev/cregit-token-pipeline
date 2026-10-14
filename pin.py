@@ -9,6 +9,7 @@ blames the history of that commit and nothing else.
 
 Exit 0 writes the result JSON. Exit 3 means the commit is not on the remote. Exit 1 is
 any other git failure. Exit 2 is a usage error."""
+
 from __future__ import annotations
 
 import argparse
@@ -34,9 +35,16 @@ EXIT_MISSING = 3
 GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/true"}
 # These point git at another repository than cwd: inside a git hook or `git rebase
 # --exec` they name the caller's repository, whose refs keep_only() would delete.
-REPO_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
-                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                  "GIT_NAMESPACE", "GIT_PREFIX")
+REPO_REDIRECTS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+)
 GIT_OPTS = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=600")
 
 
@@ -52,15 +60,23 @@ def log(msg: str) -> None:
     print(f"[pin {datetime.now(timezone.utc):%H:%M:%S}] {msg}", flush=True)
 
 
-def git(args: list[str], cwd: Path | None = None, check: bool = True,
-        timeout: float | None = None) -> subprocess.CompletedProcess:
+def git(
+    args: list[str], cwd: Path | None = None, check: bool = True, timeout: float | None = None
+) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k not in REPO_REDIRECTS}
     env.update(GIT_ENV)
     cmd = ["git", *GIT_OPTS, *args]
     log("$ " + " ".join(cmd))
     try:
-        proc = subprocess.run(cmd, cwd=cwd, env=env, text=True, timeout=timeout,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            text=True,
+            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
     except subprocess.TimeoutExpired as exc:
         raise PinError(f"git {args[0]} did not end in {timeout:.0f} s") from exc
     if proc.stdout:
@@ -92,17 +108,23 @@ def has_commit(repo: Path, sha: str) -> bool:
 
 def fetch_pinned(repo: Path, url: str, sha: str) -> str:
     """Fetch the commit into repo. Returns how: "fetch-by-sha" or "fetch-all-refs"."""
-    if git(["fetch", "--no-tags", url, sha], cwd=repo, check=False).returncode == 0 \
-            and has_commit(repo, sha):
+    if git(["fetch", "--no-tags", url, sha], cwd=repo, check=False).returncode == 0 and has_commit(
+        repo, sha
+    ):
         return "fetch-by-sha"
     # A host that refuses a request by SHA still serves its branches and tags.
     log("fetch by SHA refused or incomplete; fetching every branch and tag instead")
-    git(["fetch", "--no-tags", url, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
-        cwd=repo)
+    git(
+        ["fetch", "--no-tags", url, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
+        cwd=repo,
+    )
     if not has_commit(repo, sha):
-        raise PinError(f"commit {sha} is not on {url}: the host refused it by SHA, and no "
-                       "branch or tag reaches it. The frame may be stale, or history was "
-                       "rewritten.", EXIT_MISSING)
+        raise PinError(
+            f"commit {sha} is not on {url}: the host refused it by SHA, and no "
+            "branch or tag reaches it. The frame may be stale, or history was "
+            "rewritten.",
+            EXIT_MISSING,
+        )
     return "fetch-all-refs"
 
 
@@ -125,8 +147,9 @@ def checked_out(repo: Path) -> tuple[str, list[str]]:
 
 def check_dest(dest: Path) -> None:
     if dest.parent.name != STAGING_DIR or not dest.name.endswith(".git"):
-        raise PinError(f"refusing --dest {dest}: it must be <output_dir>/{STAGING_DIR}/<name>.git",
-                       EXIT_USAGE)
+        raise PinError(
+            f"refusing --dest {dest}: it must be <output_dir>/{STAGING_DIR}/<name>.git", EXIT_USAGE
+        )
 
 
 def reusable(dest: Path, sha: str) -> dict | None:

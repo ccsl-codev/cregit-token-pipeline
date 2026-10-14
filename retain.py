@@ -2,6 +2,7 @@
 """Prune finished, idle project workdirs to their parquet by deleting memo/ and html/.
 Usage: retain.py [--apply] [project ...]; a dry run unless --apply. Finished is not idle: a
 --from-step re-run keeps the stamp, so live() checks ctp's lock, and a live project is skipped."""
+
 from __future__ import annotations
 
 import argparse
@@ -26,8 +27,9 @@ def config_path() -> Path:
         return CORPUS / "pipeline.cfg"
     path = Path(raw).expanduser().resolve()
     if not path.is_file():
-        raise SystemExit(f"CTP_CONFIG={raw} is not a file. Unset it to use "
-                         f"{CORPUS / 'pipeline.cfg'}.")
+        raise SystemExit(
+            f"CTP_CONFIG={raw} is not a file. Unset it to use {CORPUS / 'pipeline.cfg'}."
+        )
     return path
 
 
@@ -233,8 +235,7 @@ def finished_projects() -> list[str]:
     """Every finished project, in name order, by finished() itself."""
     if not OUT.is_dir():
         return []
-    return [d.name for d in sorted(OUT.iterdir())
-            if d.is_dir() and finished(d.name)[0]]
+    return [d.name for d in sorted(OUT.iterdir()) if d.is_dir() and finished(d.name)[0]]
 
 
 def remove_tree(target: Path) -> list[str]:
@@ -264,8 +265,10 @@ def _prune_keeper(name: str) -> str | None:
 
     # Before finished() and any stat, so a live run is spared the I/O.
     if live(name):
-        say(f"{name} — SKIP: LIVE, another run holds {lock_path(name)}. memo/ is "
-            f"blobExec's cache while it runs, so nothing was measured or deleted")
+        say(
+            f"{name} — SKIP: LIVE, another run holds {lock_path(name)}. memo/ is "
+            f"blobExec's cache while it runs, so nothing was measured or deleted"
+        )
         return None
 
     ok, why = finished(name)
@@ -281,8 +284,13 @@ ANON_DIR = "anon"
 
 
 def keepers(name: str, drop_html: bool) -> frozenset[str]:
-    keep = {f"{name}-dataset.parquet", f"{name}.validated",
-            f"{name}-persons.db", f"{name}-persons.xls", ANON_DIR}
+    keep = {
+        f"{name}-dataset.parquet",
+        f"{name}.validated",
+        f"{name}-persons.db",
+        f"{name}-persons.xls",
+        ANON_DIR,
+    }
     if not drop_html:
         keep.add("html")
     return frozenset(keep)
@@ -356,16 +364,17 @@ def _measure_subtree(name: str, workdir: Path, subtree: str, apply: bool):
         return "absent", subtree
     if not target.is_dir():
         # A stray file says nothing about the sibling subtrees, so only it is skipped.
-        say(f"{name} — SKIP {subtree}/: exists but is not a directory, "
-            f"leaving it alone")
+        say(f"{name} — SKIP {subtree}/: exists but is not a directory, leaving it alone")
         return "skipped", subtree
     size, entries, violations = scan(target)
     if violations:
         for violation in violations[:5]:
             say(f"{name} — REFUSE {subtree}/: {violation}")
         return "refused", subtree
-    say(f"{name}    {'measured' if apply else 'would delete'} "
-        f"{subtree}/ — {human(size)} in {entries} entries")
+    say(
+        f"{name}    {'measured' if apply else 'would delete'} "
+        f"{subtree}/ — {human(size)} in {entries} entries"
+    )
     return "measured", (target, subtree, size)
 
 
@@ -379,28 +388,36 @@ def _delete_plan(name: str, plan: list[tuple[Path, str, int]]) -> tuple[int, boo
                 say(f"{name} — SKIP {subtree}/: cannot remove {err}")
             # rmtree removes as it walks, so the tree can be half gone.
             state = "still present" if target.exists() else "gone"
-            say(f"{name} — SKIP {subtree}/: PARTIAL DELETE, {subtree}/ is "
-                f"{state} and this project is NOT pruned")
+            say(
+                f"{name} — SKIP {subtree}/: PARTIAL DELETE, {subtree}/ is "
+                f"{state} and this project is NOT pruned"
+            )
             return reclaimed, False
         say(f"{name}    deleted {subtree}/ — {human(size)}")
         reclaimed += size
     return reclaimed, True
 
 
-def _report_refused(name: str, refused: list[str], measured: int, why: str,
-                    apply: bool) -> tuple[int, bool]:
+def _report_refused(
+    name: str, refused: list[str], measured: int, why: str, apply: bool
+) -> tuple[int, bool]:
     blocked = ", ".join(f"{s}/" for s in refused)
     if apply:
-        say(f"{name} — SKIP: {len(refused)} refused subtree(s) ({blocked}),"
-            f" so nothing was deleted for this project")
+        say(
+            f"{name} — SKIP: {len(refused)} refused subtree(s) ({blocked}),"
+            f" so nothing was deleted for this project"
+        )
         return 0, False
-    say(f"{name} — reclaimable {human(measured)} over the subtrees that "
-        f"passed, {len(refused)} refused ({blocked}) | keeping {why}")
+    say(
+        f"{name} — reclaimable {human(measured)} over the subtrees that "
+        f"passed, {len(refused)} refused ({blocked}) | keeping {why}"
+    )
     return measured, False
 
 
-def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
-          *, apply: bool = False) -> tuple[int, bool]:
+def prune(
+    name: str, subtrees: tuple[str, ...] = DISPOSABLE, *, apply: bool = False
+) -> tuple[int, bool]:
     """(bytes, ok); ok=False means not pruned. ctp.py calls prune(name, ("memo",),
     apply=True). A dry run measures past a refusal so the total stays complete; apply
     fails closed: one refused subtree deletes nothing for the project."""
@@ -419,15 +436,13 @@ def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
         return _report_refused(name, refused, measured, why, apply)
 
     if not apply:
-        say(f"{name} — reclaimable {human(measured)}{_note(skipped)}"
-            f" | keeping {why}")
+        say(f"{name} — reclaimable {human(measured)}{_note(skipped)} | keeping {why}")
         return measured, not skipped
 
     reclaimed, ok = _delete_plan(name, plan)
     if not ok:
         return reclaimed, False
-    say(f"{name} — reclaimed {human(reclaimed)}{_note(skipped)}"
-        f" | keeping {why}")
+    say(f"{name} — reclaimed {human(reclaimed)}{_note(skipped)} | keeping {why}")
     return reclaimed, not skipped
 
 
@@ -445,30 +460,38 @@ def sweep(names: list[str], apply: bool) -> tuple[int, list[str], list[str]]:
     return total, skipped, running
 
 
-def print_sweep_summary(names: list[str], total: int, skipped: list[str],
-                        running: list[str], apply: bool, free_before: int) -> None:
+def print_sweep_summary(
+    names: list[str],
+    total: int,
+    skipped: list[str],
+    running: list[str],
+    apply: bool,
+    free_before: int,
+) -> None:
     verb = "reclaimed" if apply else "reclaimable"
-    say(f"TOTAL {verb} {human(total)} over "
-        f"{len(names) - len(skipped) - len(running)} project(s)")
+    say(f"TOTAL {verb} {human(total)} over {len(names) - len(skipped) - len(running)} project(s)")
     if apply:
         free_after = shutil.disk_usage(OUT).free
         say(f"disk free {human(free_before)} -> {human(free_after)}")
     else:
         say("nothing was deleted — re-run with --apply to reclaim it")
     if running:
-        say(f"LIVE {len(running)} project(s), a running pipeline holds the lock, "
-            f"left untouched: {' '.join(running)}")
+        say(
+            f"LIVE {len(running)} project(s), a running pipeline holds the lock, "
+            f"left untouched: {' '.join(running)}"
+        )
     if skipped:
         say(f"SKIPPED {len(skipped)} project(s), not pruned: {' '.join(skipped)}")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("projects", nargs="*",
-                    help="project names (default: every finished project)")
-    ap.add_argument("--apply", action="store_true",
-                    help="actually delete; without it nothing is removed")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("projects", nargs="*", help="project names (default: every finished project)")
+    ap.add_argument(
+        "--apply", action="store_true", help="actually delete; without it nothing is removed"
+    )
     args = ap.parse_args()
 
     refusal = output_dir_refusal()

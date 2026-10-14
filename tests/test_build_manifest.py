@@ -27,16 +27,24 @@ def write_frame(tmp_path: Path, rows: list[dict], name: str = "frame.csv") -> Pa
 
 
 def frame_row(slug: str = "jqlang/jq", **over) -> dict:
-    row = dict(slug=slug, host="github.com", repo_url=f"https://github.com/{slug}.git",
-               head_oid="a" * 40, u=repr(bm.u_of(slug)), size_class="S", labels="community")
+    row = dict(
+        slug=slug,
+        host="github.com",
+        repo_url=f"https://github.com/{slug}.git",
+        head_oid="a" * 40,
+        u=repr(bm.u_of(slug)),
+        size_class="S",
+        labels="community",
+    )
     row.update(over)
     return row
 
 
 def build_files(tmp_path: Path, frame: Path, *extra: str) -> tuple[Path, Path, Path]:
     manifest, meta = tmp_path / "m.tsv", tmp_path / "meta.json"
-    assert bm.main([str(frame), "--manifest", str(manifest),
-                    "--project-meta", str(meta), *extra]) == 0
+    assert (
+        bm.main([str(frame), "--manifest", str(manifest), "--project-meta", str(meta), *extra]) == 0
+    )
     return manifest, meta, manifest.with_suffix(".order.tsv")
 
 
@@ -53,10 +61,15 @@ def test_the_fixture_builds_a_manifest_in_u_order(tmp_path):
     manifest, _, _ = build_files(tmp_path, FIXTURE)
     projects = ctp.read_manifest(manifest, None)
     assert [p["name"] for p in projects] == [
-        "zserge__jsmn", "DaveGamble__cJSON",
-        "gitlab.com__example-group__example-lib", "antirez__kilo"]
-    us = [bm.u_of(s) for s in ("zserge/jsmn", "DaveGamble/cJSON",
-                               "example-group/example-lib", "antirez/kilo")]
+        "zserge__jsmn",
+        "DaveGamble__cJSON",
+        "gitlab.com__example-group__example-lib",
+        "antirez__kilo",
+    ]
+    us = [
+        bm.u_of(s)
+        for s in ("zserge/jsmn", "DaveGamble/cJSON", "example-group/example-lib", "antirez/kilo")
+    ]
     assert us == sorted(us)
 
 
@@ -115,7 +128,9 @@ def test_the_order_file_maps_queue_position_to_slug_and_u(tmp_path):
 def test_limit_keeps_the_lowest_u_rows(tmp_path):
     manifest, meta, _ = build_files(tmp_path, FIXTURE, "--limit", "2")
     assert [p["name"] for p in ctp.read_manifest(manifest, None)] == [
-        "zserge__jsmn", "DaveGamble__cJSON"]
+        "zserge__jsmn",
+        "DaveGamble__cJSON",
+    ]
     assert len(json.loads(meta.read_text())) == 2
 
 
@@ -132,23 +147,36 @@ def test_the_manifest_header_names_the_frame_and_its_hash(tmp_path):
     assert f"sha256 {digest}" in manifest.read_text().splitlines()[0]
 
 
-@pytest.mark.parametrize("over, message", [
-    pytest.param(dict(head_oid="abc"), "head_oid", id="short-sha"),
-    pytest.param(dict(head_oid="A" * 40), "head_oid", id="upper-sha"),
-    pytest.param(dict(u="0.5"), "does not match", id="wrong-u"),
-    pytest.param(dict(u="x"), "not a number", id="u-not-a-number"),
-    pytest.param(dict(u="1.0"), "outside", id="u-one"),
-    pytest.param(dict(size_class="XL"), "size_class", id="bad-size-class"),
-    pytest.param(dict(repo_url=""), "repo_url is empty", id="no-url"),
-    pytest.param(dict(labels="a\tb"), "tab or a newline", id="tab-in-labels"),
-    pytest.param(dict(slug="jq"), "not owner/repo", id="slug-without-owner"),
-])
+@pytest.mark.parametrize(
+    "over, message",
+    [
+        pytest.param(dict(head_oid="abc"), "head_oid", id="short-sha"),
+        pytest.param(dict(head_oid="A" * 40), "head_oid", id="upper-sha"),
+        pytest.param(dict(u="0.5"), "does not match", id="wrong-u"),
+        pytest.param(dict(u="x"), "not a number", id="u-not-a-number"),
+        pytest.param(dict(u="1.0"), "outside", id="u-one"),
+        pytest.param(dict(size_class="XL"), "size_class", id="bad-size-class"),
+        pytest.param(dict(repo_url=""), "repo_url is empty", id="no-url"),
+        pytest.param(dict(labels="a\tb"), "tab or a newline", id="tab-in-labels"),
+        pytest.param(dict(slug="jq"), "not owner/repo", id="slug-without-owner"),
+    ],
+)
 def test_a_broken_row_stops_the_build_and_names_the_line(tmp_path, capsys, over, message):
     slug = over.get("slug", "jqlang/jq")
     row = frame_row(slug, **{k: v for k, v in over.items() if k != "slug"})
     frame = write_frame(tmp_path, [row])
-    assert bm.main([str(frame), "--manifest", str(tmp_path / "m.tsv"),
-                    "--project-meta", str(tmp_path / "p.json")]) == 1
+    assert (
+        bm.main(
+            [
+                str(frame),
+                "--manifest",
+                str(tmp_path / "m.tsv"),
+                "--project-meta",
+                str(tmp_path / "p.json"),
+            ]
+        )
+        == 1
+    )
     err = capsys.readouterr().err
     assert message in err and "frame.csv:2" in err
     assert not (tmp_path / "m.tsv").exists()
@@ -157,16 +185,36 @@ def test_a_broken_row_stops_the_build_and_names_the_line(tmp_path, capsys, over,
 def test_a_missing_column_is_named(tmp_path, capsys):
     row = frame_row()
     del row["head_oid"]
-    assert bm.main([str(write_frame(tmp_path, [row])), "--manifest", str(tmp_path / "m"),
-                    "--project-meta", str(tmp_path / "p")]) == 1
+    assert (
+        bm.main(
+            [
+                str(write_frame(tmp_path, [row])),
+                "--manifest",
+                str(tmp_path / "m"),
+                "--project-meta",
+                str(tmp_path / "p"),
+            ]
+        )
+        == 1
+    )
     assert "missing column(s): head_oid" in capsys.readouterr().err
 
 
 def test_a_frame_without_a_slug_column_is_refused(tmp_path, capsys):
     row = frame_row()
     del row["slug"]
-    assert bm.main([str(write_frame(tmp_path, [row])), "--manifest", str(tmp_path / "m"),
-                    "--project-meta", str(tmp_path / "p")]) == 1
+    assert (
+        bm.main(
+            [
+                str(write_frame(tmp_path, [row])),
+                "--manifest",
+                str(tmp_path / "m"),
+                "--project-meta",
+                str(tmp_path / "p"),
+            ]
+        )
+        == 1
+    )
     assert "slug or name_with_owner" in capsys.readouterr().err
 
 
@@ -196,11 +244,30 @@ def test_a_repository_at_the_root_of_a_non_github_host_is_named_after_the_host()
 
 def test_limit_below_one_is_a_usage_error(tmp_path):
     with pytest.raises(SystemExit):
-        bm.main([str(FIXTURE), "--manifest", str(tmp_path / "m"),
-                 "--project-meta", str(tmp_path / "p"), "--limit", "0"])
+        bm.main(
+            [
+                str(FIXTURE),
+                "--manifest",
+                str(tmp_path / "m"),
+                "--project-meta",
+                str(tmp_path / "p"),
+                "--limit",
+                "0",
+            ]
+        )
 
 
 def test_a_missing_frame_fails_cleanly(tmp_path, capsys):
-    assert bm.main([str(tmp_path / "absent.csv"), "--manifest", str(tmp_path / "m"),
-                    "--project-meta", str(tmp_path / "p")]) == 1
+    assert (
+        bm.main(
+            [
+                str(tmp_path / "absent.csv"),
+                "--manifest",
+                str(tmp_path / "m"),
+                "--project-meta",
+                str(tmp_path / "p"),
+            ]
+        )
+        == 1
+    )
     assert "FAIL" in capsys.readouterr().err

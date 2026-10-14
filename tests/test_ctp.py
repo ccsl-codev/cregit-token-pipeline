@@ -63,9 +63,14 @@ OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 PINNED_ROW = VALID_ROW + "\t" + PINNED_SHA
 
 # The script each python3 step runs, by phase.
-STEP_SCRIPTS = {"pin.py": "clone", "firm_attribution.py": "firm", "validate.py": "validate",
-                "validate_schema.py": "schema", "consolidate.py": "join",
-                "anonymize_parquet.py": "anonymize"}
+STEP_SCRIPTS = {
+    "pin.py": "clone",
+    "firm_attribution.py": "firm",
+    "validate.py": "validate",
+    "validate_schema.py": "schema",
+    "consolidate.py": "join",
+    "anonymize_parquet.py": "anonymize",
+}
 
 
 class FakeRunner:
@@ -74,12 +79,26 @@ class FakeRunner:
     validate.py does, and the result file when clone succeeds, as pin.py does.
     `checkout` is the HEAD that `git rev-parse` reports for the runner's clone."""
 
-    def __init__(self, *, pipeline_rc=0, firm_rc=0, validate_rc=0, raise_on=None,
-                 payload=b"", rcs=None, checkout=PINNED_SHA, pin_result=True,
-                 anon_output=True):
+    def __init__(
+        self,
+        *,
+        pipeline_rc=0,
+        firm_rc=0,
+        validate_rc=0,
+        raise_on=None,
+        payload=b"",
+        rcs=None,
+        checkout=PINNED_SHA,
+        pin_result=True,
+        anon_output=True,
+    ):
         self.calls: list[SimpleNamespace] = []
-        self.rcs = {"pipeline": pipeline_rc, "firm": firm_rc, "validate": validate_rc,
-                    **(rcs or {})}
+        self.rcs = {
+            "pipeline": pipeline_rc,
+            "firm": firm_rc,
+            "validate": validate_rc,
+            **(rcs or {}),
+        }
         self.raise_on = raise_on
         self.payload = payload
         self.checkout = checkout
@@ -121,13 +140,15 @@ class FakeRunner:
         if phase == "clone" and rc == 0 and self.pin_result:
             commit = args[args.index("--commit") + 1]
             Path(args[args.index("--result") + 1]).write_text(
-                f'{{"pinned_sha": "{commit}", "checked_out_sha": "{commit}"}}\n')
+                f'{{"pinned_sha": "{commit}", "checked_out_sha": "{commit}"}}\n'
+            )
         if phase == "validate" and rc == 0:
             stamp = Path(args[3])
             # A relative stamp path would escape tmp_path into the repository.
             assert stamp.is_absolute(), (
                 f"stamp path must be absolute, got {stamp!r}. A relative path "
-                f"escapes tmp_path and writes into the repository.")
+                f"escapes tmp_path and writes into the repository."
+            )
             stamp.write_text("rows=42\nbytes=123456\n")
         # Our own pid, so the resource sampler walks a real process tree.
         return SimpleNamespace(returncode=rc, pid=os.getpid(), wait=lambda: rc)
@@ -147,8 +168,7 @@ class Clock:
 
 
 def forbidden(*args, **kwargs):
-    raise AssertionError(
-        "the test tried to start a real process; monkeypatch subprocess first")
+    raise AssertionError("the test tried to start a real process; monkeypatch subprocess first")
 
 
 def lock_is_free(path: Path) -> bool:
@@ -170,6 +190,7 @@ def write_manifest(tmp_path: Path, *lines: str, name: str = "manifest.tsv") -> P
 # --------------------------------------------------------------------------- #
 # fixtures
 # --------------------------------------------------------------------------- #
+
 
 @pytest.fixture(autouse=True)
 def sandbox(tmp_path, monkeypatch):
@@ -214,8 +235,13 @@ def clock(monkeypatch):
 
 @pytest.fixture
 def jq():
-    return dict(name="jq", url="https://github.com/jqlang/jq.git",
-                category="community", file_filter=r"\.[ch]$", size_class="S")
+    return dict(
+        name="jq",
+        url="https://github.com/jqlang/jq.git",
+        category="community",
+        file_filter=r"\.[ch]$",
+        size_class="S",
+    )
 
 
 @pytest.fixture
@@ -229,10 +255,12 @@ def runner(monkeypatch):
 @pytest.fixture
 def runner_script(sandbox):
     """Write a stand-in run_pipeline_process.sh into the sandboxed CREGIT."""
+
     def _write(text: str = REAL_RUNNER_USAGE) -> Path:
         path = sandbox.cregit / "run_pipeline_process.sh"
         path.write_text(text)
         return path
+
     return _write
 
 
@@ -261,11 +289,18 @@ def must_not_start(sandbox, monkeypatch, runner_script):
 # manifest parsing
 # --------------------------------------------------------------------------- #
 
+
 def test_manifest_parses_a_valid_row(tmp_path):
     projects = ctp.read_manifest(write_manifest(tmp_path, VALID_ROW), None)
-    assert projects == [dict(name="jq", url="https://github.com/jqlang/jq.git",
-                             category="community", file_filter=r"\.[ch]$",
-                             size_class="S")]
+    assert projects == [
+        dict(
+            name="jq",
+            url="https://github.com/jqlang/jq.git",
+            category="community",
+            file_filter=r"\.[ch]$",
+            size_class="S",
+        )
+    ]
 
 
 def test_manifest_skips_comment_lines(tmp_path):
@@ -278,10 +313,13 @@ def test_manifest_skips_blank_and_whitespace_only_lines(tmp_path):
     assert len(ctp.read_manifest(path, None)) == 1
 
 
-@pytest.mark.parametrize("row, fields", [
-    pytest.param("jq\thttps://x.git\tcommunity\t\\.[ch]$", 4, id="four-fields"),
-    pytest.param("jq\thttps://x.git\tcommunity\t\\.[ch]$\tS\textra", 6, id="six-fields"),
-])
+@pytest.mark.parametrize(
+    "row, fields",
+    [
+        pytest.param("jq\thttps://x.git\tcommunity\t\\.[ch]$", 4, id="four-fields"),
+        pytest.param("jq\thttps://x.git\tcommunity\t\\.[ch]$\tS\textra", 6, id="six-fields"),
+    ],
+)
 def test_manifest_rejects_a_row_without_exactly_five_fields(tmp_path, row, fields):
     """A short or long row is a corrupt manifest that would mislabel projects."""
     with pytest.raises(ValueError):
@@ -307,9 +345,11 @@ def test_manifest_empty_returns_no_projects(tmp_path):
 
 def test_manifest_only_filter_keeps_just_the_named_projects(tmp_path):
     path = write_manifest(
-        tmp_path, VALID_ROW,
+        tmp_path,
+        VALID_ROW,
         "zstd\thttps://github.com/facebook/zstd.git\tenterprise\t\\.[ch]$\tS",
-        "tmux\thttps://github.com/tmux/tmux.git\tcommunity\t\\.[ch]$\tS")
+        "tmux\thttps://github.com/tmux/tmux.git\tcommunity\t\\.[ch]$\tS",
+    )
     assert [p["name"] for p in ctp.read_manifest(path, {"zstd"})] == ["zstd"]
 
 
@@ -317,11 +357,15 @@ def test_manifest_only_filter_keeps_just_the_named_projects(tmp_path):
 # script_supports
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("text, flag, expected", [
-    pytest.param(REAL_RUNNER_USAGE, "--skip-html", True, id="flag-present"),
-    pytest.param(REAL_RUNNER_USAGE, "--file-filter", False, id="flag-absent"),
-    pytest.param(REAL_RUNNER_USAGE, "--work-dir", False, id="prefix-is-not-a-match"),
-])
+
+@pytest.mark.parametrize(
+    "text, flag, expected",
+    [
+        pytest.param(REAL_RUNNER_USAGE, "--skip-html", True, id="flag-present"),
+        pytest.param(REAL_RUNNER_USAGE, "--file-filter", False, id="flag-absent"),
+        pytest.param(REAL_RUNNER_USAGE, "--work-dir", False, id="prefix-is-not-a-match"),
+    ],
+)
 def test_script_supports_reads_the_configured_runner(runner_script, text, flag, expected):
     """The refusal in cmd_run is only as good as this probe."""
     runner_script(text)
@@ -338,6 +382,7 @@ def test_script_supports_returns_false_when_the_script_is_missing(sandbox):
 # --------------------------------------------------------------------------- #
 # idempotence and locking
 # --------------------------------------------------------------------------- #
+
 
 def test_validated_project_is_skipped_and_starts_no_subprocess(sandbox, runner, jq):
     """Idempotence contract: a completion stamp means the work is done. If this
@@ -359,11 +404,14 @@ def test_second_concurrent_run_of_the_same_project_is_deferred(sandbox, runner, 
     assert runner.calls == []
 
 
-@pytest.mark.parametrize("runner_kwargs, outcome", [
-    pytest.param({}, "done", id="success"),
-    pytest.param(dict(pipeline_rc=2), "failed", id="failure"),
-    pytest.param(dict(raise_on="pipeline"), "failed", id="popen-raises"),
-])
+@pytest.mark.parametrize(
+    "runner_kwargs, outcome",
+    [
+        pytest.param({}, "done", id="success"),
+        pytest.param(dict(pipeline_rc=2), "failed", id="failure"),
+        pytest.param(dict(raise_on="pipeline"), "failed", id="popen-raises"),
+    ],
+)
 def test_the_lock_is_released_after_every_outcome(monkeypatch, jq, runner_kwargs, outcome):
     """A leaked lock makes the next run report the project as RUNNING for ever."""
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(**runner_kwargs))
@@ -383,14 +431,18 @@ FORWARDED = [
     pytest.param(dict(memory_limit="3GB"), {"--memory-limit": "3GB"}, id="memory-limit"),
     pytest.param(dict(duckdb_threads=2), {"--duckdb-threads": "2"}, id="duckdb-threads"),
     # The key is the manifest name, so it is not the operator's to get wrong.
-    pytest.param(dict(project_meta="/somewhere/project_meta.json"),
-                 {"--project-meta": "/somewhere/project_meta.json", "--project-key": "jq"},
-                 id="sidecar-and-its-key"),
-    pytest.param(dict(mask_widened=True, from_step=2), {"--mask-widened": None},
-                 id="mask-widened"),
+    pytest.param(
+        dict(project_meta="/somewhere/project_meta.json"),
+        {"--project-meta": "/somewhere/project_meta.json", "--project-key": "jq"},
+        id="sidecar-and-its-key",
+    ),
+    pytest.param(dict(mask_widened=True, from_step=2), {"--mask-widened": None}, id="mask-widened"),
     pytest.param(dict(retokenize="rs", from_step=2), {"--retokenize": "rs"}, id="retokenize"),
-    pytest.param(dict(shards=4, shard_classes=("S", "M")),
-                 {"--mode": "sharded", "--shards": "4"}, id="shards-for-a-listed-class"),
+    pytest.param(
+        dict(shards=4, shard_classes=("S", "M")),
+        {"--mode": "sharded", "--shards": "4"},
+        id="shards-for-a-listed-class",
+    ),
 ]
 
 NOT_SENT = [
@@ -399,11 +451,13 @@ NOT_SENT = [
     pytest.param(dict(memo_dir=""), ["--memo-dir"], id="no-memo-dir"),
     pytest.param(dict(blame_jobs=0), ["--jobs"], id="no-blame-jobs"),
     pytest.param(dict(blame_jobs=8), ["--blame-jobs"], id="old-blame-jobs-name"),
-    pytest.param(dict(memory_limit=None, duckdb_threads=0),
-                 ["--memory-limit", "--duckdb-threads"], id="no-memory-flags"),
+    pytest.param(
+        dict(memory_limit=None, duckdb_threads=0),
+        ["--memory-limit", "--duckdb-threads"],
+        id="no-memory-flags",
+    ),
     pytest.param(dict(project_meta=""), ["--project-meta", "--project-key"], id="no-sidecar"),
-    pytest.param(dict(from_step=2, mask_widened=False), ["--mask-widened"],
-                 id="no-mask-widened"),
+    pytest.param(dict(from_step=2, mask_widened=False), ["--mask-widened"], id="no-mask-widened"),
     pytest.param(dict(from_step=2, retokenize=""), ["--retokenize"], id="no-retokenize"),
     pytest.param(dict(from_step=1), ["1"], id="step-one-is-the-runner-default"),
     pytest.param(dict(shards=0, shard_classes=("L",)), ["--mode", "--shards"], id="no-shards"),
@@ -461,8 +515,7 @@ def test_no_memo_is_an_alias_for_drop_memo(monkeypatch):
     assert seen["drop_memo"] is True
 
 
-def test_no_memo_warns_that_it_does_not_prevent_the_write(
-        sandbox, monkeypatch, capsys):
+def test_no_memo_warns_that_it_does_not_prevent_the_write(sandbox, monkeypatch, capsys):
     """Honesty contract: memo/ is always written because the tokenizer needs
     BFG_MEMO_DIR. The alias must say so instead of implying prevention."""
     write_manifest(sandbox.root, VALID_ROW)
@@ -484,8 +537,7 @@ def test_drop_memo_prunes_only_after_the_project_validates(sandbox, runner, jq):
     seen = []
 
     def fake_prune(name, subtrees, *, apply):
-        seen.append(dict(name=name, subtrees=subtrees, apply=apply,
-                         stamped=stamp.exists()))
+        seen.append(dict(name=name, subtrees=subtrees, apply=apply, stamped=stamp.exists()))
         return 1024, True
 
     ctp._OPTS.update(skip_html=False, drop_memo=True)
@@ -496,10 +548,13 @@ def test_drop_memo_prunes_only_after_the_project_validates(sandbox, runner, jq):
     assert seen == [dict(name="jq", subtrees=("memo",), apply=True, stamped=True)]
 
 
-@pytest.mark.parametrize("runner_kwargs", [
-    pytest.param(dict(pipeline_rc=2), id="pipeline-fails"),
-    pytest.param(dict(validate_rc=1), id="validation-fails"),
-])
+@pytest.mark.parametrize(
+    "runner_kwargs",
+    [
+        pytest.param(dict(pipeline_rc=2), id="pipeline-fails"),
+        pytest.param(dict(validate_rc=1), id="validation-fails"),
+    ],
+)
 def test_drop_memo_does_not_prune_a_failed_project(monkeypatch, jq, runner_kwargs):
     """A failed project keeps memo/ so blobExec can resume incrementally."""
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(**runner_kwargs))
@@ -522,6 +577,7 @@ def test_drop_memo_reports_when_retain_refuses(monkeypatch, capsys, runner, jq):
 # --memo-dir
 # --------------------------------------------------------------------------- #
 
+
 def test_memo_dir_is_forwarded_as_one_subdirectory_per_project(sandbox, runner, jq):
     """tokenBySha.pl keys the memo on the sha1 of the file contents alone, so a
     shared directory would serve one project's tokens to another."""
@@ -537,14 +593,14 @@ def test_memo_dir_is_forwarded_as_one_subdirectory_per_project(sandbox, runner, 
 def test_a_memo_dir_inside_the_work_directory_is_refused(sandbox, runner, jq):
     """A memo the runner's own wipe can reach is worse than no flag at all: the
     operator believes it is safe and it is not."""
-    ctp._OPTS.update(skip_html=False, drop_memo=False,
-                     memo_dir=str(sandbox.out / "jq" / "inner"))
+    ctp._OPTS.update(skip_html=False, drop_memo=False, memo_dir=str(sandbox.out / "jq" / "inner"))
     assert ctp.run_project(jq) == "failed"
 
 
 # --------------------------------------------------------------------------- #
 # argument construction
 # --------------------------------------------------------------------------- #
+
 
 def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
     """The runner takes --work and --mask; --work-dir or --file-filter exit 2."""
@@ -553,10 +609,14 @@ def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
 
     assert runner.argv("pipeline") == [
         "./run_pipeline_process.sh",
-        "--repo-url", "https://github.com/jqlang/jq.git",
-        "--repo-name", "jq",
-        "--work", str(sandbox.out / "jq"),
-        "--mask", r"\.[ch]$",
+        "--repo-url",
+        "https://github.com/jqlang/jq.git",
+        "--repo-name",
+        "jq",
+        "--work",
+        str(sandbox.out / "jq"),
+        "--mask",
+        r"\.[ch]$",
     ]
     assert runner.calls[0].kwargs["cwd"] == sandbox.cregit
     sent = {a for a in runner.argv("pipeline") if a.startswith("--")}
@@ -573,8 +633,7 @@ class WipingRunner(FakeRunner):
         return super().__call__(args, **kwargs)
 
 
-def test_the_log_and_the_lock_survive_the_runner_deleting_the_workdir(
-        sandbox, monkeypatch, jq):
+def test_the_log_and_the_lock_survive_the_runner_deleting_the_workdir(sandbox, monkeypatch, jq):
     monkeypatch.setattr(ctp.subprocess, "Popen", WipingRunner(pipeline_rc=2))
     assert ctp.run_project(jq) == "failed"
 
@@ -598,23 +657,32 @@ def test_status_reports_failed_after_the_runner_wiped_the_workdir(sandbox, monke
 def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
     ctp.run_project(jq)
     assert runner.argv("validate") == [
-        "python3", str(sandbox.root / "validate.py"),
+        "python3",
+        str(sandbox.root / "validate.py"),
         str(sandbox.out / "jq" / "jq-dataset.parquet"),
         str(sandbox.out / "jq" / "jq.validated"),
     ]
 
 
-@pytest.mark.parametrize("opts, tail", [
-    pytest.param({}, [], id="duckdb-defaults"),
-    pytest.param(dict(memory_limit="4GB", duckdb_threads=2),
-                 ["--memory-limit", "4GB", "--threads", "2"], id="runner-limits"),
-])
+@pytest.mark.parametrize(
+    "opts, tail",
+    [
+        pytest.param({}, [], id="duckdb-defaults"),
+        pytest.param(
+            dict(memory_limit="4GB", duckdb_threads=2),
+            ["--memory-limit", "4GB", "--threads", "2"],
+            id="runner-limits",
+        ),
+    ],
+)
 def test_firm_argv_is_built_exactly_like_this(sandbox, runner, jq, opts, tail):
     ctp._OPTS.update(opts)
     ctp.run_project(jq)
     assert runner.argv("firm") == [
-        "python3", str(sandbox.root / "firm_attribution.py"),
-        str(sandbox.out / "jq" / "jq-dataset.parquet"), *tail,
+        "python3",
+        str(sandbox.root / "firm_attribution.py"),
+        str(sandbox.out / "jq" / "jq-dataset.parquet"),
+        *tail,
     ]
 
 
@@ -636,6 +704,7 @@ def test_a_failed_firm_phase_fails_the_project_unstamped(sandbox, monkeypatch, j
 # metrics ledger
 # --------------------------------------------------------------------------- #
 
+
 def test_metrics_is_append_only_with_seven_fields_per_row(sandbox):
     """Rewriting metrics.tsv destroys the benchmark history."""
     log = ctp.state_dir("jq") / "logs" / "pipeline-1.log"
@@ -645,8 +714,15 @@ def test_metrics_is_append_only_with_seven_fields_per_row(sandbox):
     ctp.record_metric("jq", "S", "pipeline", 11, 1, log)
     lines = (sandbox.root / "metrics.tsv").read_text().splitlines()
 
-    assert lines[0].split("\t") == ["iso_start", "project", "class", "phase",
-                                    "duration_s", "rc", "log"]
+    assert lines[0].split("\t") == [
+        "iso_start",
+        "project",
+        "class",
+        "phase",
+        "duration_s",
+        "rc",
+        "log",
+    ]
     assert lines[1] == first, "the first attempt row was rewritten"
     assert len(lines) == 3
     assert all(len(line.split("\t")) == 7 for line in lines)
@@ -668,12 +744,12 @@ def test_metrics_row_carries_the_return_code_and_log_path(sandbox, runner, clock
 # log files and the -latest symlink
 # --------------------------------------------------------------------------- #
 
+
 def logs_of(sandbox, name="jq", phase="pipeline"):
     return sorted((ctp.state_dir(name) / "logs").glob(f"{phase}-2*.log"))
 
 
-def test_a_second_attempt_does_not_overwrite_the_first_log(
-        sandbox, monkeypatch, clock, jq):
+def test_a_second_attempt_does_not_overwrite_the_first_log(sandbox, monkeypatch, clock, jq):
     """The first log is the evidence of why the first attempt failed."""
     runner = FakeRunner(payload=b"first attempt\n")
     monkeypatch.setattr(ctp.subprocess, "Popen", runner)
@@ -684,13 +760,14 @@ def test_a_second_attempt_does_not_overwrite_the_first_log(
     ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
 
     logs = logs_of(sandbox)
-    assert [p.name for p in logs] == ["pipeline-20260102T030405.log",
-                                      "pipeline-20260102T030440.log"]
+    assert [p.name for p in logs] == [
+        "pipeline-20260102T030405.log",
+        "pipeline-20260102T030440.log",
+    ]
     assert logs[0].read_bytes() == b"first attempt\n"
 
 
-def test_two_attempts_in_the_same_second_keep_both_logs(
-        sandbox, monkeypatch, clock, jq):
+def test_two_attempts_in_the_same_second_keep_both_logs(sandbox, monkeypatch, clock, jq):
     runner = FakeRunner(payload=b"first attempt\n")
     monkeypatch.setattr(ctp.subprocess, "Popen", runner)
 
@@ -703,8 +780,7 @@ def test_two_attempts_in_the_same_second_keep_both_logs(
     assert logs[0].read_bytes() == b"first attempt\n"
 
 
-def test_latest_symlink_points_at_the_newest_attempt(
-        sandbox, monkeypatch, clock, jq):
+def test_latest_symlink_points_at_the_newest_attempt(sandbox, monkeypatch, clock, jq):
     """Visibility contract: `tail -f <phase>-latest.log` must follow the run in
     progress, not a stale attempt."""
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
@@ -718,21 +794,18 @@ def test_latest_symlink_points_at_the_newest_attempt(
     assert Path(latest.readlink()) == logs_of(sandbox)[-1]
 
 
-def test_latest_symlink_is_created_on_the_first_attempt(
-        sandbox, monkeypatch, clock, jq):
+def test_latest_symlink_is_created_on_the_first_attempt(sandbox, monkeypatch, clock, jq):
     """No prior symlink exists on a fresh project; the swap must still work."""
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
     (sandbox.out / "jq").mkdir()
     stamp = sandbox.out / "jq" / "jq.validated"
-    ctp.run_phase(jq, "validate",
-                  ["python3", "validate.py", "p.parquet", str(stamp)])
+    ctp.run_phase(jq, "validate", ["python3", "validate.py", "p.parquet", str(stamp)])
     latest = ctp.state_dir("jq") / "logs" / "validate-latest.log"
     assert latest.is_symlink()
     assert not (ctp.state_dir("jq") / "logs" / ".validate-latest.tmp").exists()
 
 
-def test_run_phase_records_the_live_phase_for_the_heartbeat(
-        sandbox, monkeypatch, jq):
+def test_run_phase_records_the_live_phase_for_the_heartbeat(sandbox, monkeypatch, jq):
     """The heartbeat reads _live; an empty _live makes a long run look idle."""
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner())
     ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
@@ -743,24 +816,29 @@ def test_run_phase_records_the_live_phase_for_the_heartbeat(
 # return states
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("pipeline_rc, validate_rc, expected", [
-    pytest.param(0, 0, "done", id="both-ok"),
-    pytest.param(2, 0, "failed", id="pipeline-exit-2"),
-    pytest.param(139, 0, "failed", id="pipeline-signal"),
-    pytest.param(0, 1, "failed", id="validate-gate-rejects"),
-])
+
+@pytest.mark.parametrize(
+    "pipeline_rc, validate_rc, expected",
+    [
+        pytest.param(0, 0, "done", id="both-ok"),
+        pytest.param(2, 0, "failed", id="pipeline-exit-2"),
+        pytest.param(139, 0, "failed", id="pipeline-signal"),
+        pytest.param(0, 1, "failed", id="validate-gate-rejects"),
+    ],
+)
 def test_run_project_return_state(monkeypatch, jq, pipeline_rc, validate_rc, expected):
     """run_project returns exactly one of done|skipped|failed|deferred; cmd_run
     computes the run's exit code from these strings."""
-    monkeypatch.setattr(ctp.subprocess, "Popen",
-                        FakeRunner(pipeline_rc=pipeline_rc, validate_rc=validate_rc))
+    monkeypatch.setattr(
+        ctp.subprocess, "Popen", FakeRunner(pipeline_rc=pipeline_rc, validate_rc=validate_rc)
+    )
     assert ctp.run_project(jq) == expected
 
 
 def test_run_project_defers_below_the_disk_floor(monkeypatch, runner, jq):
     """Deferring beats filling the disk: a truncated workdir would validate as
     FAILED and waste the tokenizer time already spent."""
-    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10 ** 9)
+    monkeypatch.setattr(ctp, "DISK_FLOOR_GB", 10**9)
     assert ctp.run_project(jq) == "deferred"
     assert runner.calls == []
 
@@ -777,22 +855,29 @@ def test_a_done_project_writes_the_stamp_that_makes_the_next_run_skip(sandbox, r
 # devenv capture
 # --------------------------------------------------------------------------- #
 
+
 def test_capture_devenv_env_returns_the_parsed_environment(monkeypatch):
     """Captured once and shared by every worker: concurrent `devenv shell`
     invocations race on the GC root in CREGIT."""
+
     def fake_run(args, **kwargs):
         assert args[0] == "bash"
         assert kwargs["capture_output"] and kwargs["text"]
-        return SimpleNamespace(returncode=0, stdout='noise\n{"PATH": "/nix/bin"}\n',
-                               stderr="")
+        return SimpleNamespace(returncode=0, stdout='noise\n{"PATH": "/nix/bin"}\n', stderr="")
+
     monkeypatch.setattr(ctp.subprocess, "run", fake_run)
     assert ctp.capture_devenv_env() == {"PATH": "/nix/bin"}
 
 
 def test_capture_devenv_env_exits_when_devenv_fails(monkeypatch):
     """Without the environment nothing can run, so fail loudly and early."""
-    monkeypatch.setattr(ctp.subprocess, "run", lambda *a, **k: SimpleNamespace(
-        returncode=1, stdout="", stderr="error: not an absolute path: \"nix\""))
+    monkeypatch.setattr(
+        ctp.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=1, stdout="", stderr='error: not an absolute path: "nix"'
+        ),
+    )
     with pytest.raises(SystemExit) as exc:
         ctp.capture_devenv_env()
     assert "devenv environment capture failed" in str(exc.value)
@@ -802,17 +887,33 @@ def test_capture_devenv_env_exits_when_devenv_fails(monkeypatch):
 # cmd_run
 # --------------------------------------------------------------------------- #
 
+
 def run_args(**over):
     """A complete `ctp run` Namespace. allow_empty_provenance is True here, unlike
     the CLI, so tests of other flags do not hit the provenance refusal; the
     guard's own tests pass False."""
-    base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
-                skip_html=False, drop_memo=False, memo_dir="",
-                shards=0, shard_classes="L",
-                from_step=1, gc=None, blame_jobs=0,
-                memory_limit=None, duckdb_threads=0, project_meta="",
-                allow_empty_provenance=True,
-                mask="", mask_widened=False, retokenize="", reblame=False)
+    base = dict(
+        manifest="manifest.tsv",
+        only=None,
+        jobs=1,
+        retries=0,
+        skip_html=False,
+        drop_memo=False,
+        memo_dir="",
+        shards=0,
+        shard_classes="L",
+        from_step=1,
+        gc=None,
+        blame_jobs=0,
+        memory_limit=None,
+        duckdb_threads=0,
+        project_meta="",
+        allow_empty_provenance=True,
+        mask="",
+        mask_widened=False,
+        retokenize="",
+        reblame=False,
+    )
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -820,6 +921,7 @@ def run_args(**over):
 # --------------------------------------------------------------------------- #
 # refusals before the run starts
 # --------------------------------------------------------------------------- #
+
 
 def memos(root: Path) -> str:
     (root / "memos").mkdir()
@@ -839,55 +941,124 @@ def lacks(usage_text: str) -> str:
 # override is given the sandbox root, for options that need a real path.
 REFUSALS = [
     pytest.param(lacks("--mask"), {}, ["does not accept: --mask"], id="runner-lacks-mask"),
-    pytest.param(lacks("--gc MODE"), dict(gc="none"), ["--gc is not implemented"],
-                 id="runner-lacks-gc"),
-    pytest.param(lacks("--skip-html"), dict(skip_html=True),
-                 ["--skip-html is not implemented"], id="runner-lacks-skip-html"),
-    pytest.param(lacks("--memo-dir DIR"), dict(memo_dir=memos), ["--memo-dir"],
-                 id="runner-lacks-memo-dir"),
-    pytest.param(lacks("--shards N"), dict(shards=6), ["--shards needs"],
-                 id="runner-lacks-shards"),
-    pytest.param(lacks("--jobs N"), dict(blame_jobs=8), ["--blame-jobs needs --jobs"],
-                 id="runner-lacks-jobs"),
-    pytest.param(lacks("--memory-limit SIZE"), dict(memory_limit="3GB"),
-                 ["--memory-limit is not implemented"], id="runner-lacks-memory-limit"),
-    pytest.param(lacks("--duckdb-threads N"), dict(duckdb_threads=2),
-                 ["--duckdb-threads is not implemented"], id="runner-lacks-duckdb-threads"),
-    pytest.param(lacks("--project-key NAME"), dict(project_meta=sidecar), ["--project-key"],
-                 id="runner-lacks-project-key"),
-    pytest.param(lacks("--mask-widened"), dict(mask_widened=True, from_step=2),
-                 ["--mask-widened is not implemented"], id="runner-lacks-mask-widened"),
-    pytest.param(lacks("--retokenize EXTS"), dict(retokenize="rs", from_step=2),
-                 ["--retokenize is not implemented"], id="runner-lacks-retokenize"),
-    pytest.param(None, dict(from_step=0), ["--from-step must be 1 or greater"],
-                 id="from-step-zero"),
-    pytest.param(None, dict(memo_dir=memos, drop_memo=True), ["contradict"],
-                 id="memo-dir-with-drop-memo"),
-    pytest.param(None, dict(memo_dir=lambda root: str(root / "absent")),
-                 ["not an existing directory"], id="memo-dir-absent"),
-    pytest.param(None, dict(blame_jobs=-1), ["--blame-jobs cannot be negative"],
-                 id="negative-blame-jobs"),
-    pytest.param(None, dict(duckdb_threads=-1), ["--duckdb-threads cannot be negative"],
-                 id="negative-duckdb-threads"),
+    pytest.param(
+        lacks("--gc MODE"), dict(gc="none"), ["--gc is not implemented"], id="runner-lacks-gc"
+    ),
+    pytest.param(
+        lacks("--skip-html"),
+        dict(skip_html=True),
+        ["--skip-html is not implemented"],
+        id="runner-lacks-skip-html",
+    ),
+    pytest.param(
+        lacks("--memo-dir DIR"), dict(memo_dir=memos), ["--memo-dir"], id="runner-lacks-memo-dir"
+    ),
+    pytest.param(lacks("--shards N"), dict(shards=6), ["--shards needs"], id="runner-lacks-shards"),
+    pytest.param(
+        lacks("--jobs N"), dict(blame_jobs=8), ["--blame-jobs needs --jobs"], id="runner-lacks-jobs"
+    ),
+    pytest.param(
+        lacks("--memory-limit SIZE"),
+        dict(memory_limit="3GB"),
+        ["--memory-limit is not implemented"],
+        id="runner-lacks-memory-limit",
+    ),
+    pytest.param(
+        lacks("--duckdb-threads N"),
+        dict(duckdb_threads=2),
+        ["--duckdb-threads is not implemented"],
+        id="runner-lacks-duckdb-threads",
+    ),
+    pytest.param(
+        lacks("--project-key NAME"),
+        dict(project_meta=sidecar),
+        ["--project-key"],
+        id="runner-lacks-project-key",
+    ),
+    pytest.param(
+        lacks("--mask-widened"),
+        dict(mask_widened=True, from_step=2),
+        ["--mask-widened is not implemented"],
+        id="runner-lacks-mask-widened",
+    ),
+    pytest.param(
+        lacks("--retokenize EXTS"),
+        dict(retokenize="rs", from_step=2),
+        ["--retokenize is not implemented"],
+        id="runner-lacks-retokenize",
+    ),
+    pytest.param(
+        None, dict(from_step=0), ["--from-step must be 1 or greater"], id="from-step-zero"
+    ),
+    pytest.param(
+        None, dict(memo_dir=memos, drop_memo=True), ["contradict"], id="memo-dir-with-drop-memo"
+    ),
+    pytest.param(
+        None,
+        dict(memo_dir=lambda root: str(root / "absent")),
+        ["not an existing directory"],
+        id="memo-dir-absent",
+    ),
+    pytest.param(
+        None, dict(blame_jobs=-1), ["--blame-jobs cannot be negative"], id="negative-blame-jobs"
+    ),
+    pytest.param(
+        None,
+        dict(duckdb_threads=-1),
+        ["--duckdb-threads cannot be negative"],
+        id="negative-duckdb-threads",
+    ),
     # A percentage measures total RAM, and only the free part is usable.
-    pytest.param(None, dict(memory_limit="80%"), ["--memory-limit", "not a percentage"],
-                 id="memory-limit-percentage"),
-    pytest.param(None, dict(project_meta=lambda root: str(root / "absent.json")),
-                 ["does not exist", "validate_schema.py"], id="sidecar-absent"),
+    pytest.param(
+        None,
+        dict(memory_limit="80%"),
+        ["--memory-limit", "not a percentage"],
+        id="memory-limit-percentage",
+    ),
+    pytest.param(
+        None,
+        dict(project_meta=lambda root: str(root / "absent.json")),
+        ["does not exist", "validate_schema.py"],
+        id="sidecar-absent",
+    ),
     # Step 1 deletes the blob map that both flags work on.
-    pytest.param(None, dict(mask_widened=True, from_step=1), ["--from-step 2"],
-                 id="mask-widened-at-step-1"),
-    pytest.param(None, dict(mask_widened=True, from_step=2, shards=4),
-                 ["no recorded mask to widen"], id="mask-widened-with-shards"),
+    pytest.param(
+        None, dict(mask_widened=True, from_step=1), ["--from-step 2"], id="mask-widened-at-step-1"
+    ),
+    pytest.param(
+        None,
+        dict(mask_widened=True, from_step=2, shards=4),
+        ["no recorded mask to widen"],
+        id="mask-widened-with-shards",
+    ),
     # Step 3 and later skip step 2, so the tokens would never be remade.
-    *(pytest.param(None, dict(retokenize="rs", from_step=step), ["--from-step 2 exactly"],
-                   id=f"retokenize-at-step-{step}") for step in (1, 3, 7)),
-    pytest.param(None, dict(retokenize="rs", from_step=2, shards=4),
-                 ["no cached tokenizations to invalidate"], id="retokenize-with-shards"),
-    pytest.param(None, dict(retokenize="rs", mask_widened=True, from_step=2),
-                 ["cannot be used in the same run"], id="retokenize-with-mask-widened"),
-    pytest.param(None, dict(allow_empty_provenance=False, from_step=10),
-                 ["reaches step 10"], id="provenance-gap-at-step-10"),
+    *(
+        pytest.param(
+            None,
+            dict(retokenize="rs", from_step=step),
+            ["--from-step 2 exactly"],
+            id=f"retokenize-at-step-{step}",
+        )
+        for step in (1, 3, 7)
+    ),
+    pytest.param(
+        None,
+        dict(retokenize="rs", from_step=2, shards=4),
+        ["no cached tokenizations to invalidate"],
+        id="retokenize-with-shards",
+    ),
+    pytest.param(
+        None,
+        dict(retokenize="rs", mask_widened=True, from_step=2),
+        ["cannot be used in the same run"],
+        id="retokenize-with-mask-widened",
+    ),
+    pytest.param(
+        None,
+        dict(allow_empty_provenance=False, from_step=10),
+        ["reaches step 10"],
+        id="provenance-gap-at-step-10",
+    ),
 ]
 
 
@@ -907,46 +1078,71 @@ def accepted(over, opts=None, said=(), unsaid=(), ram=None, *, id):
     return pytest.param(over, opts or {}, said, unsaid, ram, id=id)
 
 
-GIB = 1024 ** 3
+GIB = 1024**3
 
 # run_args overrides, the _OPTS they must produce, and what the log must and
 # must not say. ram patches available_bytes for the memory budget check.
 ACCEPTED = [
     accepted(dict(gc="plain"), dict(gc="plain"), id="gc"),
     accepted(dict(skip_html=True), dict(skip_html=True), id="skip-html"),
-    accepted(dict(memo_dir=memos), dict(memo_dir=lambda root: str(root / "memos")),
-             id="memo-dir"),
+    accepted(dict(memo_dir=memos), dict(memo_dir=lambda root: str(root / "memos")), id="memo-dir"),
     accepted(dict(blame_jobs=12), dict(blame_jobs=12), id="blame-jobs"),
-    accepted(dict(memory_limit="3GB", duckdb_threads=2, jobs=2),
-             dict(memory_limit="3GB", duckdb_threads=2), unsaid=["memory budget"],
-             ram=32 * GIB, id="memory-flags-that-fit"),
-    accepted(dict(memory_limit="8GB", jobs=2), said=["WARNING: memory budget"],
-             ram=6 * GIB, id="memory-budget-that-does-not-fit"),
-    accepted(dict(project_meta=sidecar, allow_empty_provenance=False),
-             dict(project_meta=lambda root: str(root / "project_meta.json")),
-             unsaid=["--allow-empty-provenance"], id="sidecar-needs-no-escape-hatch"),
-    accepted(dict(shards=2, shard_classes=" L , M ,"), dict(shard_classes=("L", "M")),
-             id="shard-classes-parsed"),
-    accepted(dict(shards=6, shard_classes="L,M"), said=["sharding 6-way", "L, M"],
-             id="shard-plan-announced"),
+    accepted(
+        dict(memory_limit="3GB", duckdb_threads=2, jobs=2),
+        dict(memory_limit="3GB", duckdb_threads=2),
+        unsaid=["memory budget"],
+        ram=32 * GIB,
+        id="memory-flags-that-fit",
+    ),
+    accepted(
+        dict(memory_limit="8GB", jobs=2),
+        said=["WARNING: memory budget"],
+        ram=6 * GIB,
+        id="memory-budget-that-does-not-fit",
+    ),
+    accepted(
+        dict(project_meta=sidecar, allow_empty_provenance=False),
+        dict(project_meta=lambda root: str(root / "project_meta.json")),
+        unsaid=["--allow-empty-provenance"],
+        id="sidecar-needs-no-escape-hatch",
+    ),
+    accepted(
+        dict(shards=2, shard_classes=" L , M ,"),
+        dict(shard_classes=("L", "M")),
+        id="shard-classes-parsed",
+    ),
+    accepted(
+        dict(shards=6, shard_classes="L,M"),
+        said=["sharding 6-way", "L, M"],
+        id="shard-plan-announced",
+    ),
     accepted(dict(from_step=3), said=["resuming at step 3"], id="resume-announced"),
-    accepted(dict(mask_widened=True, from_step=2),
-             said=["REUSE", "identity rows are discarded", "raw source"],
-             id="mask-widened-announced"),
+    accepted(
+        dict(mask_widened=True, from_step=2),
+        said=["REUSE", "identity rows are discarded", "raw source"],
+        id="mask-widened-announced",
+    ),
     accepted(dict(from_step=2), unsaid=["--mask-widened"], id="no-mask-widened-no-notice"),
     # The sidecar records the manifest's mask, so an override makes it wrong.
-    accepted(dict(mask=r"\.rs$"),
-             said=["--mask overrides the manifest", r"\.rs$", "will not match"],
-             id="mask-override-warned"),
-    accepted(dict(retokenize="rs", from_step=2), said=["DISCARD", "rs"],
-             id="retokenize-announced"),
+    accepted(
+        dict(mask=r"\.rs$"),
+        said=["--mask overrides the manifest", r"\.rs$", "will not match"],
+        id="mask-override-warned",
+    ),
+    accepted(dict(retokenize="rs", from_step=2), said=["DISCARD", "rs"], id="retokenize-announced"),
     accepted(dict(retokenize="   ", from_step=1), id="blank-retokenize-is-absent"),
-    accepted(dict(allow_empty_provenance=True), dict(project_meta=""),
-             said=["WARNING: --allow-empty-provenance", "--project-meta absent",
-                   "stratum"], id="escape-hatch-itemised"),
+    accepted(
+        dict(allow_empty_provenance=True),
+        dict(project_meta=""),
+        said=["WARNING: --allow-empty-provenance", "--project-meta absent", "stratum"],
+        id="escape-hatch-itemised",
+    ),
     # Step 10 is the last step, so --from-step 11 can publish no Parquet.
-    accepted(dict(allow_empty_provenance=False, from_step=11), unsaid=["refusing"],
-             id="past-step-10-not-gated"),
+    accepted(
+        dict(allow_empty_provenance=False, from_step=11),
+        unsaid=["refusing"],
+        id="past-step-10-not-gated",
+    ),
 ]
 
 
@@ -1006,12 +1202,14 @@ def test_cmd_run_starts_no_retry_pass_once_every_project_is_done(ready, capsys):
     assert "retry pass" not in capsys.readouterr().out
 
 
-def test_cmd_run_retries_only_the_projects_that_are_not_done(
-        sandbox, monkeypatch, capsys):
+def test_cmd_run_retries_only_the_projects_that_are_not_done(sandbox, monkeypatch, capsys):
     """A retry pass must skip the finished projects, or a long corpus run
     repeats work it already paid for."""
-    write_manifest(sandbox.root, VALID_ROW,
-                   "zstd\thttps://github.com/facebook/zstd.git\tenterprise\t\\.[ch]$\tS")
+    write_manifest(
+        sandbox.root,
+        VALID_ROW,
+        "zstd\thttps://github.com/facebook/zstd.git\tenterprise\t\\.[ch]$\tS",
+    )
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
 
     seen: list[str] = []
@@ -1032,6 +1230,7 @@ def test_cmd_run_retries_only_the_projects_that_are_not_done(
 # heartbeat
 # --------------------------------------------------------------------------- #
 
+
 def beat_once(results: dict) -> str:
     stop = threading.Event()
     lines: list[str] = []
@@ -1045,8 +1244,9 @@ def beat_once(results: dict) -> str:
 
 def test_heartbeat_reports_running_projects_done_failed_and_disk():
     ctp._live["jq"] = ("pipeline", time.time())
-    line = beat_once({"jq": ctp.RunOutcome.DONE, "zstd": ctp.RunOutcome.FAILED,
-                      "tmux": ctp.RunOutcome.SKIPPED})
+    line = beat_once(
+        {"jq": ctp.RunOutcome.DONE, "zstd": ctp.RunOutcome.FAILED, "tmux": ctp.RunOutcome.SKIPPED}
+    )
     assert "jq(pipeline" in line
     assert "done 2 failed 1" in line
     assert "G free" in line
@@ -1069,6 +1269,7 @@ def test_heartbeat_returns_immediately_when_already_stopped():
 # cmd_status
 # --------------------------------------------------------------------------- #
 
+
 def test_cmd_status_classifies_every_project_state(sandbox, capsys, held_lock):
     """One screen, four states. A wrong state sends an operator to re-run a
     project that is already running."""
@@ -1077,7 +1278,8 @@ def test_cmd_status_classifies_every_project_state(sandbox, capsys, held_lock):
         "done\thttps://d.git\tcommunity\t\\.[ch]$\tS",
         "running\thttps://r.git\tcommunity\t\\.[ch]$\tM",
         "failed\thttps://f.git\tenterprise\t\\.[ch]$\tL",
-        "queued\thttps://q.git\tcommunity\t\\.[ch]$\tS")
+        "queued\thttps://q.git\tcommunity\t\\.[ch]$\tS",
+    )
     (sandbox.out / "done").mkdir()
     (sandbox.out / "done" / "done.validated").write_text("rows=1\nbytes=2\n")
     (sandbox.out / "failed").mkdir()
@@ -1089,8 +1291,7 @@ def test_cmd_status_classifies_every_project_state(sandbox, capsys, held_lock):
 
     out = capsys.readouterr().out
     states = {line.split()[0]: line.split()[2] for line in out.splitlines()[1:5]}
-    assert states == dict(done="DONE", running="RUNNING",
-                          failed="FAILED", queued="QUEUED")
+    assert states == dict(done="DONE", running="RUNNING", failed="FAILED", queued="QUEUED")
     assert "progress: 1/4 validated" in out
     assert "validate(3s,rc=0)" in out
 
@@ -1113,6 +1314,7 @@ def test_cmd_status_works_without_a_metrics_file(sandbox, capsys):
 # cmd_db and main
 # --------------------------------------------------------------------------- #
 
+
 def test_cmd_db_runs_consolidate_inside_the_captured_environment(sandbox, monkeypatch):
     """consolidate.py needs duckdb, which only the devenv environment provides."""
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/nix/bin"})
@@ -1129,11 +1331,14 @@ def test_cmd_db_runs_consolidate_inside_the_captured_environment(sandbox, monkey
     assert seen["env"] == {"PATH": "/nix/bin"}
 
 
-@pytest.mark.parametrize("argv, target", [
-    pytest.param(["ctp.py", "run"], "cmd_run", id="run"),
-    pytest.param(["ctp.py", "status"], "cmd_status", id="status"),
-    pytest.param(["ctp.py", "db"], "cmd_db", id="db"),
-])
+@pytest.mark.parametrize(
+    "argv, target",
+    [
+        pytest.param(["ctp.py", "run"], "cmd_run", id="run"),
+        pytest.param(["ctp.py", "status"], "cmd_status", id="status"),
+        pytest.param(["ctp.py", "db"], "cmd_db", id="db"),
+    ],
+)
 def test_main_dispatches_each_subcommand(monkeypatch, argv, target):
     """A broken dispatch table makes the CLI silently do the wrong thing."""
     called = []
@@ -1164,6 +1369,7 @@ def test_now_iso_is_utc_with_second_resolution(clock):
 # --------------------------------------------------------------------------- #
 # resource sampling
 # --------------------------------------------------------------------------- #
+
 
 def test_tree_usage_sums_descendants_not_just_the_direct_child(sandbox):
     """The pipeline is a shell that spawns perl, git and srcml. Reporting only the
@@ -1236,11 +1442,10 @@ def test_peaks_are_maxima_and_disk_is_a_low_water_mark(sandbox, jq, monkeypatch)
     sampler = ctp.ResourceSampler(jq, "pipeline", interval=0.01)
     sampler.pid = os.getpid()
 
-    sizes = iter([(500, 3), (200, 1)])          # second sample is smaller
+    sizes = iter([(500, 3), (200, 1)])  # second sample is smaller
     monkeypatch.setattr(ctp, "tree_usage", lambda *a, **k: next(sizes))
-    frees = iter([900 * 2**30, 100 * 2**30])    # disk shrinks
-    monkeypatch.setattr(ctp.shutil, "disk_usage",
-                        lambda p: SimpleNamespace(free=next(frees)))
+    frees = iter([900 * 2**30, 100 * 2**30])  # disk shrinks
+    monkeypatch.setattr(ctp.shutil, "disk_usage", lambda p: SimpleNamespace(free=next(frees)))
 
     sampler._sample(0, 0)
     sampler._sample(0, 0)
@@ -1266,19 +1471,19 @@ def test_proc_scan_skips_a_process_that_vanished_mid_scan(sandbox, tmp_path):
     skipped, not raise inside the sampler thread."""
     fake_proc = tmp_path / "proc"
     fake_proc.mkdir()
-    (fake_proc / "self").mkdir()                     # non-numeric, ignored
-    (fake_proc / "7").mkdir()                        # numeric, but no stat file
+    (fake_proc / "self").mkdir()  # non-numeric, ignored
+    (fake_proc / "7").mkdir()  # numeric, but no stat file
     good = fake_proc / "9"
     good.mkdir()
     # Real /proc/<pid>/stat, built by field position so the offsets are visible.
     # A comm of "(git log --oneline)" holds spaces and parentheses, which is why
     # the parser splits after the LAST ')' instead of on whitespace.
     stat = ["0"] * 52
-    stat[0] = "9"                       # field 1  pid
-    stat[1] = "(git log --oneline)"     # field 2  comm, spaces and parens
-    stat[2] = "S"                       # field 3  state
-    stat[3] = "1234"                    # field 4  ppid
-    stat[23] = "777"                    # field 24 rss, in pages
+    stat[0] = "9"  # field 1  pid
+    stat[1] = "(git log --oneline)"  # field 2  comm, spaces and parens
+    stat[2] = "S"  # field 3  state
+    stat[3] = "1234"  # field 4  ppid
+    stat[23] = "777"  # field 24 rss, in pages
     (good / "stat").write_text(" ".join(stat) + "\n")
 
     table = ctp._proc_ppid_rss(fake_proc)
@@ -1301,6 +1506,7 @@ def test_proc_scan_agrees_with_real_proc_for_our_own_process(sandbox):
 # sharding
 # --------------------------------------------------------------------------- #
 
+
 def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
     """The two conditions are independent, so both are checked here rather than
     inferred from run_project's argv."""
@@ -1320,24 +1526,28 @@ def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
 # step 10 memory budget
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("text,want", [
-    ("1B", 1),
-    ("2K", 2048),
-    ("2KB", 2048),
-    ("2KiB", 2048),
-    ("3MB", 3 * 1024 ** 2),
-    ("3M", 3 * 1024 ** 2),
-    ("3MiB", 3 * 1024 ** 2),
-    ("8GB", 8 * 1024 ** 3),
-    ("8G", 8 * 1024 ** 3),
-    ("8GiB", 8 * 1024 ** 3),
-    ("1T", 1024 ** 4),
-    ("1TB", 1024 ** 4),
-    ("1TiB", 1024 ** 4),
-    ("1.5 GiB", int(1.5 * 1024 ** 3)),
-    ("  3GB  ", 3 * 1024 ** 3),
-    ("3gb", 3 * 1024 ** 3),
-])
+
+@pytest.mark.parametrize(
+    "text,want",
+    [
+        ("1B", 1),
+        ("2K", 2048),
+        ("2KB", 2048),
+        ("2KiB", 2048),
+        ("3MB", 3 * 1024**2),
+        ("3M", 3 * 1024**2),
+        ("3MiB", 3 * 1024**2),
+        ("8GB", 8 * 1024**3),
+        ("8G", 8 * 1024**3),
+        ("8GiB", 8 * 1024**3),
+        ("1T", 1024**4),
+        ("1TB", 1024**4),
+        ("1TiB", 1024**4),
+        ("1.5 GiB", int(1.5 * 1024**3)),
+        ("  3GB  ", 3 * 1024**3),
+        ("3gb", 3 * 1024**3),
+    ],
+)
 def test_size_to_bytes_reads_every_unit_duckdb_accepts(text, want):
     """The budget arithmetic is only as good as the parse, and DuckDB accepts
     all of these spellings."""
@@ -1359,15 +1569,22 @@ def test_size_to_bytes_refuses_anything_it_cannot_read(bad):
     assert "cannot read" in str(exc.value)
 
 
-@pytest.mark.parametrize("meminfo, want", [
-    # MemAvailable, not MemFree: the reclaimable page cache is usable.
-    pytest.param("MemTotal:       31000000 kB\nMemFree:          900000 kB\n"
-                 "MemAvailable:    5500000 kB\n", 5500000 * 1024, id="mem-available"),
-    pytest.param("MemTotal:       31000000 kB\n", None, id="key-absent"),
-    pytest.param("MemAvailable:    not-a-number kB\n", None, id="unparsable"),
-    pytest.param("MemAvailable:\n", None, id="truncated"),
-    pytest.param(None, None, id="no-proc"),
-])
+@pytest.mark.parametrize(
+    "meminfo, want",
+    [
+        # MemAvailable, not MemFree: the reclaimable page cache is usable.
+        pytest.param(
+            "MemTotal:       31000000 kB\nMemFree:          900000 kB\n"
+            "MemAvailable:    5500000 kB\n",
+            5500000 * 1024,
+            id="mem-available",
+        ),
+        pytest.param("MemTotal:       31000000 kB\n", None, id="key-absent"),
+        pytest.param("MemAvailable:    not-a-number kB\n", None, id="unparsable"),
+        pytest.param("MemAvailable:\n", None, id="truncated"),
+        pytest.param(None, None, id="no-proc"),
+    ],
+)
 def test_available_bytes_reads_mem_available_or_says_none(tmp_path, monkeypatch, meminfo, want):
     """The budget warning is advisory, so an odd /proc must not raise."""
     path = tmp_path / "meminfo"
@@ -1379,7 +1596,7 @@ def test_available_bytes_reads_mem_available_or_says_none(tmp_path, monkeypatch,
 
 def test_memory_budget_warning_names_the_shortfall(monkeypatch):
     """2 x 8GB at the 1.4 settle ratio against 6 GiB free."""
-    monkeypatch.setattr(ctp, "available_bytes", lambda: 6 * 1024 ** 3)
+    monkeypatch.setattr(ctp, "available_bytes", lambda: 6 * 1024**3)
     warning = ctp.memory_budget_warning("8GB", 2)
     assert warning is not None
     assert "2 concurrent x 8GB" in warning
@@ -1387,12 +1604,15 @@ def test_memory_budget_warning_names_the_shortfall(monkeypatch):
     assert "6.0 GiB" in warning
 
 
-@pytest.mark.parametrize("free, limit, jobs, warns", [
-    pytest.param(8 * GIB, "3GB", 1, False, id="1.4x1x3GB-fits-8GiB"),
-    pytest.param(None, "8GB", 4, False, id="ram-unknown"),
-    pytest.param(10 * GIB, "3GB", 2, False, id="1.4x2x3GB-fits-10GiB"),
-    pytest.param(10 * GIB, "3GB", 3, True, id="1.4x3x3GB-exceeds-10GiB"),
-])
+@pytest.mark.parametrize(
+    "free, limit, jobs, warns",
+    [
+        pytest.param(8 * GIB, "3GB", 1, False, id="1.4x1x3GB-fits-8GiB"),
+        pytest.param(None, "8GB", 4, False, id="ram-unknown"),
+        pytest.param(10 * GIB, "3GB", 2, False, id="1.4x2x3GB-fits-10GiB"),
+        pytest.param(10 * GIB, "3GB", 3, True, id="1.4x3x3GB-exceeds-10GiB"),
+    ],
+)
 def test_memory_budget_warning_multiplies_by_jobs(monkeypatch, free, limit, jobs, warns):
     monkeypatch.setattr(ctp, "available_bytes", lambda: free)
     assert (ctp.memory_budget_warning(limit, jobs) is not None) is warns
@@ -1402,8 +1622,8 @@ def test_memory_budget_warning_multiplies_by_jobs(monkeypatch, free, limit, jobs
 # --project-meta
 # --------------------------------------------------------------------------- #
 
-def test_a_relative_sidecar_path_is_made_absolute(
-        sandbox, monkeypatch, runner_script):
+
+def test_a_relative_sidecar_path_is_made_absolute(sandbox, monkeypatch, runner_script):
     """The runner starts with cwd=CREGIT, but the path is typed relative to
     this repository."""
     runner_script()
@@ -1414,8 +1634,9 @@ def test_a_relative_sidecar_path_is_made_absolute(
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: ctp.RunOutcome.DONE)
 
-    assert ctp.cmd_run(run_args(project_meta="project_meta.json",
-                                allow_empty_provenance=False)) == 0
+    assert (
+        ctp.cmd_run(run_args(project_meta="project_meta.json", allow_empty_provenance=False)) == 0
+    )
     assert Path(ctp._OPTS["project_meta"]).is_absolute()
     assert Path(ctp._OPTS["project_meta"]) == meta.resolve()
 
@@ -1424,14 +1645,22 @@ def test_a_relative_sidecar_path_is_made_absolute(
 # the provenance guard
 # --------------------------------------------------------------------------- #
 
+
 def test_a_run_without_the_sidecar_is_refused_and_names_the_columns(must_not_start):
-    """"provenance" alone does not say what is blank, and a refusal that does not
+    """ "provenance" alone does not say what is blank, and a refusal that does not
     name its escape hatch sends the operator to read the source."""
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(allow_empty_provenance=False))
     message = str(exc.value)
-    for text in ("refusing this run", "--project-meta", "--allow-empty-provenance",
-                 "stratum", "history_cluster", "29", "validate.py passes it"):
+    for text in (
+        "refusing this run",
+        "--project-meta",
+        "--allow-empty-provenance",
+        "stratum",
+        "history_cluster",
+        "29",
+        "validate.py passes it",
+    ):
         assert text in message
     assert "firm" not in message
     assert not (must_not_start.root / "runs.log").exists()
@@ -1447,8 +1676,7 @@ def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
     assert seen["allow_empty_provenance"] is False
 
     seen.clear()
-    monkeypatch.setattr(ctp.sys, "argv",
-                        ["ctp.py", "run", "--allow-empty-provenance"])
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run", "--allow-empty-provenance"])
     assert ctp.main() == 0
     assert seen["allow_empty_provenance"] is True
 
@@ -1457,8 +1685,9 @@ def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start)
     """Left in a launcher script, the hatch would silence the guard on the next
     run that does omit a flag."""
     with pytest.raises(SystemExit) as exc:
-        ctp.cmd_run(run_args(allow_empty_provenance=True,
-                             project_meta=sidecar(must_not_start.root)))
+        ctp.cmd_run(
+            run_args(allow_empty_provenance=True, project_meta=sidecar(must_not_start.root))
+        )
     assert "nothing to allow" in str(exc.value)
     assert "wrapper" in str(exc.value)
 
@@ -1490,6 +1719,7 @@ def test_ctp_run_refuses_a_flag_it_does_not_own(monkeypatch, capsys, flag):
 # cmd_progress
 # --------------------------------------------------------------------------- #
 
+
 def progress_args(**over):
     base = dict(manifest="manifest.tsv", last=5)
     base.update(over)
@@ -1499,18 +1729,22 @@ def progress_args(**over):
 def write_metrics(tmp_path: Path, *rows: tuple) -> Path:
     path = tmp_path / "metrics.tsv"
     head = "iso_start\tproject\tclass\tphase\tduration_s\trc\tlog\n"
-    body = "".join(f"2026-09-15T00:00:00+00:00\t{n}\t{c}\t{ph}\t{d}\t{rc}\tlog\n"
-                   for n, c, ph, d, rc in rows)
+    body = "".join(
+        f"2026-09-15T00:00:00+00:00\t{n}\t{c}\t{ph}\t{d}\t{rc}\tlog\n" for n, c, ph, d, rc in rows
+    )
     path.write_text(head + body)
     return path
 
 
-@pytest.mark.parametrize("done,total,filled", [
-    (0, 10, 0),
-    (5, 10, 15),
-    (10, 10, 30),
-    (0, 0, 0),
-])
+@pytest.mark.parametrize(
+    "done,total,filled",
+    [
+        (0, 10, 0),
+        (5, 10, 15),
+        (10, 10, 30),
+        (0, 0, 0),
+    ],
+)
 def test_bar_fills_in_proportion(done, total, filled):
     """A bar is 30 cells wide whatever the numbers."""
     out = ctp.bar(done, total)
@@ -1520,18 +1754,22 @@ def test_bar_fills_in_proportion(done, total, filled):
 
 def test_finished_runs_keeps_only_successful_pipeline_rows(sandbox):
     """A validate row is not a run, and rc!=0 is not a finish."""
-    write_metrics(sandbox.root,
-                  ("a", "S", "pipeline", 100, 0),
-                  ("a", "S", "validate", 0, 0),
-                  ("b", "M", "pipeline", 200, 1),
-                  ("c", "M", "pipeline", 300, 0))
+    write_metrics(
+        sandbox.root,
+        ("a", "S", "pipeline", 100, 0),
+        ("a", "S", "validate", 0, 0),
+        ("b", "M", "pipeline", 200, 1),
+        ("c", "M", "pipeline", 300, 0),
+    )
     assert ctp.finished_runs() == [("a", "S", 100), ("c", "M", 300)]
 
 
 def test_progress_prints_a_bar_and_the_class_breakdown(sandbox, capsys):
-    write_manifest(sandbox.root,
-                   "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
-                   "b\thttps://x/b.git\tcommunity\t\\.c$\tM")
+    write_manifest(
+        sandbox.root,
+        "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
+        "b\thttps://x/b.git\tcommunity\t\\.c$\tM",
+    )
     (sandbox.out / "a").mkdir()
     (sandbox.out / "a" / "a.validated").write_text("rows=1\n")
 
@@ -1544,8 +1782,11 @@ def test_progress_prints_a_bar_and_the_class_breakdown(sandbox, capsys):
 
 
 def test_progress_lists_the_running_and_counts_the_failed(sandbox, capsys, held_lock):
-    write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
-                   "b\thttps://x/b.git\tcommunity\t\\.c$\tS")
+    write_manifest(
+        sandbox.root,
+        "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
+        "b\thttps://x/b.git\tcommunity\t\\.c$\tS",
+    )
     ctp.state_dir("b").mkdir(parents=True)
     with held_lock(ctp.lock_path("a")):
         assert ctp.cmd_progress(progress_args()) == 0
@@ -1556,10 +1797,12 @@ def test_progress_lists_the_running_and_counts_the_failed(sandbox, capsys, held_
 
 def test_progress_lists_the_last_finished_newest_first(sandbox, capsys):
     write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
-    write_metrics(sandbox.root,
-                  ("one", "S", "pipeline", 60, 0),
-                  ("two", "S", "pipeline", 120, 0),
-                  ("three", "S", "pipeline", 60, 0))
+    write_metrics(
+        sandbox.root,
+        ("one", "S", "pipeline", 60, 0),
+        ("two", "S", "pipeline", 120, 0),
+        ("three", "S", "pipeline", 60, 0),
+    )
     assert ctp.cmd_progress(progress_args(last=2)) == 0
     out = capsys.readouterr().out
     assert out.index("three") < out.index("two")
@@ -1580,6 +1823,7 @@ def test_progress_survives_an_empty_manifest(sandbox, capsys):
 # --------------------------------------------------------------------------- #
 # the universal mask and --mask
 # --------------------------------------------------------------------------- #
+
 
 def test_a_blank_file_filter_column_falls_back_to_the_universal_mask(tmp_path):
     """blobExec rejects an empty mask, so a blank column means the universal one."""
@@ -1604,10 +1848,10 @@ def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq)
     assert argv[argv.index("--mask") + 1] == r"\.java$"
 
 
-
 # --------------------------------------------------------------------------- #
 # pinned commit
 # --------------------------------------------------------------------------- #
+
 
 @pytest.fixture
 def pinned_jq(jq):
@@ -1635,15 +1879,22 @@ def test_manifest_rejects_seven_fields(tmp_path):
         ctp.read_manifest(write_manifest(tmp_path, f"{PINNED_ROW}\textra"), None)
 
 
-def test_a_pinned_project_clones_first_then_runs_from_the_staging_clone(
-        sandbox, runner, pinned_jq):
+def test_a_pinned_project_clones_first_then_runs_from_the_staging_clone(sandbox, runner, pinned_jq):
     assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
     assert [c.phase for c in runner.calls] == ["clone", "pipeline", "git", "firm", "validate"]
     staging = sandbox.out / ".ctp-pinned" / "jq.git"
     assert runner.argv("clone") == [
-        "python3", str(sandbox.root / "pin.py"),
-        "--url", "https://github.com/jqlang/jq.git", "--commit", PINNED_SHA,
-        "--dest", str(staging), "--result", str(ctp.pin_result_path("jq"))]
+        "python3",
+        str(sandbox.root / "pin.py"),
+        "--url",
+        "https://github.com/jqlang/jq.git",
+        "--commit",
+        PINNED_SHA,
+        "--dest",
+        str(staging),
+        "--result",
+        str(ctp.pin_result_path("jq")),
+    ]
     argv = runner.argv("pipeline")
     assert argv[argv.index("--repo-url") + 1] == str(staging)
     assert argv[argv.index("--commit-url") + 1] == "https://github.com/jqlang/jq/commit/"
@@ -1664,8 +1915,7 @@ def test_a_failed_clone_stops_before_the_pipeline(monkeypatch, pinned_jq):
     assert [c.phase for c in r.calls] == ["clone"]
 
 
-def test_a_checkout_that_differs_from_the_pin_fails_the_project(
-        monkeypatch, capsys, pinned_jq):
+def test_a_checkout_that_differs_from_the_pin_fails_the_project(monkeypatch, capsys, pinned_jq):
     r = FakeRunner(checkout=OTHER_SHA)
     monkeypatch.setattr(ctp.subprocess, "Popen", r)
     monkeypatch.setattr(ctp.subprocess, "run", r)
@@ -1703,11 +1953,14 @@ def test_git_head_is_empty_for_a_missing_repo(tmp_path):
     assert ctp.git_head(tmp_path / "absent") == ""
 
 
-@pytest.mark.parametrize("result, expected", [
-    (SimpleNamespace(returncode=0, stdout=f"{PINNED_SHA}\n"), PINNED_SHA),
-    (SimpleNamespace(returncode=0, stdout="not a sha\n"), ""),
-    (SimpleNamespace(returncode=128, stdout=f"{PINNED_SHA}\n"), ""),
-])
+@pytest.mark.parametrize(
+    "result, expected",
+    [
+        (SimpleNamespace(returncode=0, stdout=f"{PINNED_SHA}\n"), PINNED_SHA),
+        (SimpleNamespace(returncode=0, stdout="not a sha\n"), ""),
+        (SimpleNamespace(returncode=128, stdout=f"{PINNED_SHA}\n"), ""),
+    ],
+)
 def test_git_head_returns_only_a_full_sha(monkeypatch, tmp_path, result, expected):
     monkeypatch.setattr(ctp.subprocess, "run", lambda *a, **k: result)
     assert ctp.git_head(tmp_path) == expected
@@ -1716,6 +1969,7 @@ def test_git_head_returns_only_a_full_sha(monkeypatch, tmp_path, result, expecte
 def test_git_head_is_empty_when_git_cannot_start(monkeypatch, tmp_path):
     def boom(*a, **k):
         raise OSError("no git")
+
     monkeypatch.setattr(ctp.subprocess, "run", boom)
     assert ctp.git_head(tmp_path) == ""
 
@@ -1732,31 +1986,39 @@ def test_a_pinned_manifest_runs_on_a_runner_with_commit_url(ready):
     assert ctp.cmd_run(run_args()) == 0
 
 
-@pytest.mark.parametrize("url, expected", [
-    ("https://github.com/jqlang/jq.git", "https://github.com/jqlang/jq/commit/"),
-    ("https://gitlab.com/a/b/", "https://gitlab.com/a/b/commit/"),
-    ("https://example.org/r", "https://example.org/r/commit/"),
-])
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://github.com/jqlang/jq.git", "https://github.com/jqlang/jq/commit/"),
+        ("https://gitlab.com/a/b/", "https://gitlab.com/a/b/commit/"),
+        ("https://example.org/r", "https://example.org/r/commit/"),
+    ],
+)
 def test_commit_url_matches_the_runner_default(url, expected):
     assert ctp.commit_url(url) == expected
-
 
 
 # --------------------------------------------------------------------------- #
 # audit ledger
 # --------------------------------------------------------------------------- #
 
+
 def ledger_rows(sandbox, project=None, step=None, started=False):
     """The ledger's rows, without the started rows unless started=True."""
     rows = ledger.read(sandbox.root / "ledger.jsonl")
-    return [r for r in rows if (project is None or r.get("project") == project)
-            and (step is None or r.get("step") == step)
-            and (started or r.get("status") != "started")]
+    return [
+        r
+        for r in rows
+        if (project is None or r.get("project") == project)
+        and (step is None or r.get("step") == step)
+        and (started or r.get("status") != "started")
+    ]
 
 
 def test_an_internal_error_still_writes_the_final_row(monkeypatch, sandbox, runner, jq):
     def boom(ctx):
         raise KeyError("surprise")
+
     monkeypatch.setattr(ctp, "cleanup_step", boom)
     assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
     [final] = ledger_rows(sandbox, "jq", "project")
@@ -1767,8 +2029,15 @@ def test_each_step_writes_a_started_row_before_it_runs(sandbox, runner, jq):
     ctp.run_project(jq)
     rows = ledger_rows(sandbox, "jq", started=True)
     assert [(r["step"], r["status"]) for r in rows] == [
-        ("pipeline", "started"), ("pipeline", "ok"), ("firm", "started"), ("firm", "ok"),
-        ("validate", "started"), ("validate", "ok"), ("cleanup", "ok"), ("project", "done")]
+        ("pipeline", "started"),
+        ("pipeline", "ok"),
+        ("firm", "started"),
+        ("firm", "ok"),
+        ("validate", "started"),
+        ("validate", "ok"),
+        ("cleanup", "ok"),
+        ("project", "done"),
+    ]
     assert rows[0]["argv"][0] == "./run_pipeline_process.sh"
 
 
@@ -1802,8 +2071,12 @@ def test_the_validate_row_carries_the_parquet_hash_and_row_count(sandbox, runner
     path = fake_parquet(sandbox, data=data)
     ctp.run_project(jq)
     [row] = ledger_rows(sandbox, "jq", "validate")
-    assert row["parquet"] == {"path": str(path), "bytes": len(data),
-                              "sha256": hashlib.sha256(data).hexdigest(), "rows": 42}
+    assert row["parquet"] == {
+        "path": str(path),
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "rows": 42,
+    }
     assert ledger_rows(sandbox, "jq", "project")[0]["parquet"] == row["parquet"]
 
 
@@ -1811,7 +2084,13 @@ def test_a_pinned_project_records_the_pin_and_the_checkout(sandbox, runner, pinn
     ctp.run_project(pinned_jq)
     rows = ledger_rows(sandbox, "jq")
     assert [r["step"] for r in rows] == [
-        "clone", "pipeline", "firm", "validate", "cleanup", "project"]
+        "clone",
+        "pipeline",
+        "firm",
+        "validate",
+        "cleanup",
+        "project",
+    ]
     assert rows[0]["pin"]["checked_out_sha"] == PINNED_SHA
     assert all(r["pinned_sha"] == PINNED_SHA for r in rows)
     assert rows[0]["checked_out_sha"] == ""
@@ -1842,8 +2121,10 @@ def test_a_failed_pipeline_names_the_failed_step(monkeypatch, sandbox, jq):
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(pipeline_rc=2))
     assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
     rows = ledger_rows(sandbox, "jq")
-    assert [(r["step"], r["status"]) for r in rows] == [("pipeline", "failed"),
-                                                        ("project", "failed")]
+    assert [(r["step"], r["status"]) for r in rows] == [
+        ("pipeline", "failed"),
+        ("project", "failed"),
+    ]
     assert rows[0]["exit_code"] == 2 and rows[1]["failed_step"] == "pipeline"
 
 
@@ -1886,7 +2167,8 @@ def test_a_refused_prune_makes_the_project_done_dirty(monkeypatch, sandbox, runn
 
 
 def test_a_staging_clone_that_cannot_be_removed_makes_it_done_dirty(
-        monkeypatch, sandbox, runner, pinned_jq):
+    monkeypatch, sandbox, runner, pinned_jq
+):
     monkeypatch.setattr(ctp, "drop_pinned_clone", lambda name: ["permission denied"])
     assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE_DIRTY
 
@@ -1897,6 +2179,7 @@ def test_done_dirty_is_a_success_that_a_retry_pass_does_not_rerun(monkeypatch, j
     def fake(project):
         calls.append(project["name"])
         return ctp.RunOutcome.DONE_DIRTY
+
     monkeypatch.setattr(ctp, "run_project", fake)
     results = ctp.run_passes([jq], jobs=1, retries=2)
     assert results == {"jq": ctp.RunOutcome.DONE_DIRTY} and calls == ["jq"]
@@ -1916,6 +2199,7 @@ def test_the_ledger_is_append_only_across_runs(sandbox, runner, jq):
 def test_a_failed_ledger_write_stops_the_run_loudly(monkeypatch, capsys, sandbox, runner, jq):
     def boom(path, row):
         raise OSError("disk full")
+
     monkeypatch.setattr(ctp.ledger, "append", boom)
     ctp.run_project(jq)
     assert "disk full" in ctp._RUN["ledger_broken"]
@@ -1944,14 +2228,17 @@ def test_cmd_run_writes_run_start_and_run_end_rows(ready):
     flags = start["flags"]
     assert flags["cli"]["jobs"] == 2
     assert flags["manifest_path"] == str(ready.root / "manifest.tsv")
-    assert flags["manifest_sha256"] == hashlib.sha256(
-        (ready.root / "manifest.tsv").read_bytes()).hexdigest()
+    assert (
+        flags["manifest_sha256"]
+        == hashlib.sha256((ready.root / "manifest.tsv").read_bytes()).hexdigest()
+    )
     assert end["exit_code"] == 0 and end["outcomes"] == {"done": 1}
 
 
 def test_cmd_run_stops_when_the_ledger_cannot_be_written(ready, monkeypatch):
     def boom(path, row):
         raise OSError("read-only file system")
+
     monkeypatch.setattr(ctp.ledger, "append", boom)
     with pytest.raises(SystemExit, match="cannot write the ledger"):
         ctp.cmd_run(run_args())
@@ -1960,6 +2247,7 @@ def test_cmd_run_stops_when_the_ledger_cannot_be_written(ready, monkeypatch):
 def test_end_ledger_run_survives_a_failed_write(monkeypatch, capsys):
     def boom(path, row):
         raise OSError("gone")
+
     monkeypatch.setattr(ctp.ledger, "append", boom)
     ctp.end_ledger_run(0, time.time(), {})
     assert "cannot write the run-end row" in capsys.readouterr().out
@@ -1979,11 +2267,16 @@ def test_run_flags_records_every_option_and_the_manifest(sandbox):
 def test_tool_versions_names_every_tool(monkeypatch, sandbox):
     outputs = {
         ("git", "-C", str(sandbox.root), "rev-parse", "HEAD"): "a" * 40,
-        ("git", "-C", str(sandbox.root), "status", "--porcelain",
-         "--untracked-files=no"): " M ctp.py",
+        (
+            "git",
+            "-C",
+            str(sandbox.root),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ): " M ctp.py",
         ("git", "-C", str(sandbox.cregit), "rev-parse", "HEAD"): "b" * 40,
-        ("git", "-C", str(sandbox.cregit), "status", "--porcelain",
-         "--untracked-files=no"): "",
+        ("git", "-C", str(sandbox.cregit), "status", "--porcelain", "--untracked-files=no"): "",
         ("srcml", "--version"): "srcml: 1.1.0\nlibsrcml: 1.1.0",
         ("git", "--version"): "git version 2.55.0",
     }
@@ -2007,10 +2300,13 @@ def test_tool_versions_leaves_a_missing_tool_blank(monkeypatch, sandbox):
     assert tools["srcml_path"] == "" and tools["blobexec_jar_sha256"] == ""
 
 
-@pytest.mark.parametrize("result, expected", [
-    (SimpleNamespace(returncode=0, stdout=" out \n"), "out"),
-    (SimpleNamespace(returncode=1, stdout="out"), ""),
-])
+@pytest.mark.parametrize(
+    "result, expected",
+    [
+        (SimpleNamespace(returncode=0, stdout=" out \n"), "out"),
+        (SimpleNamespace(returncode=1, stdout="out"), ""),
+    ],
+)
 def test_capture_returns_stdout_only_on_success(monkeypatch, result, expected):
     monkeypatch.setattr(ctp.subprocess, "run", lambda *a, **k: result)
     assert ctp._capture(["x"]) == expected
@@ -2019,6 +2315,7 @@ def test_capture_returns_stdout_only_on_success(monkeypatch, result, expected):
 def test_capture_is_blank_when_the_tool_is_missing(monkeypatch):
     def boom(*a, **k):
         raise FileNotFoundError("srcml")
+
     monkeypatch.setattr(ctp.subprocess, "run", boom)
     assert ctp._capture(["srcml"]) == ""
 
@@ -2029,7 +2326,13 @@ def test_audit_prints_one_line_per_step(sandbox, runner, pinned_jq, capsys):
     assert ctp.cmd_audit(argparse.Namespace(project="jq", json=False)) == 0
     out = capsys.readouterr().out.splitlines()
     assert [line.split()[1] for line in out] == [
-        "clone", "pipeline", "firm", "validate", "cleanup", "project"]
+        "clone",
+        "pipeline",
+        "firm",
+        "validate",
+        "cleanup",
+        "project",
+    ]
     assert f"checked_out={PINNED_SHA}" in out[1]
     assert "state=done" in out[-1] and "removed=1 errors=0" in out[4]
 
@@ -2064,14 +2367,16 @@ def test_audit_of_an_unknown_project_fails(sandbox, capsys):
 
 
 def test_audit_line_shows_a_failure_and_its_detail():
-    line = ctp.audit_line({"step": "project", "state": "failed", "failed_step": "clone",
-                           "detail": "commit missing"})
+    line = ctp.audit_line(
+        {"step": "project", "state": "failed", "failed_step": "clone", "detail": "commit missing"}
+    )
     assert "state=failed" in line and "failed_step=clone" in line and "commit missing" in line
 
 
 # --------------------------------------------------------------------------- #
 # schema check and join
 # --------------------------------------------------------------------------- #
+
 
 @pytest.fixture
 def joining(sandbox):
@@ -2085,8 +2390,14 @@ def test_join_runs_the_schema_check_then_the_join(sandbox, runner, jq, joining):
     assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate", "schema", "join"]
     parquet = str(sandbox.out / "jq" / "jq-dataset.parquet")
     assert runner.argv("schema") == ["python3", str(sandbox.root / "validate_schema.py"), parquet]
-    assert runner.argv("join") == ["python3", str(sandbox.root / "consolidate.py"),
-                                   "--join", "jq", "--manifest", str(joining)]
+    assert runner.argv("join") == [
+        "python3",
+        str(sandbox.root / "consolidate.py"),
+        "--join",
+        "jq",
+        "--manifest",
+        str(joining),
+    ]
     steps = [r["step"] for r in ledger_rows(sandbox, "jq")]
     assert steps == ["pipeline", "firm", "validate", "schema", "join", "cleanup", "project"]
 
@@ -2108,8 +2419,7 @@ def test_without_join_no_schema_or_join_step_runs(runner, jq):
     assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate"]
 
 
-def test_a_validated_project_resumes_at_the_steps_after_validation(
-        sandbox, runner, jq, joining):
+def test_a_validated_project_resumes_at_the_steps_after_validation(sandbox, runner, jq, joining):
     fake_parquet(sandbox)
     (sandbox.out / "jq" / "jq.validated").write_text("rows=7\nbytes=9\n")
     assert ctp.run_project(jq, resume_validated=True) == ctp.RunOutcome.DONE
@@ -2144,16 +2454,24 @@ def test_run_options_carry_join_and_the_absolute_manifest(sandbox, runner_script
 def test_cmd_db_forwards_each_manifest_as_an_absolute_path(sandbox, monkeypatch):
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {})
     seen = {}
-    monkeypatch.setattr(ctp.subprocess, "run",
-                        lambda args, **k: seen.update(args=args) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(
+        ctp.subprocess,
+        "run",
+        lambda args, **k: seen.update(args=args) or SimpleNamespace(returncode=0),
+    )
     assert ctp.cmd_db(argparse.Namespace(manifest=["a.tsv", "b.tsv"])) == 0
-    assert seen["args"][2:] == ["--manifest", str(sandbox.root / "a.tsv"),
-                                "--manifest", str(sandbox.root / "b.tsv")]
+    assert seen["args"][2:] == [
+        "--manifest",
+        str(sandbox.root / "a.tsv"),
+        "--manifest",
+        str(sandbox.root / "b.tsv"),
+    ]
 
 
 # --------------------------------------------------------------------------- #
 # cleanup, --drop-html and --anonymize
 # --------------------------------------------------------------------------- #
+
 
 def runner_leftovers(sandbox, name="jq") -> Path:
     """The work files a real runner leaves beside the Parquet."""
@@ -2172,11 +2490,20 @@ def test_cleanup_removes_the_work_files_and_keeps_the_parquet(sandbox, runner, j
     ctp._OPTS.update(cleanup=True)
     assert ctp.run_project(jq) == ctp.RunOutcome.DONE
     assert sorted(p.name for p in workdir.iterdir()) == [
-        "html", "jq-dataset.parquet", "jq.validated"]
+        "html",
+        "jq-dataset.parquet",
+        "jq.validated",
+    ]
     [row] = ledger_rows(sandbox, "jq", "cleanup")
     assert row["status"] == "ok"
     assert set(row["cleanup"]["removed"]) == {
-        "jq-original.git", "jq-cregit", "memo", "blame", "jq-blobmap.db", "pipeline.log"}
+        "jq-original.git",
+        "jq-cregit",
+        "memo",
+        "blame",
+        "jq-blobmap.db",
+        "pipeline.log",
+    }
     assert row["cleanup"]["bytes_freed"] > 0
     assert sorted(row["cleanup"]["kept"]) == ["html", "jq-dataset.parquet", "jq.validated"]
     # The logs and the ledger live outside the workdir and stay.
@@ -2195,8 +2522,16 @@ def test_a_failed_cleanup_makes_the_project_done_dirty(monkeypatch, sandbox, run
     fake_parquet(sandbox)
     runner_leftovers(sandbox)
     ctp._OPTS.update(cleanup=True)
-    monkeypatch.setattr(ctp.retain, "clean_workdir", lambda name, drop_html: {
-        "removed": [], "kept": [], "errors": ["memo (Permission denied)"], "bytes_freed": 0})
+    monkeypatch.setattr(
+        ctp.retain,
+        "clean_workdir",
+        lambda name, drop_html: {
+            "removed": [],
+            "kept": [],
+            "errors": ["memo (Permission denied)"],
+            "bytes_freed": 0,
+        },
+    )
     assert ctp.run_project(jq) == ctp.RunOutcome.DONE_DIRTY
     [row] = ledger_rows(sandbox, "jq", "cleanup")
     assert row["status"] == "failed" and row["cleanup"]["errors"] == ["memo (Permission denied)"]
@@ -2219,13 +2554,24 @@ def anonymizer(sandbox):
 
 
 def test_anonymize_runs_after_the_schema_check_and_before_the_join(
-        sandbox, runner, jq, joining, anonymizer):
+    sandbox, runner, jq, joining, anonymizer
+):
     ctp.run_project(jq)
     assert [c.phase for c in runner.calls] == [
-        "pipeline", "firm", "validate", "schema", "anonymize", "join"]
+        "pipeline",
+        "firm",
+        "validate",
+        "schema",
+        "anonymize",
+        "join",
+    ]
     workdir = sandbox.out / "jq"
-    assert runner.argv("anonymize") == ["python3", str(anonymizer), str(workdir / "anon"),
-                                        str(workdir / "jq-dataset.parquet")]
+    assert runner.argv("anonymize") == [
+        "python3",
+        str(anonymizer),
+        str(workdir / "anon"),
+        str(workdir / "jq-dataset.parquet"),
+    ]
     [row] = ledger_rows(sandbox, "jq", "anonymize")
     [out] = row["anonymized"]
     assert out["path"] == str(workdir / "anon" / "jq-dataset.parquet")
@@ -2237,8 +2583,7 @@ def test_anonymize_without_join_still_runs(sandbox, runner, jq, anonymizer):
     assert [c.phase for c in runner.calls] == ["pipeline", "firm", "validate", "anonymize"]
 
 
-def test_an_anonymizer_that_writes_nothing_fails_the_project(
-        monkeypatch, sandbox, jq, anonymizer):
+def test_an_anonymizer_that_writes_nothing_fails_the_project(monkeypatch, sandbox, jq, anonymizer):
     monkeypatch.setattr(ctp.subprocess, "Popen", FakeRunner(anon_output=False))
     assert ctp.run_project(jq) == ctp.RunOutcome.FAILED
     [row] = ledger_rows(sandbox, "jq", "anonymize")
@@ -2278,6 +2623,7 @@ def test_drop_html_and_anonymize_are_off_by_default_on_the_cli(monkeypatch):
 # census: order, gates, stop, resume, retries
 # --------------------------------------------------------------------------- #
 
+
 def census_args(**over):
     base = vars(run_args())
     base.update(workers=1, min_free_mem_gb=0, disk_floor_gb=0, stop_file="", poll=0.01)
@@ -2287,8 +2633,9 @@ def census_args(**over):
 
 
 def manifest_rows(*names):
-    return [f"{n}\thttps://example.org/{n}.git\tcommunity\t\\.[ch]$\tS\t{PINNED_SHA}"
-            for n in names]
+    return [
+        f"{n}\thttps://example.org/{n}.git\tcommunity\t\\.[ch]$\tS\t{PINNED_SHA}" for n in names
+    ]
 
 
 def projects_of(sandbox, *names):
@@ -2323,6 +2670,7 @@ def fake_projects(monkeypatch):
         fake = FakeProjects(**kw)
         monkeypatch.setattr(ctp, "run_project", fake)
         return fake
+
     return install
 
 
@@ -2341,7 +2689,8 @@ def history_row(name, state, **extra):
 
 
 def test_census_runs_in_manifest_order_and_records_the_queue_position(
-        sandbox, fake_projects, no_gates):
+    sandbox, fake_projects, no_gates
+):
     fake = fake_projects()
     projects = projects_of(sandbox, "c", "a", "b")
     results = ctp.schedule(projects, 1, 0, sandbox.root / "STOP", poll=0.01)
@@ -2357,15 +2706,17 @@ def test_census_skips_done_projects_and_resumes_the_rest(sandbox, fake_projects,
     stamp(sandbox, "c")
     ledger.append(log, history_row("c", "done-dirty"))
     fake = fake_projects()
-    results = ctp.schedule(projects_of(sandbox, "a", "b", "c", "d"), 1, 1,
-                           sandbox.root / "STOP", poll=0.01)
+    results = ctp.schedule(
+        projects_of(sandbox, "a", "b", "c", "d"), 1, 1, sandbox.root / "STOP", poll=0.01
+    )
     assert results["a"] == ctp.RunOutcome.SKIPPED
     # b failed once: its second attempt. c validated but is dirty: only the later steps.
     assert fake.calls == [("b", 2, 4, 2, False), ("c", 3, 4, 2, True), ("d", 4, 4, 1, False)]
 
 
 def test_census_gives_up_after_the_retries_across_restarts(
-        sandbox, fake_projects, no_gates, capsys):
+    sandbox, fake_projects, no_gates, capsys
+):
     log = sandbox.root / "ledger.jsonl"
     for _ in range(2):
         ledger.append(log, history_row("a", "failed", failed_step="clone"))
@@ -2377,18 +2728,20 @@ def test_census_gives_up_after_the_retries_across_restarts(
 
 def test_census_retries_a_failure_within_the_run(sandbox, fake_projects, no_gates):
     fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED, ctp.RunOutcome.DONE]})
-    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 1, sandbox.root / "STOP",
-                           poll=0.01)
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 1, sandbox.root / "STOP", poll=0.01)
     assert fake.names() == ["a", "b", "a"]
     assert fake.calls[2][3] == 2 and results["a"] == ctp.RunOutcome.DONE
 
 
 def test_census_gives_up_on_a_project_that_keeps_killing_its_run(
-        sandbox, fake_projects, no_gates, capsys):
+    sandbox, fake_projects, no_gates, capsys
+):
     log = sandbox.root / "ledger.jsonl"
     for run in ("r1", "r2"):
-        ledger.append(log, {"project": "a", "run_id": run, "attempt": 1,
-                            "step": "pipeline", "status": "started"})
+        ledger.append(
+            log,
+            {"project": "a", "run_id": run, "attempt": 1, "step": "pipeline", "status": "started"},
+        )
     fake = fake_projects()
     ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
     assert fake.calls == []
@@ -2396,9 +2749,10 @@ def test_census_gives_up_on_a_project_that_keeps_killing_its_run(
 
 
 def test_one_interrupted_run_is_retried(sandbox, fake_projects, no_gates):
-    ledger.append(sandbox.root / "ledger.jsonl", {"project": "a", "run_id": "r1",
-                                                  "attempt": 1, "step": "pipeline",
-                                                  "status": "started"})
+    ledger.append(
+        sandbox.root / "ledger.jsonl",
+        {"project": "a", "run_id": "r1", "attempt": 1, "step": "pipeline", "status": "started"},
+    )
     fake = fake_projects()
     ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
     assert fake.calls == [("a", 1, 1, 2, False)]
@@ -2413,14 +2767,17 @@ def test_census_without_retries_runs_a_failure_once(sandbox, fake_projects, no_g
 def test_a_retry_after_validation_resumes_at_the_later_steps(sandbox, fake_projects, no_gates):
     def failed_after_validating(name):
         stamp(sandbox, name)
-    fake = fake_projects(outcomes={"a": [ctp.RunOutcome.FAILED, ctp.RunOutcome.DONE]},
-                         hook=failed_after_validating)
+
+    fake = fake_projects(
+        outcomes={"a": [ctp.RunOutcome.FAILED, ctp.RunOutcome.DONE]}, hook=failed_after_validating
+    )
     ctp.schedule(projects_of(sandbox, "a"), 1, 1, sandbox.root / "STOP", poll=0.01)
     assert [c[4] for c in fake.calls] == [False, True]
 
 
 def test_the_stop_file_lets_the_running_project_finish_and_starts_no_other(
-        sandbox, fake_projects, no_gates, capsys):
+    sandbox, fake_projects, no_gates, capsys
+):
     stop = sandbox.root / "STOP"
     fake = fake_projects(hook=lambda name: stop.touch())
     results = ctp.schedule(projects_of(sandbox, "a", "b", "c"), 1, 0, stop, poll=0.01)
@@ -2441,6 +2798,7 @@ def test_a_restart_after_a_stop_continues_with_the_next_project(sandbox, monkeyp
         outcome = real(*a, **k)
         stop.touch()
         return outcome
+
     monkeypatch.setattr(ctp, "run_project", run_then_stop)
     first = ctp.schedule(projects, 1, 0, stop, poll=0.01)
     assert set(first) == {"a"}
@@ -2458,6 +2816,7 @@ def test_a_stop_signal_stops_dispatch(sandbox, fake_projects, no_gates):
     def signal_during(name):
         ctp._RUN["stop_reason"] = "signal SIGTERM"
         ctp._STOP.set()
+
     fake = fake_projects(hook=signal_during)
     try:
         ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
@@ -2469,6 +2828,7 @@ def test_a_stop_signal_stops_dispatch(sandbox, fake_projects, no_gates):
 def test_a_broken_ledger_stops_dispatch(sandbox, fake_projects, no_gates):
     def break_ledger(name):
         ctp._RUN["ledger_broken"] = "OSError: disk full"
+
     fake = fake_projects(hook=break_ledger)
     ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
     assert fake.names() == ["a"] and "disk full" in ctp._RUN["stop_reason"]
@@ -2485,7 +2845,8 @@ def test_a_closed_gate_waits_then_starts(sandbox, fake_projects, monkeypatch, ca
 
 
 def test_a_closed_gate_and_a_stop_end_the_census_without_starting(
-        sandbox, fake_projects, monkeypatch):
+    sandbox, fake_projects, monkeypatch
+):
     stop = sandbox.root / "STOP"
     calls = []
 
@@ -2493,6 +2854,7 @@ def test_a_closed_gate_and_a_stop_end_the_census_without_starting(
         calls.append(1)
         stop.touch()
         return "disk 1G free, below the 150G floor"
+
     monkeypatch.setattr(ctp, "gate_reason", gate)
     fake = fake_projects()
     assert ctp.schedule(projects_of(sandbox, "a"), 1, 0, stop, poll=0.01) == {}
@@ -2501,13 +2863,13 @@ def test_a_closed_gate_and_a_stop_end_the_census_without_starting(
 
 def test_a_deferred_project_is_tried_again_after_the_rest(sandbox, fake_projects, no_gates):
     fake = fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
-    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP",
-                           poll=0.01)
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
     assert fake.names() == ["a", "b", "a"] and results["a"] == ctp.RunOutcome.DONE
 
 
 def test_a_lone_deferred_project_waits_a_poll_before_its_next_try(
-        sandbox, fake_projects, no_gates, monkeypatch):
+    sandbox, fake_projects, no_gates, monkeypatch
+):
     sleeps = []
     monkeypatch.setattr(ctp.time, "sleep", lambda s: sleeps.append(s))
     fake = fake_projects(outcomes={"a": [ctp.RunOutcome.DEFERRED, ctp.RunOutcome.DONE]})
@@ -2519,9 +2881,9 @@ def test_a_crashing_worker_fails_only_its_project(sandbox, fake_projects, no_gat
     def crash(name):
         if name == "a":
             raise RuntimeError("boom")
+
     fake = fake_projects(hook=crash)
-    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP",
-                           poll=0.01)
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
     assert results == {"a": ctp.RunOutcome.FAILED, "b": ctp.RunOutcome.DONE}
     assert "crashed the worker: RuntimeError: boom" in capsys.readouterr().out
 
@@ -2529,21 +2891,23 @@ def test_a_crashing_worker_fails_only_its_project(sandbox, fake_projects, no_gat
 def test_census_runs_up_to_workers_projects_at_once(sandbox, fake_projects, no_gates):
     barrier = threading.Barrier(2, timeout=10)
     fake = fake_projects(hook=lambda name: barrier.wait())
-    results = ctp.schedule(projects_of(sandbox, "a", "b"), 2, 0, sandbox.root / "STOP",
-                           poll=0.01)
+    results = ctp.schedule(projects_of(sandbox, "a", "b"), 2, 0, sandbox.root / "STOP", poll=0.01)
     assert sorted(fake.names()) == ["a", "b"] and not barrier.broken
     assert set(results.values()) == {ctp.RunOutcome.DONE}
 
 
-@pytest.mark.parametrize("state, failures, stamped, expected", [
-    ("done", 0, True, "skip"),
-    ("done", 0, False, "run"),        # done once, but the outputs are gone
-    ("done-dirty", 0, True, "post"),
-    ("failed", 1, True, "post"),
-    ("failed", 1, False, "run"),
-    ("failed", 2, False, "give-up"),
-    ("", 0, False, "run"),
-])
+@pytest.mark.parametrize(
+    "state, failures, stamped, expected",
+    [
+        ("done", 0, True, "skip"),
+        ("done", 0, False, "run"),  # done once, but the outputs are gone
+        ("done-dirty", 0, True, "post"),
+        ("failed", 1, True, "post"),
+        ("failed", 1, False, "run"),
+        ("failed", 2, False, "give-up"),
+        ("", 0, False, "run"),
+    ],
+)
 def test_plan(sandbox, state, failures, stamped, expected):
     if stamped:
         stamp(sandbox, "a")
@@ -2665,6 +3029,7 @@ def test_a_vanished_process_group_is_ignored(monkeypatch):
 
     def gone(pid, sig):
         raise ProcessLookupError(pid)
+
     monkeypatch.setattr(ctp.os, "killpg", gone)
     ctp.install_signal_handlers()
     ctp._procs["a"] = SimpleNamespace(pid=1)
@@ -2694,6 +3059,7 @@ def test_main_dispatches_census(monkeypatch):
 # --------------------------------------------------------------------------- #
 # CTP_CONFIG
 # --------------------------------------------------------------------------- #
+
 
 def test_config_is_forwarded_to_the_steps_when_ctp_config_is_set(monkeypatch, sandbox):
     cfg = sandbox.root / "e2e.cfg"
@@ -2725,6 +3091,7 @@ def test_run_flags_name_the_config_and_the_directories(sandbox, monkeypatch):
 # --------------------------------------------------------------------------- #
 # census resumes an interrupted project at step 2
 # --------------------------------------------------------------------------- #
+
 
 def leftover_attempt(sandbox, name="jq"):
     workdir = sandbox.out / name
@@ -2794,6 +3161,7 @@ def test_an_explicit_from_step_wins_over_auto_resume(monkeypatch, sandbox, pinne
 
 def test_next_job_takes_the_first_job_whose_wait_is_over():
     from collections import deque
+
     late = ctp.Job(1, {"name": "a"}, 1, 0, False, not_before=100.0)
     ready = ctp.Job(2, {"name": "b"}, 1, 0, False)
     queue = deque([late, ready])
@@ -2832,6 +3200,7 @@ def test_a_step_2_resume_drops_the_derived_artifacts_first(monkeypatch, sandbox,
         if FakeRunner.phase_of(args) == "pipeline":
             seen["left"] = sorted(p.name for p in workdir.iterdir())
         return r(args, **kwargs)
+
     monkeypatch.setattr(ctp.subprocess, "Popen", popen)
     monkeypatch.setattr(ctp.subprocess, "run", r)
     ctp._OPTS.update(auto_resume=True, from_step=1)
@@ -2839,12 +3208,15 @@ def test_a_step_2_resume_drops_the_derived_artifacts_first(monkeypatch, sandbox,
     # The bare repos, the blob map and the memo stay; the rest is rebuilt.
     assert seen["left"] == ["jq-blobmap.db", "jq-cregit.git", "jq-original.git", "memo"]
     [row] = ledger_rows(sandbox, "jq", "pipeline")
-    assert row["resume"] == {"from_step": 2, "dropped": [
-        "blame", "jq-original", "jq-cregit", "jq-cregit.db", "jq-dataset.parquet"]}
+    assert row["resume"] == {
+        "from_step": 2,
+        "dropped": ["blame", "jq-original", "jq-cregit", "jq-cregit.db", "jq-dataset.parquet"],
+    }
 
 
 def test_a_resume_that_cannot_drop_fails_without_running_the_pipeline(
-        monkeypatch, sandbox, pinned_jq):
+    monkeypatch, sandbox, pinned_jq
+):
     workdir = leftover_attempt(sandbox)
     (workdir / "blame").mkdir()
     r = FakeRunner()
@@ -2868,12 +3240,14 @@ def test_drop_derived_reports_a_file_it_cannot_unlink(monkeypatch, sandbox):
         if self.name == "jq-cregit.db":
             raise PermissionError("read-only")
         return real_unlink(self, *a, **k)
+
     monkeypatch.setattr(Path, "unlink", unlink)
     dropped, errors = ctp.drop_derived("jq", workdir)
     assert dropped == [] and "read-only" in errors[0]
 
 
 # --latest: pin each project to the remote head when its first attempt starts.
+
 
 @pytest.fixture
 def latest(monkeypatch, sandbox):
@@ -2883,12 +3257,14 @@ def latest(monkeypatch, sandbox):
     def remote_head(url, timeout=None):
         calls.append((url, timeout))
         return "master", OTHER_SHA
+
     monkeypatch.setattr(ctp.pin, "remote_head", remote_head)
     return calls
 
 
-def test_latest_pins_the_remote_head_and_records_the_snapshot(monkeypatch, sandbox, latest,
-                                                               pinned_jq):
+def test_latest_pins_the_remote_head_and_records_the_snapshot(
+    monkeypatch, sandbox, latest, pinned_jq
+):
     r = FakeRunner(checkout=OTHER_SHA)
     monkeypatch.setattr(ctp.subprocess, "Popen", r)
     monkeypatch.setattr(ctp.subprocess, "run", r)
@@ -2901,15 +3277,13 @@ def test_latest_pins_the_remote_head_and_records_the_snapshot(monkeypatch, sandb
     assert resolve["resolve"]["snapshot_sha"] == PINNED_SHA
     assert resolve["resolve"]["reused"] is False
     rows = ledger_rows(sandbox, "jq")
-    assert all(row["pinned_sha"] == OTHER_SHA and row["snapshot_sha"] == PINNED_SHA
-               for row in rows)
+    assert all(row["pinned_sha"] == OTHER_SHA and row["snapshot_sha"] == PINNED_SHA for row in rows)
     assert rows[-1]["state"] == "done"
     saved = json.loads(ctp.latest_path("jq").read_text())
     assert saved["resolved_sha"] == OTHER_SHA and saved["branch"] == "master"
 
 
-def test_latest_reuses_the_commit_of_an_earlier_attempt(monkeypatch, sandbox, latest,
-                                                         pinned_jq):
+def test_latest_reuses_the_commit_of_an_earlier_attempt(monkeypatch, sandbox, latest, pinned_jq):
     path = ctp.latest_path("jq")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"resolved_sha": OTHER_SHA, "snapshot_sha": PINNED_SHA}))
@@ -2925,11 +3299,13 @@ def test_latest_reuses_the_commit_of_an_earlier_attempt(monkeypatch, sandbox, la
 
 
 def test_latest_fails_the_project_when_the_remote_head_cannot_be_read(
-        monkeypatch, sandbox, runner, pinned_jq):
+    monkeypatch, sandbox, runner, pinned_jq
+):
     monkeypatch.setitem(ctp._OPTS, "latest", True)
 
     def unreachable(url, timeout=None):
         raise ctp.pin.PinError("cannot reach it")
+
     monkeypatch.setattr(ctp.pin, "remote_head", unreachable)
     assert ctp.run_project(pinned_jq) == ctp.RunOutcome.FAILED
     assert runner.calls == []
@@ -2945,10 +3321,12 @@ def test_without_latest_the_manifest_commit_is_pinned(sandbox, runner, pinned_jq
     assert all("snapshot_sha" not in row for row in ledger_rows(sandbox, "jq"))
 
 
-def test_a_workdir_of_another_commit_is_wiped_with_force_clean(monkeypatch, sandbox, runner,
-                                                               pinned_jq):
-    monkeypatch.setattr(ctp, "git_head", lambda repo: OTHER_SHA
-                        if repo.name == "jq-original.git" else PINNED_SHA)
+def test_a_workdir_of_another_commit_is_wiped_with_force_clean(
+    monkeypatch, sandbox, runner, pinned_jq
+):
+    monkeypatch.setattr(
+        ctp, "git_head", lambda repo: OTHER_SHA if repo.name == "jq-original.git" else PINNED_SHA
+    )
     assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
     assert "--force-clean" in runner.argv("pipeline")
     [row] = ledger_rows(sandbox, "jq", "pipeline")
@@ -2960,8 +3338,9 @@ def test_a_fresh_workdir_is_not_force_cleaned(sandbox, runner, pinned_jq):
     assert "--force-clean" not in runner.argv("pipeline")
 
 
-def test_a_post_validation_attempt_records_the_latest_commit(monkeypatch, sandbox, runner,
-                                                             pinned_jq, joining):
+def test_a_post_validation_attempt_records_the_latest_commit(
+    monkeypatch, sandbox, runner, pinned_jq, joining
+):
     monkeypatch.setitem(ctp._OPTS, "latest", True)
     monkeypatch.setattr(ctp.pin, "remote_head", lambda url, timeout=None: pytest.fail("read"))
     path = ctp.latest_path("jq")
@@ -2971,13 +3350,16 @@ def test_a_post_validation_attempt_records_the_latest_commit(monkeypatch, sandbo
     (sandbox.out / "jq" / "jq.validated").write_text("rows=7\nbytes=9\n")
     assert ctp.run_project(pinned_jq, resume_validated=True) == ctp.RunOutcome.DONE
     rows = ledger_rows(sandbox, "jq")
-    assert rows and all(r["pinned_sha"] == OTHER_SHA and r["snapshot_sha"] == PINNED_SHA
-                        for r in rows)
+    assert rows and all(
+        r["pinned_sha"] == OTHER_SHA and r["snapshot_sha"] == PINNED_SHA for r in rows
+    )
 
 
 # --tokenizer-worker: the runner's worker pool in step 2.
 
-WORKER_USAGE = REAL_RUNNER_USAGE + "#   --tokenizer-worker  tokenize with long-lived worker processes\n"
+WORKER_USAGE = (
+    REAL_RUNNER_USAGE + "#   --tokenizer-worker  tokenize with long-lived worker processes\n"
+)
 
 
 def test_tokenizer_worker_is_passed_to_the_runner(sandbox, runner, jq):

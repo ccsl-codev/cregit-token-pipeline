@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 try:
     import duckdb  # noqa: F401
 except ImportError:  # pragma: no cover - duckdb absent, or its native library is
+
     def _unpatched(*args, **kwargs):
         raise AssertionError("stub duckdb was called: patch duckdb.connect or duckdb.sql")
 

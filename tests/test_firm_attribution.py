@@ -1,5 +1,6 @@
 """firm_attribution.py and the two lookup tables it ships with. The data tests read
 the committed files on purpose: they are what every corpus run joins against."""
+
 from __future__ import annotations
 
 import csv
@@ -52,15 +53,19 @@ def cregit_parquet(path: Path, domains: list[str | None]) -> Path:
     """cregit's 67 columns, one token per domain, token_index in row order."""
     import duckdb
 
-    values = {"repo_name": "'proj'", "file_path": "'a.c'", "token_index": "d.i",
-              "person_domain": "d.dom"}
-    select = ", ".join(f"{values.get(n, f'CAST(NULL AS {t})')} AS {n}"
-                       for n, t in CREGIT_COLUMNS)
+    values = {
+        "repo_name": "'proj'",
+        "file_path": "'a.c'",
+        "token_index": "d.i",
+        "person_domain": "d.dom",
+    }
+    select = ", ".join(f"{values.get(n, f'CAST(NULL AS {t})')} AS {n}" for n, t in CREGIT_COLUMNS)
     con = duckdb.connect()
     con.execute("CREATE TABLE d (i BIGINT, dom VARCHAR)")
     con.executemany("INSERT INTO d VALUES (?, ?)", list(enumerate(domains)))
-    con.execute(f"COPY (SELECT {select} FROM d ORDER BY i) TO $p (FORMAT PARQUET)",
-                {"p": str(path)})
+    con.execute(
+        f"COPY (SELECT {select} FROM d ORDER BY i) TO $p (FORMAT PARQUET)", {"p": str(path)}
+    )
     con.close()
     return path
 
@@ -74,29 +79,45 @@ def query(sql: str, **params) -> list[tuple]:
 @pytest.fixture
 def tables(tmp_path):
     firm_map = write_csv(
-        tmp_path / "map.csv", MAP_HEADER,
+        tmp_path / "map.csv",
+        MAP_HEADER,
         "intel.com,Intel,company,gitdm",
         "Upper.Example,Upper Co,company,patch",
         "ibm.com,International Business Machines,company,cncf-gitdm",
         "us.ibm.com,  ibm corp ,company,rich",
         "360.cn,360,company,gitdm",
         "blank.example,Blank Canon,company,gitdm",
-        "gmail.com,(Independent),free_provider,builtin")
+        "gmail.com,(Independent),free_provider,builtin",
+    )
     canon = write_csv(
-        tmp_path / "canon.csv", CANON_HEADER,
+        tmp_path / "canon.csv",
+        CANON_HEADER,
         "International Business Machines,IBM,merge,full name",
         "IBM Corp,IBM,merge,suffix and case differ from the map",
-        "Blank Canon,,merge,empty canonical falls back to firm_raw")
+        "Blank Canon,,merge,empty canonical falls back to firm_raw",
+    )
     return firm_map, canon
 
 
-EDGE_DOMAINS = ["intel.com", "INTEL.COM", "upper.example", "ibm.com", "us.ibm.com",
-                "360.cn", "blank.example", "gmail.com", "unmapped.example", "", None]
+EDGE_DOMAINS = [
+    "intel.com",
+    "INTEL.COM",
+    "upper.example",
+    "ibm.com",
+    "us.ibm.com",
+    "360.cn",
+    "blank.example",
+    "gmail.com",
+    "unmapped.example",
+    "",
+    None,
+]
 
 
 # --------------------------------------------------------------------------- #
 # the step against the old cregit join
 # --------------------------------------------------------------------------- #
+
 
 @needs_duckdb
 def test_the_firm_columns_match_the_old_cregit_join(tmp_path, tables):
@@ -105,8 +126,7 @@ def test_the_firm_columns_match_the_old_cregit_join(tmp_path, tables):
     old = query(OLD_CREGIT_JOIN, src=parquet, firm_map=firm_map, firm_canonical=canon)
 
     fa.add_firm_columns(parquet, firm_map, canon)
-    new = query("SELECT token_index, firm_raw, firm, firm_source FROM read_parquet($p)",
-                p=parquet)
+    new = query("SELECT token_index, firm_raw, firm, firm_source FROM read_parquet($p)", p=parquet)
     assert new == old
     assert new[3] == (3, "International Business Machines", "IBM", "cncf-gitdm")
     assert new[-1] == (10, "", "", "")
@@ -140,19 +160,22 @@ def test_a_second_run_recomputes_from_the_current_map(tmp_path, tables):
     assert fa.input_refusal(parquet) is None
     fa.add_firm_columns(parquet, firm_map, canon)
     assert query("SELECT firm_raw, firm_source FROM read_parquet($p)", p=parquet) == [
-        ("Intel Corporation", "correction")]
+        ("Intel Corporation", "correction")
+    ]
 
 
 @needs_duckdb
 def test_a_file_in_neither_form_is_refused_and_left_untouched(
-        tmp_path, tables, monkeypatch, capsys):
+    tmp_path, tables, monkeypatch, capsys
+):
     import duckdb
 
     whole = cregit_parquet(tmp_path / "whole.parquet", ["intel.com"])
     parquet = tmp_path / "p.parquet"
     duckdb.connect().execute(
         "COPY (SELECT * EXCLUDE (repo_tag) FROM read_parquet($s)) TO $d (FORMAT PARQUET)",
-        {"s": str(whole), "d": str(parquet)})
+        {"s": str(whole), "d": str(parquet)},
+    )
     before = parquet.read_bytes()
     monkeypatch.setattr(fa, "FIRM_MAP", tables[0])
     monkeypatch.setattr(fa, "FIRM_CANONICAL", tables[1])
@@ -169,8 +192,7 @@ def test_a_failed_join_keeps_the_input_and_leaves_no_temp_file(tmp_path, tables)
     with pytest.raises(Exception):
         fa.add_firm_columns(parquet, tmp_path / "absent.csv", tables[1])
     assert parquet.read_bytes() == before
-    assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "canon.csv", "map.csv", "p.parquet"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["canon.csv", "map.csv", "p.parquet"]
 
 
 @needs_duckdb
@@ -187,22 +209,40 @@ def test_main_rewrites_the_file_and_says_so(tmp_path, tables, monkeypatch, capsy
 # the lookup-table preflight: a repeated key multiplies token rows
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("header, lines, column, expected", [
-    pytest.param(MAP_HEADER, ["a.com,A,company,gitdm", " A.COM ,A2,company,patch"],
-                 "domain", "1 repeated key(s) in `domain`: a.com", id="map-case-and-space"),
-    pytest.param(CANON_HEADER, ["Acme,ACME,merge,n", "acme,ACME,merge,n"],
-                 "firm_raw", "1 repeated key(s) in `firm_raw`: acme", id="canonical"),
-    pytest.param("dom,company", ["a.com,A"], "domain", "no `domain` column",
-                 id="no-key-column"),
-])
+
+@pytest.mark.parametrize(
+    "header, lines, column, expected",
+    [
+        pytest.param(
+            MAP_HEADER,
+            ["a.com,A,company,gitdm", " A.COM ,A2,company,patch"],
+            "domain",
+            "1 repeated key(s) in `domain`: a.com",
+            id="map-case-and-space",
+        ),
+        pytest.param(
+            CANON_HEADER,
+            ["Acme,ACME,merge,n", "acme,ACME,merge,n"],
+            "firm_raw",
+            "1 repeated key(s) in `firm_raw`: acme",
+            id="canonical",
+        ),
+        pytest.param(
+            "dom,company", ["a.com,A"], "domain", "no `domain` column", id="no-key-column"
+        ),
+    ],
+)
 def test_a_bad_lookup_table_is_refused(tmp_path, header, lines, column, expected):
     path = write_csv(tmp_path / "t.csv", header, *lines)
     assert expected in fa.table_refusal(path, column)
 
 
 def test_a_bad_table_stops_main_before_the_parquet_is_read(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(fa, "FIRM_MAP", write_csv(
-        tmp_path / "m.csv", MAP_HEADER, "a.com,A,company,gitdm", "a.com,B,company,gitdm"))
+    monkeypatch.setattr(
+        fa,
+        "FIRM_MAP",
+        write_csv(tmp_path / "m.csv", MAP_HEADER, "a.com,A,company,gitdm", "a.com,B,company,gitdm"),
+    )
     monkeypatch.setattr(fa, "read_schema", lambda p: pytest.fail("parquet was read"))
     assert fa.main([str(tmp_path / "never.parquet")]) == fa.EXIT_REFUSED
     assert "multiplies token rows" in capsys.readouterr().err
@@ -218,10 +258,14 @@ def test_no_arguments_is_a_usage_error():
 # the shipped domain map
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("path, column", [
-    pytest.param(fa.FIRM_MAP, "domain", id="map"),
-    pytest.param(fa.FIRM_CANONICAL, "firm_raw", id="canonical"),
-])
+
+@pytest.mark.parametrize(
+    "path, column",
+    [
+        pytest.param(fa.FIRM_MAP, "domain", id="map"),
+        pytest.param(fa.FIRM_CANONICAL, "firm_raw", id="canonical"),
+    ],
+)
 def test_the_shipped_tables_pass_the_preflight(path, column):
     assert fa.table_refusal(path, column) is None
 
@@ -241,21 +285,19 @@ def test_qti_qualcomm_com_resolves_to_qualcomm_not_cern():
 
 def test_the_other_qualcomm_domains_were_already_right_and_still_are():
     by_domain = {r["domain"]: r for r in rows(fa.FIRM_MAP)}
-    for domain in ("oss.qualcomm.com", "qca.qualcomm.com", "quicinc.com",
-                   "codeaurora.org"):
-        assert (by_domain[domain]["company"], by_domain[domain]["source"]) == (
-            "Qualcomm", "patch")
+    for domain in ("oss.qualcomm.com", "qca.qualcomm.com", "quicinc.com", "codeaurora.org"):
+        assert (by_domain[domain]["company"], by_domain[domain]["source"]) == ("Qualcomm", "patch")
 
 
 def test_collibra_com_resolves_to_collibra_not_medidata():
     row = next(r for r in rows(fa.FIRM_MAP) if r["domain"] == "collibra.com")
-    assert (row["company"], row["kind"], row["source"]) == (
-        "Collibra", "company", "correction")
+    assert (row["company"], row["kind"], row["source"]) == ("Collibra", "company", "correction")
 
 
 # --------------------------------------------------------------------------- #
 # the shipped canonical-name table
 # --------------------------------------------------------------------------- #
+
 
 def canonical_rows():
     return rows(fa.FIRM_CANONICAL)
@@ -288,17 +330,35 @@ def test_every_name_in_the_table_actually_appears_in_the_map():
 
 def test_the_rejections_are_recorded_rather_than_dropped():
     keeps = {r["firm_raw"] for r in canonical_rows() if r["decision"] == "keep"}
-    assert {"Independent", "AWS", "Azure", "Samsung SDS", "Yahoo! Japan",
-            "Hewlett", "China Mobile International"} <= keeps
+    assert {
+        "Independent",
+        "AWS",
+        "Azure",
+        "Samsung SDS",
+        "Yahoo! Japan",
+        "Hewlett",
+        "China Mobile International",
+    } <= keeps
     assert all("REJECTED" in r["note"] for r in canonical_rows() if r["decision"] == "keep")
 
 
-@pytest.mark.parametrize("raw, canonical", [
-    ("International Business Machines", "IBM"), ("Salesforce.com", "Salesforce"),
-    ("SalesForce", "Salesforce"), ("NETFLIX", "Netflix"), ("TWITTER", "Twitter"),
-    ("YANDEX", "Yandex"), ("ADOBE", "Adobe"), ("YELP", "Yelp"), ("RAPID7", "Rapid7"),
-    ("NIKE", "Nike"), ("NEW RELIC", "New Relic"), ("F5 NETWORKS", "F5 Networks"),
-])
+@pytest.mark.parametrize(
+    "raw, canonical",
+    [
+        ("International Business Machines", "IBM"),
+        ("Salesforce.com", "Salesforce"),
+        ("SalesForce", "Salesforce"),
+        ("NETFLIX", "Netflix"),
+        ("TWITTER", "Twitter"),
+        ("YANDEX", "Yandex"),
+        ("ADOBE", "Adobe"),
+        ("YELP", "Yelp"),
+        ("RAPID7", "Rapid7"),
+        ("NIKE", "Nike"),
+        ("NEW RELIC", "New Relic"),
+        ("F5 NETWORKS", "F5 Networks"),
+    ],
+)
 def test_a_split_spelling_resolves_to_one_name(raw, canonical):
     assert {r["firm_raw"]: r["firm"] for r in canonical_rows()}[raw] == canonical
 

@@ -2,6 +2,7 @@
 """Add firm_raw, firm and firm_source to one project Parquet, in place.
 Usage: firm_attribution.py <dataset.parquet> [--memory-limit SIZE] [--threads N]
 Exit 0 written, 1 refused (wrong input columns, or a repeated lookup key), 2 usage."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,19 +11,21 @@ import os
 import sys
 from pathlib import Path
 
-from validate_schema import (CREGIT_COLUMNS, EXPECTED_COLUMNS, compare_schema,
-                             read_schema)
+from validate_schema import CREGIT_COLUMNS, EXPECTED_COLUMNS, compare_schema, read_schema
 
 CORPUS = Path(__file__).resolve().parent
 FIRM_MAP = CORPUS / "data" / "affiliation.merged.csv"
 FIRM_CANONICAL = CORPUS / "data" / "firm_canonical.csv"
 EXIT_REFUSED = 1
 
-WRONG_INPUT = ("FAIL {path}: {n} columns, neither cregit's {cregit} nor ctp's {final}. "
-               "First drift: {drift}")
+WRONG_INPUT = (
+    "FAIL {path}: {n} columns, neither cregit's {cregit} nor ctp's {final}. First drift: {drift}"
+)
 NO_KEY_COLUMN = "FAIL {path}: no `{column}` column"
-REPEATED_KEYS = ("FAIL {path}: {n} repeated key(s) in `{column}`: {keys}. "
-                 "A repeated key multiplies token rows through the LEFT JOIN.")
+REPEATED_KEYS = (
+    "FAIL {path}: {n} repeated key(s) in `{column}`: {keys}. "
+    "A repeated key multiplies token rows through the LEFT JOIN."
+)
 WRITTEN = "OK {path}: firm columns added from {map}"
 
 # The join of cregit feat/firm-attribution e215e16 (firm_sql), keyed on person_domain.
@@ -53,8 +56,13 @@ def input_refusal(parquet: Path) -> str | None:
     drifts = compare_schema(actual, CREGIT_COLUMNS)
     if not drifts:
         return None
-    return WRONG_INPUT.format(path=parquet, n=len(actual), cregit=len(CREGIT_COLUMNS),
-                              final=len(EXPECTED_COLUMNS), drift=drifts[0])
+    return WRONG_INPUT.format(
+        path=parquet,
+        n=len(actual),
+        cregit=len(CREGIT_COLUMNS),
+        final=len(EXPECTED_COLUMNS),
+        drift=drifts[0],
+    )
 
 
 def repeated_keys(path: Path, column: str) -> list[str] | None:
@@ -78,8 +86,9 @@ def table_refusal(path: Path, column: str) -> str | None:
     if repeats is None:
         return NO_KEY_COLUMN.format(path=path, column=column)
     if repeats:
-        return REPEATED_KEYS.format(path=path, n=len(repeats), column=column,
-                                    keys=", ".join(repeats[:5]))
+        return REPEATED_KEYS.format(
+            path=path, n=len(repeats), column=column, keys=", ".join(repeats[:5])
+        )
     return None
 
 
@@ -95,16 +104,23 @@ def connect(parquet: Path, memory_limit: str, threads: int):
     return duckdb.connect(config=config)
 
 
-def add_firm_columns(parquet: Path, firm_map: Path, firm_canonical: Path,
-                     memory_limit: str = "", threads: int = 0) -> None:
+def add_firm_columns(
+    parquet: Path, firm_map: Path, firm_canonical: Path, memory_limit: str = "", threads: int = 0
+) -> None:
     """Rewrite parquet as cregit's 67 columns then FIRM_COLUMNS, rows in file order."""
     tmp = parquet.with_name(f".{parquet.name}.firm-tmp")
     columns = ", ".join(f't."{name}"' for name, _ in CREGIT_COLUMNS)
     con = connect(parquet, memory_limit, threads)
     try:
-        con.execute(FIRM_SQL.format(columns=columns), {
-            "src": str(parquet), "dst": str(tmp),
-            "firm_map": str(firm_map), "firm_canonical": str(firm_canonical)})
+        con.execute(
+            FIRM_SQL.format(columns=columns),
+            {
+                "src": str(parquet),
+                "dst": str(tmp),
+                "firm_map": str(firm_map),
+                "firm_canonical": str(firm_canonical),
+            },
+        )
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
@@ -124,10 +140,15 @@ def refusal(parquet: Path, firm_map: Path, firm_canonical: Path) -> str | None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Add the firm columns to one Parquet.")
     ap.add_argument("parquet", type=Path)
-    ap.add_argument("--memory-limit", default="", metavar="SIZE",
-                    help="DuckDB memory_limit, e.g. 4GB. Default: DuckDB's own.")
-    ap.add_argument("--threads", type=int, default=0, metavar="N",
-                    help="DuckDB threads. Default: DuckDB's own.")
+    ap.add_argument(
+        "--memory-limit",
+        default="",
+        metavar="SIZE",
+        help="DuckDB memory_limit, e.g. 4GB. Default: DuckDB's own.",
+    )
+    ap.add_argument(
+        "--threads", type=int, default=0, metavar="N", help="DuckDB threads. Default: DuckDB's own."
+    )
     return ap.parse_args(argv)
 
 
@@ -137,8 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     if reason:
         print(reason, file=sys.stderr)
         return EXIT_REFUSED
-    add_firm_columns(args.parquet, FIRM_MAP, FIRM_CANONICAL,
-                     args.memory_limit, args.threads)
+    add_firm_columns(args.parquet, FIRM_MAP, FIRM_CANONICAL, args.memory_limit, args.threads)
     print(WRITTEN.format(path=args.parquet, map=FIRM_MAP.name))
     return 0
 
