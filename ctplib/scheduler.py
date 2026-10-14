@@ -176,7 +176,7 @@ class RunQueue:
     retries: int
     poll: float
     running: dict = field(default_factory=dict)
-    waiting_since: float | None = None
+    wait_logged: bool = False
 
     def try_start(self, pool: ThreadPoolExecutor, reason: str | None) -> bool:
         """Start the next job, unless a stop, a full pool, a gate or a wait holds it.
@@ -186,14 +186,14 @@ class RunQueue:
         gate = gate_reason(runtime.opts)
         job = next_job(self.queue, time.time()) if gate is None else None
         if job is not None:
-            self.waiting_since = None
+            self.wait_logged = False
             fut = pool.submit(
                 project_steps.run_project, job.project, job.pos, self.total, job.attempt, job.post
             )
             self.running[fut] = job
             return True
-        if gate is not None and self.waiting_since is None:
-            self.waiting_since = time.time()
+        if gate is not None and not self.wait_logged:
+            self.wait_logged = True
             console.say(f"waiting to start {self.queue[0].project['name']}: {gate}")
         return False
 
