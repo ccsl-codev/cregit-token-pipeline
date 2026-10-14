@@ -22,14 +22,14 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
 import ledger
 import pin
 import retain
-from ctplib import config, state
+from ctplib import config, console, state
 from file_mask import UNIVERSAL_MASK
 from retain import lock_path, state_dir
 
@@ -70,16 +70,6 @@ UNPINNED = "unpinned"
 SIZE_CLASSES = ("S", "M", "L")
 
 _metrics_lock = threading.Lock()
-_print_lock = threading.Lock()
-
-
-def now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def say(msg: str) -> None:
-    with _print_lock:
-        print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
 def read_manifest(path: Path, only: set | None) -> list[dict]:
@@ -120,7 +110,7 @@ def record_metric(project: str, cls: str, phase: str, duration: int, rc: int, lo
         if not config.METRICS.exists():
             config.METRICS.write_text("iso_start\tproject\tclass\tphase\tduration_s\trc\tlog\n")
         with config.METRICS.open("a") as f:
-            f.write(f"{now_iso()}\t{project}\t{cls}\t{phase}\t{duration}\t{rc}\t{log}\n")
+            f.write(f"{console.now_iso()}\t{project}\t{cls}\t{phase}\t{duration}\t{rc}\t{log}\n")
 
 
 @functools.cache
@@ -318,7 +308,7 @@ class ResourceSampler:
             try:
                 busy, total = self._sample(busy, total)
             except Exception as e:
-                say(f"{self.name} resource sample failed: {e}")
+                console.say(f"{self.name} resource sample failed: {e}")
             if self._stop.wait(self.interval):
                 return
 
@@ -330,7 +320,7 @@ class ResourceSampler:
         mem_mb = _mem_used_mb()
         free_gb = shutil.disk_usage(config.OUT).free // 2**30
         row = (
-            now_iso(),
+            console.now_iso(),
             self.name,
             self.cls,
             self.phase,
@@ -387,7 +377,7 @@ def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) 
     logfile = unique_log_name(logdir, phase)
 
     state.live[name] = (phase, time.time())
-    say(f"{name} ▶ {phase} started (log: {logfile})")
+    console.say(f"{name} ▶ {phase} started (log: {logfile})")
     latest = logdir / f"{phase}-latest.log"
     tmp = logdir / f".{phase}-latest.tmp"
     logfile.touch()
@@ -419,7 +409,7 @@ def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) 
 
     record_metric(name, cls, phase, duration, rc, logfile)
     mark = "✓" if rc == 0 else f"✗ rc={rc}"
-    say(
+    console.say(
         f"{name} {mark} {phase} in {duration}s"
         + (
             f" | peak {peak['tree_rss_mb']}MB rss, {peak['tree_procs']} procs,"
@@ -456,7 +446,7 @@ def check_memo_dir(name: str, opts: dict, workdir: Path) -> bool:
     memo_dir = Path(memo_dir_opt).resolve() / name
     resolved_work = workdir.resolve()
     if memo_dir == resolved_work or resolved_work in memo_dir.parents:
-        say(
+        console.say(
             f"{name} — refusing to run: --memo-dir puts the memo at "
             f"{memo_dir}, inside the work directory the runner deletes. "
             "Point --memo-dir outside the corpus output directory."
@@ -617,12 +607,14 @@ def checkout_matches(name: str, workdir: Path, pinned: str) -> tuple[bool, str]:
     project's checkout is not the pinned commit, or cannot be read."""
     seen = runner_checkout(name, workdir)
     if not pinned:
-        say(f"{name} — unpinned, checked out {seen or 'an unreadable HEAD'}")
+        console.say(f"{name} — unpinned, checked out {seen or 'an unreadable HEAD'}")
         return True, seen
     if seen != pinned:
-        say(f"{name} ✗ pinned {pinned}, but the runner checked out {seen or 'an unreadable HEAD'}")
+        console.say(
+            f"{name} ✗ pinned {pinned}, but the runner checked out {seen or 'an unreadable HEAD'}"
+        )
         return False, seen
-    say(f"{name} — checked out the pinned commit {pinned}")
+    console.say(f"{name} — checked out the pinned commit {pinned}")
     return True, seen
 
 
@@ -663,11 +655,6 @@ def latest_log(name: str, phase: str) -> str:
         return str(link.resolve(strict=True))
     except OSError:
         return ""
-
-
-def utc(ts: float) -> str:
-    """ISO 8601 in UTC, the same shape as now_iso()."""
-    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(ts))
 
 
 @dataclass
@@ -716,8 +703,8 @@ class ProjectRun:
         row.update(
             step=step,
             status=status,
-            start_utc=utc(start),
-            end_utc=utc(end),
+            start_utc=console.utc(start),
+            end_utc=console.utc(end),
             duration_s=round(end - start, 3),
         )
         row.update(extra)
@@ -726,7 +713,7 @@ class ProjectRun:
         except OSError as exc:
             # The audit trail is the point of the run: stop handing out new projects.
             state.run_info["ledger_broken"] = f"{type(exc).__name__}: {exc}"
-            say(f"{self.name} ✗ LEDGER WRITE FAILED ({exc}); the run stops dispatching")
+            console.say(f"{self.name} ✗ LEDGER WRITE FAILED ({exc}); the run stops dispatching")
 
     def finish(self, state: str, **extra) -> RunOutcome:
         if state == ledger.FAILED:
@@ -825,14 +812,14 @@ def resolve_latest(ctx: ProjectRun) -> bool:
             "snapshot_sha": ctx.project.get(PINNED_FIELD, ""),
             "resolved_sha": sha,
             "branch": branch,
-            "resolved_at": now_iso(),
+            "resolved_at": console.now_iso(),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(rec) + "\n")
         tmp.replace(path)
     ctx.latest = rec["resolved_sha"]
-    say(
+    console.say(
         f"{ctx.name} — latest: {'reusing' if reused else 'resolved'} {ctx.latest} "
         f"(snapshot {rec.get('snapshot_sha') or 'none'})"
     )
@@ -935,7 +922,7 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     resume: dict = {}
     stale = stale_workdir(name, workdir, ctx.pinned)
     if stale:
-        say(
+        console.say(
             f"{name} — the workdir holds commit {stale}, not {ctx.pinned}; "
             "the runner wipes it (--force-clean)"
         )
@@ -945,7 +932,7 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
         step = 1 if stale else resume_step(name, workdir, ctx.pinned)
         if step > 1:
             dropped, errors = drop_derived(name, workdir)
-            say(
+            console.say(
                 f"{name} — an earlier attempt left its clone and blob map; resuming the "
                 f"runner at step {step}"
                 + (f", after dropping {', '.join(dropped)}" if dropped else "")
@@ -1059,14 +1046,14 @@ def cleanup_step(ctx: ProjectRun) -> bool:
     errors = drop_pinned_clone(name)
     removed = [] if errors else ([str(pinned_clone_path(name))] if ctx.pinned else [])
     for err in errors:
-        say(f"{name} — staging clone not fully removed: {err}")
+        console.say(f"{name} — staging clone not fully removed: {err}")
     if state.opts.get("cleanup"):
         result = retain.clean_workdir(name, drop_html=bool(state.opts.get("drop_html")))
         removed += [r["entry"] for r in result["removed"]]
         errors += result["errors"]
         for err in result["errors"]:
-            say(f"{name} — cleanup could not remove: {err}")
-        say(
+            console.say(f"{name} — cleanup could not remove: {err}")
+        console.say(
             f"{name} — cleanup freed {retain.human(result['bytes_freed'])}, kept "
             f"{', '.join(result['kept']) or 'nothing'}"
         )
@@ -1091,7 +1078,7 @@ def cleanup_step(ctx: ProjectRun) -> bool:
             removed.append("memo")
         else:
             errors.append("retain refused to prune memo/ (see the run log)")
-            say(f"{name} — memo/ kept, retain refused the prune (see above)")
+            console.say(f"{name} — memo/ kept, retain refused the prune (see above)")
     ctx.record(
         "cleanup",
         "ok" if not errors else "failed",
@@ -1122,7 +1109,7 @@ def run_project(
     stamp = workdir / f"{name}.validated"
     post_only = stamp.exists()
     if post_only and not resume_validated:
-        say(f"{name} — already validated, skip")
+        console.say(f"{name} — already validated, skip")
         return RunOutcome.SKIPPED
 
     workdir.mkdir(parents=True, exist_ok=True)
@@ -1132,13 +1119,13 @@ def run_project(
         try:
             fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            say(f"{name} — another run holds the lock, skipping")
+            console.say(f"{name} — another run holds the lock, skipping")
             return ctx.finish(ledger.DEFERRED, detail="another process holds the project lock")
 
         state.lock_fds[name] = lockfile.fileno()
         try:
             if not post_only and shutil.disk_usage(config.OUT).free < config.DISK_FLOOR_GB * 2**30:
-                say(f"{name} — disk below {config.DISK_FLOOR_GB}G floor, deferred")
+                console.say(f"{name} — disk below {config.DISK_FLOOR_GB}G floor, deferred")
                 return ctx.finish(ledger.DEFERRED, detail=f"disk below {config.DISK_FLOOR_GB}G")
 
             if not post_only and not check_memo_dir(name, state.opts, workdir):
@@ -1147,7 +1134,9 @@ def run_project(
 
             try:
                 if post_only:
-                    say(f"{name} — validated earlier; resuming at the steps after validation")
+                    console.say(
+                        f"{name} — validated earlier; resuming at the steps after validation"
+                    )
                     ctx.parquet = parquet_info(name)
                     ctx.checked_out_sha = runner_checkout(name, workdir)
                 elif not build_steps(ctx, workdir, stamp):
@@ -1157,14 +1146,14 @@ def run_project(
                 ):
                     return ctx.finish(ledger.FAILED)
             except OSError as exc:
-                say(f"{name} ✗ a phase could not start: {exc}")
+                console.say(f"{name} ✗ a phase could not start: {exc}")
                 return ctx.finish(ledger.FAILED)
 
             clean = cleanup_step(ctx)
             return ctx.finish(ledger.DONE if clean else ledger.DONE_DIRTY)
         except Exception as exc:
             # A bug here must not leave the attempt without its final row.
-            say(f"{name} ✗ internal error: {type(exc).__name__}: {exc}")
+            console.say(f"{name} ✗ internal error: {type(exc).__name__}: {exc}")
             ctx.failed_step = ctx.failed_step or "internal"
             return ctx.finish(ledger.FAILED, detail=f"internal error: {type(exc).__name__}: {exc}")
         finally:
@@ -1180,7 +1169,9 @@ def heartbeat(stop: threading.Event, results: dict) -> None:
         free_gb = shutil.disk_usage(config.OUT).free // 2**30
         done = sum(1 for v in results.values() if v.is_success)
         failed = sum(1 for v in results.values() if v == RunOutcome.FAILED)
-        say(f"♥ running: {running or '—'} | done {done} failed {failed} | disk {free_gb}G free")
+        console.say(
+            f"♥ running: {running or '—'} | done {done} failed {failed} | disk {free_gb}G free"
+        )
 
 
 # What forwarding each optional flag to a checkout without it would do.
@@ -1277,7 +1268,7 @@ def preflight_runner_flags(args: argparse.Namespace) -> tuple[bool, str]:
 
 def refuse_memo_conflicts(args: argparse.Namespace) -> None:
     if args.drop_memo and "--no-memo" in sys.argv:
-        say(
+        console.say(
             "note: --no-memo is an alias for --drop-memo and does NOT prevent the write. "
             "The tokenizer requires BFG_MEMO_DIR, so memo/ is built and then deleted."
         )
@@ -1460,13 +1451,13 @@ def enforce_provenance(gaps: list[tuple[str, str]], args: argparse.Namespace) ->
             f"refusing this run: it reaches step {DATASET_STEP} and would publish a "
             f"Parquet with blank provenance.\n{itemised}{PROVENANCE_REFUSAL_TAIL}"
         )
-    say(
+    console.say(
         "WARNING: --allow-empty-provenance: this run will publish a Parquet "
         "with blank provenance, on purpose."
     )
     for flag, cost in gaps:
-        say(f"         {flag} absent — {cost}")
-    say(
+        console.say(f"         {flag} absent — {cost}")
+    console.say(
         "         Do not mix these rows into the corpus: they are "
         "schema-valid and indistinguishable from rows whose provenance is "
         "genuinely unknown."
@@ -1477,46 +1468,48 @@ def announce_run(opts: dict, jobs: int) -> None:
     """Log every choice that changes what this run publishes or how it behaves,
     so a reader of the log need not infer it from the absence of a message."""
     if opts["mask"]:
-        say(f"WARNING: --mask overrides the manifest for every project in this run: {opts['mask']}")
-        say(
+        console.say(
+            f"WARNING: --mask overrides the manifest for every project in this run: {opts['mask']}"
+        )
+        console.say(
             "         the --project-meta sidecar records the MANIFEST's mask, so the "
             "Parquet's file_mask column will not match this run."
         )
     if opts["memory_limit"]:
         warning = memory_budget_warning(opts["memory_limit"], jobs)
         if warning:
-            say(f"WARNING: {warning}")
+            console.say(f"WARNING: {warning}")
     if opts["from_step"] > 1:
-        say(f"resuming at step {opts['from_step']}: the runner keeps the existing workdir")
+        console.say(f"resuming at step {opts['from_step']}: the runner keeps the existing workdir")
     if opts["retokenize"]:
-        say(
+        console.say(
             f"--retokenize {opts['retokenize']}: step 2 will DISCARD the cached tokenizations "
             f"for these extensions and redo them."
         )
-        say(
+        console.say(
             "         Every other extension's cached work is kept. blobExec drops the "
             "blob_map rows and the memo entries together, and refuses the run (exit 7) "
             "if the request would have invalidated nothing — so a typo cannot pass as "
             "a successful re-run."
         )
     if opts["mask_widened"]:
-        say(
+        console.say(
             "--mask-widened: step 2 will REUSE each project's existing tokenizations "
             "instead of redoing them."
         )
-        say(
+        console.say(
             "         blobExec verifies per project, against the rows: every "
             "already-tokenized path must still be selected by the new mask, and the "
             "retained new_blob ids must exist in cregit.git. Either check failing "
             "refuses that project (rc 3) and changes nothing."
         )
-        say(
+        console.say(
             "         tree_map, commit_map, ref_map and blob_map's identity rows are "
             "discarded, so files the wider mask newly selects are tokenized rather "
             "than passed through as raw source."
         )
     if opts["shards"] > 1:
-        say(
+        console.say(
             f"sharding {opts['shards']}-way for size class"
             f"{'es' if len(opts['shard_classes']) > 1 else ''} {', '.join(opts['shard_classes'])}"
         )
@@ -1660,14 +1653,14 @@ def start_ledger_run(args: argparse.Namespace, manifest: Path, command: str) -> 
                 "run_id": state.run_info["run_id"],
                 "step": "run-start",
                 "command": command,
-                "start_utc": utc(now),
+                "start_utc": console.utc(now),
                 "tools": state.run_info["tools"],
                 "flags": state.run_info["flags"],
             },
         )
     except OSError as exc:
         sys.exit(f"cannot write the ledger {config.LEDGER}: {exc}")
-    say(f"ledger: {config.LEDGER} (run {state.run_info['run_id']})")
+    console.say(f"ledger: {config.LEDGER} (run {state.run_info['run_id']})")
 
 
 def end_ledger_run(rc: int, started: float, results: dict) -> None:
@@ -1682,8 +1675,8 @@ def end_ledger_run(rc: int, started: float, results: dict) -> None:
                 "run_id": state.run_info.get("run_id", ""),
                 "step": "run-end",
                 "exit_code": rc,
-                "start_utc": utc(started),
-                "end_utc": utc(time.time()),
+                "start_utc": console.utc(started),
+                "end_utc": console.utc(time.time()),
                 "duration_s": round(time.time() - started, 3),
                 "outcomes": counts,
                 **(
@@ -1694,7 +1687,7 @@ def end_ledger_run(rc: int, started: float, results: dict) -> None:
             },
         )
     except OSError as exc:
-        say(f"WARNING: cannot write the run-end row to {config.LEDGER}: {exc}")
+        console.say(f"WARNING: cannot write the run-end row to {config.LEDGER}: {exc}")
 
 
 def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
@@ -1712,7 +1705,7 @@ def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
             if not todo:
                 break
             if attempt:
-                say(f"retry pass {attempt}: {[p['name'] for p in todo]}")
+                console.say(f"retry pass {attempt}: {[p['name'] for p in todo]}")
             with ThreadPoolExecutor(max_workers=jobs) as pool:
                 for p, res in zip(todo, pool.map(run_project, todo), strict=True):
                     results[p["name"]] = res
@@ -1727,7 +1720,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         config.CORPUS / args.manifest, set(args.only.split(",")) if args.only else None
     )
     if not projects:
-        say("nothing to run (empty manifest / --only filter matched nothing)")
+        console.say("nothing to run (empty manifest / --only filter matched nothing)")
         return 0
 
     state.opts.update(run_options(args))
@@ -1741,23 +1734,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     announce_run(state.opts, args.jobs)
 
     run_start = time.time()
-    say("capturing devenv environment (once)...")
+    console.say("capturing devenv environment (once)...")
     state.env.update(capture_devenv_env())
     # A deleted or private repository must fail its clone, not wait for a password.
     state.env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    say(f"devenv environment captured ({len(state.env)} vars)")
+    console.say(f"devenv environment captured ({len(state.env)} vars)")
     start_ledger_run(args, config.CORPUS / args.manifest, "run")
     with config.RUNS_LOG.open("a") as f:
-        f.write(f"{now_iso()}\trun-start\tjobs={args.jobs}\tprojects={len(projects)}\n")
+        f.write(f"{console.now_iso()}\trun-start\tjobs={args.jobs}\tprojects={len(projects)}\n")
 
     results = run_passes(projects, args.jobs, args.retries)
 
     rc = 0 if all(v.is_success for v in results.values()) else 1
     end_ledger_run(rc, run_start, results)
     with config.RUNS_LOG.open("a") as f:
-        f.write(f"{now_iso()}\trun-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
+        f.write(
+            f"{console.now_iso()}\trun-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n"
+        )
 
-    say(f"run finished rc={rc} — " + " ".join(f"{n}:{v}" for n, v in sorted(results.items())))
+    console.say(
+        f"run finished rc={rc} — " + " ".join(f"{n}:{v}" for n, v in sorted(results.items()))
+    )
     return rc
 
 
@@ -1860,7 +1857,7 @@ def schedule(
         if decision == SKIP:
             results[name] = RunOutcome.SKIPPED
         elif decision == GIVE_UP:
-            say(
+            console.say(
                 f"{name} — failed {h.failures + h.interrupted} times "
                 f"(last at {h.last_failed_step or '?'}), more than --retries {retries}; "
                 "not retried"
@@ -1871,7 +1868,9 @@ def schedule(
                 Job(pos, project, h.attempts + 1, h.failures + h.interrupted, decision == POST)
             )
     skipped = sum(1 for v in results.values() if v == RunOutcome.SKIPPED)
-    say(f"census: {total} projects, {skipped} already done, {len(queue)} to run, {workers} workers")
+    console.say(
+        f"census: {total} projects, {skipped} already done, {len(queue)} to run, {workers} workers"
+    )
 
     stop_heartbeat = threading.Event()
     threading.Thread(target=heartbeat, args=(stop_heartbeat, results), daemon=True).start()
@@ -1883,7 +1882,7 @@ def schedule(
                 reason = stop_reason(stop_file)
                 if reason and not state.run_info.get("stop_reason"):
                     state.run_info["stop_reason"] = reason
-                    say(
+                    console.say(
                         f"stopping: {reason}. No new project starts; "
                         f"{len(running)} running will finish"
                     )
@@ -1899,7 +1898,7 @@ def schedule(
                         continue
                     if gate is not None and waiting_since is None:
                         waiting_since = time.time()
-                        say(f"waiting to start {queue[0].project['name']}: {gate}")
+                        console.say(f"waiting to start {queue[0].project['name']}: {gate}")
                 if not running:
                     if reason or not queue:
                         break
@@ -1912,13 +1911,15 @@ def schedule(
                     try:
                         outcome = fut.result()
                     except Exception as exc:  # one project must not end the run
-                        say(f"{name} ✗ crashed the worker: {type(exc).__name__}: {exc}")
+                        console.say(f"{name} ✗ crashed the worker: {type(exc).__name__}: {exc}")
                         outcome = RunOutcome.FAILED
                     results[name] = outcome
                     if outcome == RunOutcome.FAILED:
                         job.failures += 1
                         if job.failures <= retries:
-                            say(f"{name} — failed, retry {job.failures} of {retries} queued")
+                            console.say(
+                                f"{name} — failed, retry {job.failures} of {retries} queued"
+                            )
                             job.attempt += 1
                             job.post = (config.OUT / name / f"{name}.validated").exists()
                             queue.append(job)
@@ -1927,7 +1928,7 @@ def schedule(
                         job.defers += 1
                         wait_s = min(poll * 2**job.defers, DEFER_MAX_S)
                         job.not_before = time.time() + wait_s
-                        say(f"{name} — deferred; next try in {wait_s:.0f}s")
+                        console.say(f"{name} — deferred; next try in {wait_s:.0f}s")
                         queue.append(job)
     finally:
         stop_heartbeat.set()
@@ -1942,13 +1943,13 @@ def install_signal_handlers() -> None:
         if not state.stop.is_set():
             state.run_info["stop_reason"] = f"signal {signal.Signals(signum).name}"
             state.stop.set()
-            say(
+            console.say(
                 f"{signal.Signals(signum).name}: finishing the running projects; "
                 "send it again to terminate them"
             )
             return
         for name, proc in list(state.procs.items()):
-            say(f"terminating {name} (process group {proc.pid})")
+            console.say(f"terminating {name} (process group {proc.pid})")
             with contextlib.suppress(OSError):
                 os.killpg(proc.pid, signal.SIGTERM)
 
@@ -1967,11 +1968,11 @@ def cmd_census(args: argparse.Namespace) -> int:
     manifest = config.CORPUS / args.manifest
     projects = read_manifest(manifest, set(args.only.split(",")) if args.only else None)
     if not projects:
-        say("nothing to run (empty manifest / --only filter matched nothing)")
+        console.say("nothing to run (empty manifest / --only filter matched nothing)")
         return 0
     unpinned = sum(1 for p in projects if not p.get(PINNED_FIELD))
     if unpinned:
-        say(
+        console.say(
             f"WARNING: {unpinned} of {len(projects)} projects are unpinned: each runs the "
             "remote HEAD of its clone day, and the ledger says so"
         )
@@ -1985,7 +1986,7 @@ def cmd_census(args: argparse.Namespace) -> int:
         latest=bool(getattr(args, "latest", False)),
     )
     if state.opts["latest"]:
-        say(
+        console.say(
             "--latest: each project pins the remote head of its default branch when its "
             "first attempt starts; the ledger records it and the manifest commit"
         )
@@ -1998,16 +1999,18 @@ def cmd_census(args: argparse.Namespace) -> int:
             "--commit-url to keep the real commit links.",
         )
     announce_run(state.opts, args.workers)
-    say(f"stop file: {stop_file} (touch it to stop after the running projects)")
+    console.say(f"stop file: {stop_file} (touch it to stop after the running projects)")
 
     run_start = time.time()
-    say("capturing devenv environment (once)...")
+    console.say("capturing devenv environment (once)...")
     state.env.update(capture_devenv_env())
     state.env.setdefault("GIT_TERMINAL_PROMPT", "0")
     start_ledger_run(args, manifest, "census")
     install_signal_handlers()
     with config.RUNS_LOG.open("a") as f:
-        f.write(f"{now_iso()}\tcensus-start\tworkers={args.workers}\tprojects={len(projects)}\n")
+        f.write(
+            f"{console.now_iso()}\tcensus-start\tworkers={args.workers}\tprojects={len(projects)}\n"
+        )
 
     results = schedule(projects, args.workers, args.retries, stop_file, args.poll)
 
@@ -2017,11 +2020,13 @@ def cmd_census(args: argparse.Namespace) -> int:
         rc = 3
     end_ledger_run(rc, run_start, results)
     with config.RUNS_LOG.open("a") as f:
-        f.write(f"{now_iso()}\tcensus-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
+        f.write(
+            f"{console.now_iso()}\tcensus-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n"
+        )
     counts: dict = {}
     for v in results.values():
         counts[str(v)] = counts.get(str(v), 0) + 1
-    say(
+    console.say(
         f"census finished rc={rc}: "
         + ", ".join(f"{k} {n}" for k, n in sorted(counts.items()))
         + (f" (stopped: {state.run_info['stop_reason']})" if stopped else "")

@@ -25,7 +25,7 @@ import ctp
 import ledger
 import pin
 import retain
-from ctplib import config, state
+from ctplib import config, console, state
 from file_mask import UNIVERSAL_MASK
 
 REAL_TOOL_VERSIONS = ctp.tool_versions
@@ -235,6 +235,7 @@ def sandbox(tmp_path, monkeypatch):
 def clock(monkeypatch):
     c = Clock(datetime(2026, 1, 2, 3, 4, 5))
     monkeypatch.setattr(ctp, "datetime", c)
+    monkeypatch.setattr(console, "datetime", c)
     return c
 
 
@@ -1241,7 +1242,7 @@ def beat_once(results: dict) -> str:
     lines: list[str] = []
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(ctp, "HEARTBEAT_S", 0)
-        mp.setattr(ctp, "say", lambda msg: (lines.append(msg), stop.set()))
+        mp.setattr(console, "say", lambda msg: (lines.append(msg), stop.set()))
         ctp.heartbeat(stop, results)
     assert len(lines) == 1
     return lines[0]
@@ -1266,7 +1267,7 @@ def test_heartbeat_returns_immediately_when_already_stopped():
     stop = threading.Event()
     stop.set()
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(ctp, "say", forbidden)
+        mp.setattr(console, "say", forbidden)
         ctp.heartbeat(stop, {})
 
 
@@ -1362,13 +1363,13 @@ def test_main_requires_a_subcommand(monkeypatch):
 
 def test_say_prefixes_every_line_with_a_timestamp(capsys, clock):
     """Log lines are read next to metrics.tsv rows, so they need a clock."""
-    ctp.say("jq ▶ pipeline started")
+    console.say("jq ▶ pipeline started")
     assert capsys.readouterr().out == "[03:04:05] jq ▶ pipeline started\n"
 
 
 def test_now_iso_is_utc_with_second_resolution(clock):
     """metrics.tsv rows are compared across hosts, so the stamp must be UTC."""
-    assert ctp.now_iso() == "2026-01-02T03:04:05+00:00"
+    assert console.now_iso() == "2026-01-02T03:04:05+00:00"
 
 
 # --------------------------------------------------------------------------- #
