@@ -35,6 +35,7 @@ from ctplib import (
     manifest_file,
     memory,
     metrics,
+    pinning,
     resources,
     runtime,
     toolchain,
@@ -193,50 +194,6 @@ def value_args(opts: dict, table: tuple) -> list[str]:
     return [arg for opt, flag in table if opts.get(opt) for arg in (flag, str(opts[opt]))]
 
 
-def pinned_clone_path(name: str) -> Path:
-    """Where the clone step stages a pinned project. Outside the workdir, because
-    the runner deletes the workdir at step 1."""
-    return config.OUT / pin.STAGING_DIR / f"{name}.git"
-
-
-def pin_result_path(name: str) -> Path:
-    return state_dir(name) / "pin.json"
-
-
-def commit_url(url: str) -> str:
-    """The runner's own default, from the real URL rather than the staging path."""
-    return url.removesuffix(".git").rstrip("/") + "/commit/"
-
-
-def pin_args(project: dict, commit: str = "") -> list[str]:
-    """pin.py for this attempt: `commit` (the --latest choice) or the manifest commit."""
-    name = project["name"]
-    return [
-        "python3",
-        str(config.CORPUS / "pin.py"),
-        "--url",
-        project["url"],
-        "--commit",
-        commit or project[manifest_file.PINNED_FIELD],
-        "--dest",
-        str(pinned_clone_path(name)),
-        "--result",
-        str(pin_result_path(name)),
-    ]
-
-
-def drop_pinned_clone(name: str) -> list[str]:
-    """Delete the staging clone. Returns the errors, empty when it is gone."""
-    target = pinned_clone_path(name)
-    if not target.exists() and not target.is_symlink():
-        return []
-    if target.is_symlink() or target.resolve().parent != (config.OUT / pin.STAGING_DIR).resolve():
-        return [
-            f"refusing to delete {target}: not a directory inside {config.OUT / pin.STAGING_DIR}"
-        ]
-    return retain.remove_tree(target)
-
-
 def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     """The run_pipeline_process.sh argv for one project. Assumes check_memo_dir
     has already refused an unsafe --memo-dir."""
@@ -245,7 +202,7 @@ def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     pipeline_args = [
         "./run_pipeline_process.sh",
         "--repo-url",
-        str(pinned_clone_path(name)) if pinned else project["url"],
+        str(pinning.pinned_clone_path(name)) if pinned else project["url"],
         "--repo-name",
         name,
         "--work",
@@ -255,7 +212,7 @@ def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     ]
     if pinned:
         # The runner derives commit links from --repo-url, which is now a local path.
-        pipeline_args += ["--commit-url", commit_url(project["url"])]
+        pipeline_args += ["--commit-url", pinning.commit_url(project["url"])]
     pipeline_args += [flag for opt, flag in _SWITCH_FLAGS if opts.get(opt)]
     pipeline_args += value_args(opts, (("retokenize", "--retokenize"),))
     # One subdirectory per project: tokenBySha.pl keys the memo on the content
@@ -559,7 +516,7 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
         if rc != 0:
             return rc, {}
         try:
-            result = json.loads(pin_result_path(name).read_text())
+            result = json.loads(pinning.pin_result_path(name).read_text())
         except (OSError, ValueError) as exc:
             return 1, {"detail": f"no pin result: {exc}"}
         return rc, {"pin": result}
@@ -583,7 +540,10 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
 
     if ctx.pinned and runtime.opts.get("latest") and not resolve_latest(ctx):
         return False
-    if ctx.pinned and run_step(ctx, "clone", pin_args(ctx.project, ctx.latest), after_clone) != 0:
+    if (
+        ctx.pinned
+        and run_step(ctx, "clone", pinning.pin_args(ctx.project, ctx.latest), after_clone) != 0
+    ):
         return False
     opts = runtime.opts
     resume: dict = {}
@@ -700,8 +660,8 @@ def cleanup_step(ctx: ProjectRun) -> bool:
     The Parquet, its stamp, the logs and the ledger stay. True when clean."""
     name = ctx.name
     start = time.time()
-    errors = drop_pinned_clone(name)
-    removed = [] if errors else ([str(pinned_clone_path(name))] if ctx.pinned else [])
+    errors = pinning.drop_pinned_clone(name)
+    removed = [] if errors else ([str(pinning.pinned_clone_path(name))] if ctx.pinned else [])
     for err in errors:
         console.say(f"{name} — staging clone not fully removed: {err}")
     if runtime.opts.get("cleanup"):

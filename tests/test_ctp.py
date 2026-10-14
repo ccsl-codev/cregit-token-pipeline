@@ -25,7 +25,17 @@ import ctp
 import ledger
 import pin
 import retain
-from ctplib import config, console, manifest_file, memory, metrics, resources, runtime, toolchain
+from ctplib import (
+    config,
+    console,
+    manifest_file,
+    memory,
+    metrics,
+    pinning,
+    resources,
+    runtime,
+    toolchain,
+)
 from file_mask import UNIVERSAL_MASK
 
 REAL_TOOL_VERSIONS = toolchain.tool_versions
@@ -1901,7 +1911,7 @@ def test_a_pinned_project_clones_first_then_runs_from_the_staging_clone(sandbox,
         "--dest",
         str(staging),
         "--result",
-        str(ctp.pin_result_path("jq")),
+        str(pinning.pin_result_path("jq")),
     ]
     argv = runner.argv("pipeline")
     assert argv[argv.index("--repo-url") + 1] == str(staging)
@@ -1939,7 +1949,7 @@ def test_an_unreadable_checkout_fails_a_pinned_project(monkeypatch, pinned_jq):
 
 
 def test_the_staging_clone_is_removed_once_the_project_validates(sandbox, runner, pinned_jq):
-    staging = ctp.pinned_clone_path("jq")
+    staging = pinning.pinned_clone_path("jq")
     staging.mkdir(parents=True)
     (staging / "HEAD").write_text("ref: refs/heads/master\n")
     assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE
@@ -1950,10 +1960,10 @@ def test_a_symlinked_staging_clone_is_not_followed(sandbox, tmp_path):
     victim = tmp_path / "victim"
     victim.mkdir()
     (victim / "keep").write_text("x")
-    staging = ctp.pinned_clone_path("jq")
+    staging = pinning.pinned_clone_path("jq")
     staging.parent.mkdir(parents=True)
     staging.symlink_to(victim)
-    assert ctp.drop_pinned_clone("jq")
+    assert pinning.drop_pinned_clone("jq")
     assert (victim / "keep").exists()
 
 
@@ -2003,7 +2013,7 @@ def test_a_pinned_manifest_runs_on_a_runner_with_commit_url(ready):
     ],
 )
 def test_commit_url_matches_the_runner_default(url, expected):
-    assert ctp.commit_url(url) == expected
+    assert pinning.commit_url(url) == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -2103,7 +2113,7 @@ def test_a_pinned_project_records_the_pin_and_the_checkout(sandbox, runner, pinn
     assert all(r["pinned_sha"] == PINNED_SHA for r in rows)
     assert rows[0]["checked_out_sha"] == ""
     assert all(r["checked_out_sha"] == PINNED_SHA for r in rows[1:])
-    assert rows[4]["cleanup"]["removed"] == [str(ctp.pinned_clone_path("jq"))]
+    assert rows[4]["cleanup"]["removed"] == [str(pinning.pinned_clone_path("jq"))]
 
 
 def test_a_clone_without_a_result_file_fails(monkeypatch, sandbox, pinned_jq):
@@ -2177,7 +2187,7 @@ def test_a_refused_prune_makes_the_project_done_dirty(monkeypatch, sandbox, runn
 def test_a_staging_clone_that_cannot_be_removed_makes_it_done_dirty(
     monkeypatch, sandbox, runner, pinned_jq
 ):
-    monkeypatch.setattr(ctp, "drop_pinned_clone", lambda name: ["permission denied"])
+    monkeypatch.setattr(pinning, "drop_pinned_clone", lambda name: ["permission denied"])
     assert ctp.run_project(pinned_jq) == ctp.RunOutcome.DONE_DIRTY
 
 
