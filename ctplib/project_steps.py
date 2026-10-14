@@ -233,6 +233,45 @@ def cleanup_step(ctx: project_run.ProjectRun) -> bool:
     return not errors
 
 
+def validate_and_publish(
+    ctx: project_run.ProjectRun, workdir: Path, stamp: Path, post_only: bool
+) -> bool:
+    """The steps up to validation (or, post_only, the record of an earlier validation),
+    then schema, anonymize and join. True when every step passed."""
+    if post_only:
+        console.say(f"{ctx.name} — validated earlier; resuming at the steps after validation")
+        ctx.parquet = artifacts.parquet_info(ctx.name)
+        ctx.checked_out_sha = toolchain.runner_checkout(ctx.name, workdir)
+    elif not build_steps(ctx, workdir, stamp):
+        return False
+    publishes = runtime.opts.get("join") or runtime.opts.get("anonymize")
+    return not publishes or publish_steps(ctx)
+
+
+def run_locked(
+    ctx: project_run.ProjectRun, workdir: Path, stamp: Path, post_only: bool
+) -> project_run.RunOutcome:
+    """The steps of one project, with its lock held. Returns the final outcome."""
+    name = ctx.name
+    if not post_only and shutil.disk_usage(config.OUT).free < config.DISK_FLOOR_GB * 2**30:
+        console.say(f"{name} — disk below {config.DISK_FLOOR_GB}G floor, deferred")
+        return ctx.finish(ledger.DEFERRED, detail=f"disk below {config.DISK_FLOOR_GB}G")
+
+    if not post_only and not workdir_state.check_memo_dir(name, runtime.opts, workdir):
+        ctx.failed_step = "preflight"
+        return ctx.finish(ledger.FAILED, detail="--memo-dir is inside the workdir")
+
+    try:
+        if not validate_and_publish(ctx, workdir, stamp, post_only):
+            return ctx.finish(ledger.FAILED)
+    except OSError as exc:
+        console.say(f"{name} ✗ a phase could not start: {exc}")
+        return ctx.finish(ledger.FAILED)
+
+    clean = cleanup_step(ctx)
+    return ctx.finish(ledger.DONE if clean else ledger.DONE_DIRTY)
+
+
 def run_project(
     project: dict,
     queue_pos: int | None = None,
@@ -268,33 +307,7 @@ def run_project(
 
         runtime.lock_fds[name] = lockfile.fileno()
         try:
-            if not post_only and shutil.disk_usage(config.OUT).free < config.DISK_FLOOR_GB * 2**30:
-                console.say(f"{name} — disk below {config.DISK_FLOOR_GB}G floor, deferred")
-                return ctx.finish(ledger.DEFERRED, detail=f"disk below {config.DISK_FLOOR_GB}G")
-
-            if not post_only and not workdir_state.check_memo_dir(name, runtime.opts, workdir):
-                ctx.failed_step = "preflight"
-                return ctx.finish(ledger.FAILED, detail="--memo-dir is inside the workdir")
-
-            try:
-                if post_only:
-                    console.say(
-                        f"{name} — validated earlier; resuming at the steps after validation"
-                    )
-                    ctx.parquet = artifacts.parquet_info(name)
-                    ctx.checked_out_sha = toolchain.runner_checkout(name, workdir)
-                elif not build_steps(ctx, workdir, stamp):
-                    return ctx.finish(ledger.FAILED)
-                if (
-                    runtime.opts.get("join") or runtime.opts.get("anonymize")
-                ) and not publish_steps(ctx):
-                    return ctx.finish(ledger.FAILED)
-            except OSError as exc:
-                console.say(f"{name} ✗ a phase could not start: {exc}")
-                return ctx.finish(ledger.FAILED)
-
-            clean = cleanup_step(ctx)
-            return ctx.finish(ledger.DONE if clean else ledger.DONE_DIRTY)
+            return run_locked(ctx, workdir, stamp, post_only)
         except Exception as exc:
             # A bug here must not leave the attempt without its final row.
             console.say(f"{name} ✗ internal error: {type(exc).__name__}: {exc}")
