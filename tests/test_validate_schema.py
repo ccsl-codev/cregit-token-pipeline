@@ -10,7 +10,6 @@ import pytest
 
 import validate_schema as vs
 
-
 CONTRACT = vs.EXPECTED_COLUMNS
 GOOD = list(CONTRACT)
 

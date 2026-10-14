@@ -19,7 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -57,7 +57,7 @@ class PinError(Exception):
 
 
 def log(msg: str) -> None:
-    print(f"[pin {datetime.now(timezone.utc):%H:%M:%S}] {msg}", flush=True)
+    print(f"[pin {datetime.now(UTC):%H:%M:%S}] {msg}", flush=True)
 
 
 def git(

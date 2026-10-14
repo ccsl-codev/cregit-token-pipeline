@@ -724,19 +724,19 @@ def test_output_dir_follows_an_absolute_path_in_pipeline_cfg(tmp_path):
     target = tmp_path / "elsewhere" / "corpus-files"
     target.mkdir(parents=True)
     _, module = load_retain_copy(tmp_path, f"[paths]\noutput_dir = {target}\n")
-    assert module.OUT == target.resolve()
+    assert target.resolve() == module.OUT
 
 
 def test_output_dir_follows_a_relative_path_in_pipeline_cfg(tmp_path):
     """A relative output_dir is resolved against the repo, as ctp.py does."""
     repo, module = load_retain_copy(tmp_path, "[paths]\noutput_dir = ../shared/files\n")
-    assert module.OUT == (repo / ".." / "shared" / "files").resolve()
+    assert (repo / ".." / "shared" / "files").resolve() == module.OUT
 
 
 def test_output_dir_falls_back_only_when_the_config_is_silent(tmp_path):
     """The hardcoded string is a fallback, not the source of truth."""
     repo, module = load_retain_copy(tmp_path, "[paths]\ncregit_dir = /x\n")
-    assert module.OUT == (repo / "../cregit-workspace/corpus-files").resolve()
+    assert (repo / "../cregit-workspace/corpus-files").resolve() == module.OUT
 
 
 def test_a_configured_output_dir_is_the_one_pruned(tmp_path, monkeypatch):

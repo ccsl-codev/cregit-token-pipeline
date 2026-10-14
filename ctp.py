@@ -6,6 +6,7 @@ Ledgers: metrics.tsv (one row per phase attempt), runs.log, state/<name>/logs (n
 from __future__ import annotations
 
 import argparse
+import configparser
 import fcntl
 import functools
 import hashlib
@@ -21,17 +22,15 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-
-import configparser
 
 import ledger
 import pin
 import retain
-from retain import lock_path, state_dir
 from file_mask import UNIVERSAL_MASK
+from retain import lock_path, state_dir
 
 # .resolve() canonicalizes to /local/home form — blobExec's meta table refuses
 # resume if the command path string drifts (/home vs /local/home symlink alias).
@@ -101,7 +100,7 @@ _live: dict = {}
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def say(msg: str) -> None:
@@ -162,7 +161,7 @@ _OPTS: dict = {}
 _RUN: dict = {}
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _script_supports_cached(cregit: Path, flag: str) -> bool:
     try:
         text = (cregit / "run_pipeline_process.sh").read_text()

@@ -114,7 +114,7 @@ def test_project_meta_holds_the_29_fields_the_generator_reads(tmp_path):
 
 def test_meta_fields_match_the_schema_contract():
     """Columns 2..30 of the dataset are the sidecar fields, in order."""
-    assert bm.META_FIELDS == tuple(c for c, _ in validate_schema.EXPECTED_COLUMNS[1:30])
+    assert tuple(c for c, _ in validate_schema.EXPECTED_COLUMNS[1:30]) == bm.META_FIELDS
 
 
 def test_the_order_file_maps_queue_position_to_slug_and_u(tmp_path):

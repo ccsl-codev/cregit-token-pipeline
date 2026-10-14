@@ -12,8 +12,8 @@ import configparser
 import fcntl
 import sys
 import time
-from contextlib import contextmanager
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import astuple, dataclass
 from pathlib import Path
 

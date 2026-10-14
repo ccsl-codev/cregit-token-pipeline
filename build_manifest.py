@@ -36,7 +36,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 from file_mask import UNIVERSAL_MASK
@@ -237,7 +237,7 @@ def build(frame: Path, limit: int | None = None) -> tuple[str, dict, str, dict]:
         queue = queue[:limit]
     digest = sha256_of(frame)
     status = f"frame:{frame.name}@sha256:{digest[:12]}"
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
     header = (
         f"# Built by build_manifest.py from {frame.name} (sha256 {digest}) at {stamp}.\n"
         f"# {len(queue)} projects in u order; u = first {U_BITS} bits of "

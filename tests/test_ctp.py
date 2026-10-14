@@ -5,9 +5,9 @@ real corpus or starts a process; a test that needs one installs a fake."""
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
-import fcntl
 import os
 import shutil
 import threading
