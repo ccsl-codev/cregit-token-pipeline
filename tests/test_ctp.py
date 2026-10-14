@@ -25,7 +25,7 @@ import ctp
 import ledger
 import pin
 import retain
-from ctplib import config, console, manifest_file, memory, runtime
+from ctplib import config, console, manifest_file, memory, metrics, runtime
 from file_mask import UNIVERSAL_MASK
 
 REAL_TOOL_VERSIONS = ctp.tool_versions
@@ -716,10 +716,10 @@ def test_a_failed_firm_phase_fails_the_project_unstamped(sandbox, monkeypatch, j
 def test_metrics_is_append_only_with_seven_fields_per_row(sandbox):
     """Rewriting metrics.tsv destroys the benchmark history."""
     log = ctp.state_dir("jq") / "logs" / "pipeline-1.log"
-    ctp.record_metric("jq", "S", "pipeline", 34, 139, log)
+    metrics.record_metric("jq", "S", "pipeline", 34, 139, log)
     first = (sandbox.root / "metrics.tsv").read_text().splitlines()[1]
 
-    ctp.record_metric("jq", "S", "pipeline", 11, 1, log)
+    metrics.record_metric("jq", "S", "pipeline", 11, 1, log)
     lines = (sandbox.root / "metrics.tsv").read_text().splitlines()
 
     assert lines[0].split("\t") == [
@@ -1292,7 +1292,7 @@ def test_cmd_status_classifies_every_project_state(sandbox, capsys, held_lock):
     (sandbox.out / "done" / "done.validated").write_text("rows=1\nbytes=2\n")
     (sandbox.out / "failed").mkdir()
     (sandbox.out / "running").mkdir()
-    ctp.record_metric("done", "S", "validate", 3, 0, Path("/logs/validate-1.log"))
+    metrics.record_metric("done", "S", "validate", 3, 0, Path("/logs/validate-1.log"))
 
     with held_lock(ctp.lock_path("running")):
         assert ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv")) == 0

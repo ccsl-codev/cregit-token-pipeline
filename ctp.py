@@ -29,7 +29,7 @@ from pathlib import Path
 import ledger
 import pin
 import retain
-from ctplib import config, console, manifest_file, memory, runtime
+from ctplib import config, console, manifest_file, memory, metrics, runtime
 from retain import lock_path, state_dir
 
 DEVENV = Path.home() / ".nix-profile/bin/devenv"
@@ -60,17 +60,6 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 # The last step, which writes the Parquet. The runner accepts --from-step 11+ and
 # exits 0 having done nothing, so such a run cannot publish a blank Parquet.
 DATASET_STEP = 10
-
-
-_metrics_lock = threading.Lock()
-
-
-def record_metric(project: str, cls: str, phase: str, duration: int, rc: int, log: Path) -> None:
-    with _metrics_lock:
-        if not config.METRICS.exists():
-            config.METRICS.write_text("iso_start\tproject\tclass\tphase\tduration_s\trc\tlog\n")
-        with config.METRICS.open("a") as f:
-            f.write(f"{console.now_iso()}\t{project}\t{cls}\t{phase}\t{duration}\t{rc}\t{log}\n")
 
 
 @functools.cache
@@ -240,7 +229,7 @@ class ResourceSampler:
         )
         p["samples"] += 1
 
-        with _metrics_lock:
+        with metrics.TSV_LOCK:
             if not config.RESOURCES.exists():
                 config.RESOURCES.write_text("\t".join(RESOURCE_FIELDS) + "\n")
             with config.RESOURCES.open("a") as f:
@@ -304,7 +293,7 @@ def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) 
             peak = sampler.stop()
     duration = int(time.time() - start)
 
-    record_metric(name, cls, phase, duration, rc, logfile)
+    metrics.record_metric(name, cls, phase, duration, rc, logfile)
     mark = "✓" if rc == 0 else f"✗ rc={rc}"
     console.say(
         f"{name} {mark} {phase} in {duration}s"
