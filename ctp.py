@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import contextlib
 import fcntl
 import functools
 import hashlib
@@ -22,7 +23,7 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -120,7 +121,7 @@ def read_manifest(path: Path, only: set | None) -> list[dict]:
                 f" fields, or {len(MANIFEST_FIELDS) + 1} with a pinned commit,"
                 f" got {len(fields)}: {line!r}"
             )
-        row = dict(zip(MANIFEST_FIELDS, fields))
+        row = dict(zip(MANIFEST_FIELDS, fields, strict=False))
         if len(fields) > len(MANIFEST_FIELDS):
             row[PINNED_FIELD] = fields[-1]
             if not pin.SHA_RE.match(row[PINNED_FIELD]):
@@ -684,7 +685,7 @@ def parquet_info(name: str) -> dict:
     except OSError as exc:
         info["error"] = f"{type(exc).__name__}: {exc}"
     try:
-        kv = dict(l.split("=", 1) for l in stamp.read_text().splitlines() if "=" in l)
+        kv = dict(line.split("=", 1) for line in stamp.read_text().splitlines() if "=" in line)
         info["rows"] = int(kv["rows"])
     except (OSError, KeyError, ValueError):
         info["rows"] = None
@@ -1736,7 +1737,7 @@ def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
             if attempt:
                 say(f"retry pass {attempt}: {[p['name'] for p in todo]}")
             with ThreadPoolExecutor(max_workers=jobs) as pool:
-                for p, res in zip(todo, pool.map(run_project, todo)):
+                for p, res in zip(todo, pool.map(run_project, todo), strict=True):
                     results[p["name"]] = res
     finally:
         stop.set()
@@ -1975,10 +1976,8 @@ def install_signal_handlers() -> None:
             return
         for name, proc in list(_procs.items()):
             say(f"terminating {name} (process group {proc.pid})")
-            try:
+            with contextlib.suppress(OSError):
                 os.killpg(proc.pid, signal.SIGTERM)
-            except OSError:
-                pass
 
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)

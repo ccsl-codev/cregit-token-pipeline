@@ -19,7 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")

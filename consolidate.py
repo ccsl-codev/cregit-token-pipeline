@@ -125,7 +125,7 @@ def manifest_entries(manifests: Sequence[Path]):
 
 def stamp_rows(name: str, stamp: Path) -> tuple[int | None, bool]:
     """(token_rows, rows_unreadable) from a validated stamp."""
-    kv = dict(l.split("=", 1) for l in stamp.read_text().splitlines() if "=" in l)
+    kv = dict(line.split("=", 1) for line in stamp.read_text().splitlines() if "=" in line)
     raw = kv.get("rows", 0)
     try:
         return int(raw), False

@@ -36,7 +36,7 @@ import json
 import os
 import re
 import sys
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from file_mask import UNIVERSAL_MASK

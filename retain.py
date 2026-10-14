@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import contextlib
 import fcntl
 import os
 import shutil
@@ -305,10 +306,8 @@ def disk_bytes(path: Path) -> int:
     if path.is_dir() and not path.is_symlink():
         for root, dirs, files in os.walk(path):
             for entry in dirs + files:
-                try:
+                with contextlib.suppress(OSError):
                     total += os.lstat(os.path.join(root, entry)).st_blocks * 512
-                except OSError:
-                    pass
     return total
 
 
