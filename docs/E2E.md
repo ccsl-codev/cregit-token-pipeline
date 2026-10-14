@@ -69,6 +69,7 @@ For each project, in manifest order, `census` runs these steps:
 
 1. `clone`: `pin.py` fetches the pinned commit into
    `<output_dir>/.ctp-pinned/<name>.git` and keeps only that commit's history.
+   The one branch it keeps has the name of the remote's default branch.
    It fetches by SHA first. When the host refuses that, it fetches every
    branch and tag. A commit that is on neither stops with exit 3.
 2. `pipeline`: cregit's `run_pipeline_process.sh`, cloning the staging clone.
@@ -155,7 +156,8 @@ Both are off by default, until the decision is made.
 ## 3. Audit a project
 
 Every step appends rows to `ledger.jsonl` in this repository. The file is only
-appended to: each row is written whole under a lock and fsynced.
+appended to: each row is written whole under a lock and fsynced. So two
+runs never mix their rows, and a crash loses at most the row it was writing.
 
 ```sh
 ./ctp.py audit DaveGamble__cJSON          # one line per step
