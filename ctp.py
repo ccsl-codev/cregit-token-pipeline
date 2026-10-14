@@ -18,8 +18,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
-from enum import StrEnum
+from dataclasses import dataclass
 from pathlib import Path
 
 import ledger
@@ -31,8 +30,8 @@ from ctplib import (
     console,
     manifest_file,
     memory,
-    phases,
     pinning,
+    project_run,
     runner_args,
     runtime,
     toolchain,
@@ -48,22 +47,6 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 # The last step, which writes the Parquet. The runner accepts --from-step 11+ and
 # exits 0 having done nothing, so such a run cannot publish a blank Parquet.
 DATASET_STEP = 10
-
-
-class RunOutcome(StrEnum):
-    """The result of one run_project call. Values match the strings already
-    written to metrics.tsv and runs.log."""
-
-    DONE = "done"
-    DONE_DIRTY = "done-dirty"
-    SKIPPED = "skipped"
-    FAILED = "failed"
-    DEFERRED = "deferred"
-
-    @property
-    def is_success(self) -> bool:
-        """The Parquet is valid. done-dirty is a success that left work files behind."""
-        return self in (RunOutcome.DONE, RunOutcome.DONE_DIRTY, RunOutcome.SKIPPED)
 
 
 def check_memo_dir(name: str, opts: dict, workdir: Path) -> bool:
@@ -100,120 +83,6 @@ def checkout_matches(name: str, workdir: Path, pinned: str) -> tuple[bool, str]:
     return True, seen
 
 
-@dataclass
-class ProjectRun:
-    """One attempt at one project, and the context every ledger row carries."""
-
-    project: dict
-    queue_pos: int | None = None
-    queue_total: int | None = None
-    attempt: int = 1
-    checked_out_sha: str = ""
-    latest: str = ""  # --latest: the remote head this attempt pins, else ""
-    parquet: dict | None = None
-    failed_step: str = ""
-    started: float = field(default_factory=time.time)
-
-    @property
-    def name(self) -> str:
-        return self.project["name"]
-
-    @property
-    def pinned(self) -> str:
-        return self.latest or self.project.get(manifest_file.PINNED_FIELD, "")
-
-    def base(self) -> dict:
-        mask = runtime.opts.get("mask") or self.project["file_filter"]
-        return {
-            "v": ledger.VERSION,
-            "run_id": runtime.run_info.get("run_id", ""),
-            "project": self.name,
-            "queue_pos": self.queue_pos,
-            "queue_total": self.queue_total,
-            "attempt": self.attempt,
-            "manifest_row": dict(self.project),
-            "pinned_sha": self.pinned or manifest_file.UNPINNED,
-            # The manifest commit, when --latest pinned another one.
-            **(
-                {"snapshot_sha": self.project.get(manifest_file.PINNED_FIELD, "")}
-                if self.latest
-                else {}
-            ),
-            "checked_out_sha": self.checked_out_sha,
-            "file_mask_sha256": artifacts.sha256_text(mask),
-            "tools": runtime.run_info.get("tools", {}),
-            "flags": runtime.run_info.get("flags", {}),
-        }
-
-    def record(self, step: str, status: str, start: float, end: float, **extra) -> None:
-        row = self.base()
-        row.update(
-            step=step,
-            status=status,
-            start_utc=console.utc(start),
-            end_utc=console.utc(end),
-            duration_s=round(end - start, 3),
-        )
-        row.update(extra)
-        try:
-            ledger.append(config.LEDGER, row)
-        except OSError as exc:
-            # The audit trail is the point of the run: stop handing out new projects.
-            runtime.run_info["ledger_broken"] = f"{type(exc).__name__}: {exc}"
-            console.say(f"{self.name} ✗ LEDGER WRITE FAILED ({exc}); the run stops dispatching")
-
-    def finish(self, state: str, **extra) -> RunOutcome:
-        if state == ledger.FAILED:
-            extra.setdefault("failed_step", self.failed_step)
-        if self.parquet is not None:
-            extra.setdefault("parquet", self.parquet)
-        self.record(ledger.FINAL_STEP, state, self.started, time.time(), state=state, **extra)
-        return RunOutcome(state)
-
-
-def run_step(ctx: ProjectRun, step: str, argv: list[str], after=None) -> int:
-    """Run one phase and append its ledger rows: one when it starts, so a crash shows
-    which step was running, and one when it ends. `after(rc)` may veto a success and
-    add fields: it returns (rc, extra). Re-raises OSError after recording it."""
-    start = time.time()
-    ctx.record(step, "started", start, start, argv=argv)
-    try:
-        rc = phases.run_phase(ctx.project, step, argv, keep_fds=_held_fds(ctx.name))
-    except OSError as exc:
-        ctx.record(
-            step,
-            "failed",
-            start,
-            time.time(),
-            exit_code=None,
-            argv=argv,
-            detail=f"could not start: {exc}",
-        )
-        ctx.failed_step = step
-        raise
-    extra: dict = {}
-    if after is not None:
-        rc, extra = after(rc)
-    ctx.record(
-        step,
-        "ok" if rc == 0 else "failed",
-        start,
-        time.time(),
-        exit_code=rc,
-        argv=argv,
-        log=phases.latest_log(ctx.name, step),
-        **extra,
-    )
-    if rc != 0:
-        ctx.failed_step = step
-    return rc
-
-
-def _held_fds(name: str) -> tuple:
-    fd = runtime.lock_fds.get(name)
-    return (fd,) if fd is not None else ()
-
-
 LATEST_TIMEOUT_S = 300
 
 
@@ -230,7 +99,7 @@ def recorded_latest(name: str) -> str:
     return sha if pin.SHA_RE.match(sha) else ""
 
 
-def resolve_latest(ctx: ProjectRun) -> bool:
+def resolve_latest(ctx: project_run.ProjectRun) -> bool:
     """--latest: pin this attempt to the remote head of the project's default branch.
     The first attempt reads it with `git ls-remote` and keeps the choice in
     state/<name>/latest.json; a later attempt reuses it, so a resumed run keeps its
@@ -331,7 +200,7 @@ def drop_derived(name: str, workdir: Path) -> tuple[list[str], list[str]]:
     return dropped, errors
 
 
-def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
+def build_steps(ctx: project_run.ProjectRun, workdir: Path, stamp: Path) -> bool:
     """clone (when pinned), pipeline, firm, validate. True when the project validated."""
     name = ctx.name
 
@@ -365,7 +234,10 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
         return False
     if (
         ctx.pinned
-        and run_step(ctx, "clone", pinning.pin_args(ctx.project, ctx.latest), after_clone) != 0
+        and project_run.run_step(
+            ctx, "clone", pinning.pin_args(ctx.project, ctx.latest), after_clone
+        )
+        != 0
     ):
         return False
     opts = runtime.opts
@@ -408,7 +280,7 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
         return rc, ({**extra, "resume": resume} if resume else extra)
 
     if (
-        run_step(
+        project_run.run_step(
             ctx,
             "pipeline",
             runner_args.build_pipeline_args(ctx.project, opts, workdir),
@@ -419,19 +291,19 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
         return False
     # firm adds the 3 firm columns to cregit's 67; validate gates the 70.
     later = dict(runner_args.project_phases(ctx.project, runtime.opts, workdir, stamp))
-    if run_step(ctx, "firm", later["firm"]) != 0:
+    if project_run.run_step(ctx, "firm", later["firm"]) != 0:
         return False
-    return run_step(ctx, "validate", later["validate"], after_validate) == 0
+    return project_run.run_step(ctx, "validate", later["validate"], after_validate) == 0
 
 
-def publish_steps(ctx: ProjectRun) -> bool:
+def publish_steps(ctx: project_run.ProjectRun) -> bool:
     """schema (validate_schema.py), anonymize (only with --anonymize), then join
     (an incremental consolidate into ctp.duckdb). True when every step passes."""
     name = ctx.name
     parquet = config.OUT / name / f"{name}-dataset.parquet"
     if (
         runtime.opts.get("join")
-        and run_step(
+        and project_run.run_step(
             ctx, "schema", ["python3", str(config.CORPUS / "validate_schema.py"), str(parquet)]
         )
         != 0
@@ -447,7 +319,7 @@ def publish_steps(ctx: ProjectRun) -> bool:
 
         # The interface of anonymize_parquet.py: an output directory, then the inputs.
         if (
-            run_step(
+            project_run.run_step(
                 ctx,
                 "anonymize",
                 [
@@ -464,7 +336,7 @@ def publish_steps(ctx: ProjectRun) -> bool:
     if not runtime.opts.get("join"):
         return True
     return (
-        run_step(
+        project_run.run_step(
             ctx,
             "join",
             [
@@ -480,7 +352,7 @@ def publish_steps(ctx: ProjectRun) -> bool:
     )
 
 
-def cleanup_step(ctx: ProjectRun) -> bool:
+def cleanup_step(ctx: project_run.ProjectRun) -> bool:
     """Remove the staging clone; then, with --cleanup, every bulky work file (the
     clones, memo/, blame/, the work databases), or only memo/ under --drop-memo.
     The Parquet, its stamp, the logs and the ledger stay. True when clean."""
@@ -538,11 +410,11 @@ def run_project(
     queue_total: int | None = None,
     attempt: int = 1,
     resume_validated: bool = False,
-) -> RunOutcome:
+) -> project_run.RunOutcome:
     """Runs one project's steps and appends a ledger row for each. Returns a RunOutcome.
     A validated project is skipped, unless resume_validated: then only the steps after
     validation run (schema, join, cleanup), as after a crash between them."""
-    ctx = ProjectRun(project, queue_pos, queue_total, attempt)
+    ctx = project_run.ProjectRun(project, queue_pos, queue_total, attempt)
     name = project["name"]
     if runtime.opts.get("latest") and project.get(manifest_file.PINNED_FIELD):
         # An attempt that only runs the steps after validation clones nothing, so
@@ -553,7 +425,7 @@ def run_project(
     post_only = stamp.exists()
     if post_only and not resume_validated:
         console.say(f"{name} — already validated, skip")
-        return RunOutcome.SKIPPED
+        return project_run.RunOutcome.SKIPPED
 
     workdir.mkdir(parents=True, exist_ok=True)
     state_dir(name).mkdir(parents=True, exist_ok=True)
@@ -611,7 +483,7 @@ def heartbeat(stop: threading.Event, results: dict) -> None:
         )
         free_gb = shutil.disk_usage(config.OUT).free // 2**30
         done = sum(1 for v in results.values() if v.is_success)
-        failed = sum(1 for v in results.values() if v == RunOutcome.FAILED)
+        failed = sum(1 for v in results.values() if v == project_run.RunOutcome.FAILED)
         console.say(
             f"♥ running: {running or '—'} | done {done} failed {failed} | disk {free_gb}G free"
         )
@@ -1239,19 +1111,19 @@ def schedule(
         h = histories.get(name, ledger.History())
         decision = plan(project, h, retries)
         if decision == SKIP:
-            results[name] = RunOutcome.SKIPPED
+            results[name] = project_run.RunOutcome.SKIPPED
         elif decision == GIVE_UP:
             console.say(
                 f"{name} — failed {h.failures + h.interrupted} times "
                 f"(last at {h.last_failed_step or '?'}), more than --retries {retries}; "
                 "not retried"
             )
-            results[name] = RunOutcome.FAILED
+            results[name] = project_run.RunOutcome.FAILED
         else:
             queue.append(
                 Job(pos, project, h.attempts + 1, h.failures + h.interrupted, decision == POST)
             )
-    skipped = sum(1 for v in results.values() if v == RunOutcome.SKIPPED)
+    skipped = sum(1 for v in results.values() if v == project_run.RunOutcome.SKIPPED)
     console.say(
         f"census: {total} projects, {skipped} already done, {len(queue)} to run, {workers} workers"
     )
@@ -1296,9 +1168,9 @@ def schedule(
                         outcome = fut.result()
                     except Exception as exc:  # one project must not end the run
                         console.say(f"{name} ✗ crashed the worker: {type(exc).__name__}: {exc}")
-                        outcome = RunOutcome.FAILED
+                        outcome = project_run.RunOutcome.FAILED
                     results[name] = outcome
-                    if outcome == RunOutcome.FAILED:
+                    if outcome == project_run.RunOutcome.FAILED:
                         job.failures += 1
                         if job.failures <= retries:
                             console.say(
@@ -1307,7 +1179,7 @@ def schedule(
                             job.attempt += 1
                             job.post = (config.OUT / name / f"{name}.validated").exists()
                             queue.append(job)
-                    elif outcome == RunOutcome.DEFERRED:
+                    elif outcome == project_run.RunOutcome.DEFERRED:
                         # Another process holds it: try again later, waiting longer each time.
                         job.defers += 1
                         wait_s = min(poll * 2**job.defers, DEFER_MAX_S)
