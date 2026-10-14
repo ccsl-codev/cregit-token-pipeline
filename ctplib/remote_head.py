@@ -27,10 +27,9 @@ def recorded_latest(name: str) -> str:
 
 
 def resolve_latest(ctx: project_run.ProjectRun) -> bool:
-    """--latest: pin this attempt to the remote head of the project's default branch.
-    The first attempt reads it with `git ls-remote` and keeps the choice in
-    state/<name>/latest.json; a later attempt reuses it, so a resumed run keeps its
-    finished work at one commit. Records a 'resolve' ledger row. False on a failure."""
+    """--latest: pin this attempt to the remote head of the default branch.
+    The first attempt keeps the choice in state/<name>/latest.json. Later attempts
+    reuse it, so a resumed run stays at one commit. False on failure."""
     start = time.time()
     path = latest_path(ctx.name)
     reused = True

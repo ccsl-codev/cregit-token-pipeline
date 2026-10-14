@@ -76,7 +76,7 @@ def plan(project: dict, history: ledger.History, retries: int) -> str:
 
 @dataclass
 class Job:
-    """One queued project of a census."""
+    """One queued project of a dataset run."""
 
     pos: int
     project: dict

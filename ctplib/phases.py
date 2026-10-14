@@ -40,10 +40,9 @@ def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) 
     sampler = resources.ResourceSampler(project, phase)
     # Popen, not run: the sampler needs the child's pid to attribute RSS to this project.
     with logfile.open("wb") as lf:
-        # keep_fds hands the project's flock to the child, so a process tree that
-        # outlives this runner still holds the lock, and no second run can start.
-        # A census child gets its own session: Ctrl-C reaches only ctp, which
-        # then lets the running projects finish instead of killing them mid-step.
+        # keep_fds gives the project lock to the child, which keeps it if ctp dies.
+        # A dataset run puts the child in its own session. Ctrl-C then reaches
+        # only ctp, and running projects finish their step.
         extra = {"pass_fds": keep_fds} if keep_fds else {}
         if runtime.opts.get("own_session"):
             extra["start_new_session"] = True

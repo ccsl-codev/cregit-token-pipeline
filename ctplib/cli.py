@@ -6,7 +6,7 @@ import argparse
 
 from ctplib import config, passes, report, scheduler
 
-# The text of --help. It was the docstring of ctp.py; keep it byte for byte.
+# The text of --help. Keep it byte for byte.
 DESCRIPTION = (
     "ctp — cregit-token-pipeline runner: runs cregit over every project in manifest.tsv.\n"
     "Per project: pipeline -> firm -> validate -> stamp; a validated project is skipped.\n"
@@ -16,7 +16,7 @@ DESCRIPTION = (
 
 
 def add_project_options(p: argparse.ArgumentParser) -> None:
-    """The options of one project run, shared by run and census."""
+    """The options of one project run, shared by `run` and `census`."""
     p.add_argument(
         "--skip-html",
         action="store_true",
