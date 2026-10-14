@@ -6,6 +6,7 @@ import fcntl
 import json
 import shutil
 import time
+from functools import partial
 from pathlib import Path
 
 import ledger
@@ -26,46 +27,43 @@ from ctplib import (
 from retain import lock_path, state_dir
 
 
-def build_steps(ctx: project_run.ProjectRun, workdir: Path, stamp: Path) -> bool:
-    """clone (when pinned), pipeline, firm, validate. True when the project validated."""
-    name = ctx.name
-
-    def after_clone(rc: int):
-        if rc != 0:
-            return rc, {}
-        try:
-            result = json.loads(pinning.pin_result_path(name).read_text())
-        except (OSError, ValueError) as exc:
-            return 1, {"detail": f"no pin result: {exc}"}
-        return rc, {"pin": result}
-
-    def after_pipeline(rc: int):
-        if rc != 0:
-            return rc, {}
-        ok, seen = workdir_state.checkout_matches(name, workdir, ctx.pinned)
-        ctx.checked_out_sha = seen
-        if not ok:
-            return 1, {
-                "detail": f"checked out {seen or 'nothing readable'}, not the pinned {ctx.pinned}"
-            }
+def check_pin_result(name: str, rc: int):
+    """After the clone: pin.py must have written its result file."""
+    if rc != 0:
         return rc, {}
+    try:
+        result = json.loads(pinning.pin_result_path(name).read_text())
+    except (OSError, ValueError) as exc:
+        return 1, {"detail": f"no pin result: {exc}"}
+    return rc, {"pin": result}
 
-    def after_validate(rc: int):
-        if rc != 0:
-            return rc, {}
-        ctx.parquet = artifacts.parquet_info(name)
-        return rc, {"parquet": ctx.parquet}
 
-    if ctx.pinned and runtime.opts.get("latest") and not remote_head.resolve_latest(ctx):
-        return False
-    if (
-        ctx.pinned
-        and project_run.run_step(
-            ctx, "clone", pinning.pin_args(ctx.project, ctx.latest), after_clone
-        )
-        != 0
-    ):
-        return False
+def check_checkout(ctx: project_run.ProjectRun, workdir: Path, resume: dict, rc: int):
+    """After the pipeline: the runner must have checked out the pinned commit."""
+    extra = {"resume": resume} if resume else {}
+    if rc != 0:
+        return rc, extra
+    ok, seen = workdir_state.checkout_matches(ctx.name, workdir, ctx.pinned)
+    ctx.checked_out_sha = seen
+    if not ok:
+        detail = f"checked out {seen or 'nothing readable'}, not the pinned {ctx.pinned}"
+        return 1, {"detail": detail, **extra}
+    return rc, extra
+
+
+def record_parquet(ctx: project_run.ProjectRun, rc: int):
+    """After validate: keep the Parquet record for the ledger rows."""
+    if rc != 0:
+        return rc, {}
+    ctx.parquet = artifacts.parquet_info(ctx.name)
+    return rc, {"parquet": ctx.parquet}
+
+
+def pipeline_options(ctx: project_run.ProjectRun, workdir: Path) -> tuple[dict, dict] | None:
+    """The runner options and the resume record for this attempt. A workdir of another
+    commit is wiped; a workdir with a clone and a blob map resumes at step 2.
+    None when the derived artifacts cannot be dropped: the attempt failed."""
+    name = ctx.name
     opts = runtime.opts
     resume: dict = {}
     stale = workdir_state.stale_workdir(name, workdir, ctx.pinned)
@@ -76,50 +74,55 @@ def build_steps(ctx: project_run.ProjectRun, workdir: Path, stamp: Path) -> bool
         )
         resume = {"stale_workdir": stale}
         opts = {**runtime.opts, "force_clean": True}
-    if runtime.opts.get("auto_resume") and runtime.opts.get("from_step", 1) == 1:
-        step = 1 if stale else workdir_state.resume_step(name, workdir, ctx.pinned)
-        if step > 1:
-            dropped, errors = workdir_state.drop_derived(name, workdir)
-            console.say(
-                f"{name} — an earlier attempt left its clone and blob map; resuming the "
-                f"runner at step {step}"
-                + (f", after dropping {', '.join(dropped)}" if dropped else "")
-            )
-            resume = {"from_step": step, "dropped": dropped}
-            if errors:
-                now = time.time()
-                ctx.record(
-                    "pipeline",
-                    "failed",
-                    now,
-                    now,
-                    exit_code=None,
-                    resume=resume,
-                    detail=f"could not drop the derived artifacts: {errors}",
-                )
-                ctx.failed_step = "pipeline"
-                return False
-            opts = {**runtime.opts, "from_step": step}
-
-    def after_pipeline_resumed(rc: int):
-        rc, extra = after_pipeline(rc)
-        return rc, ({**extra, "resume": resume} if resume else extra)
-
-    if (
-        project_run.run_step(
-            ctx,
+    if not (runtime.opts.get("auto_resume") and runtime.opts.get("from_step", 1) == 1):
+        return opts, resume
+    step = 1 if stale else workdir_state.resume_step(name, workdir, ctx.pinned)
+    if step <= 1:
+        return opts, resume
+    dropped, errors = workdir_state.drop_derived(name, workdir)
+    console.say(
+        f"{name} — an earlier attempt left its clone and blob map; resuming the "
+        f"runner at step {step}" + (f", after dropping {', '.join(dropped)}" if dropped else "")
+    )
+    resume = {"from_step": step, "dropped": dropped}
+    if errors:
+        now = time.time()
+        ctx.record(
             "pipeline",
-            runner_args.build_pipeline_args(ctx.project, opts, workdir),
-            after_pipeline_resumed,
+            "failed",
+            now,
+            now,
+            exit_code=None,
+            resume=resume,
+            detail=f"could not drop the derived artifacts: {errors}",
         )
-        != 0
-    ):
+        ctx.failed_step = "pipeline"
+        return None
+    return {**runtime.opts, "from_step": step}, resume
+
+
+def build_steps(ctx: project_run.ProjectRun, workdir: Path, stamp: Path) -> bool:
+    """clone (when pinned), pipeline, firm, validate. True when the project validated."""
+    if ctx.pinned and runtime.opts.get("latest") and not remote_head.resolve_latest(ctx):
+        return False
+    if ctx.pinned:
+        clone = pinning.pin_args(ctx.project, ctx.latest)
+        if project_run.run_step(ctx, "clone", clone, partial(check_pin_result, ctx.name)) != 0:
+            return False
+    options = pipeline_options(ctx, workdir)
+    if options is None:
+        return False
+    opts, resume = options
+    pipeline = runner_args.build_pipeline_args(ctx.project, opts, workdir)
+    after = partial(check_checkout, ctx, workdir, resume)
+    if project_run.run_step(ctx, "pipeline", pipeline, after) != 0:
         return False
     # firm adds the 3 firm columns to cregit's 67; validate gates the 70.
     later = dict(runner_args.project_phases(ctx.project, runtime.opts, workdir, stamp))
     if project_run.run_step(ctx, "firm", later["firm"]) != 0:
         return False
-    return project_run.run_step(ctx, "validate", later["validate"], after_validate) == 0
+    after = partial(record_parquet, ctx)
+    return project_run.run_step(ctx, "validate", later["validate"], after) == 0
 
 
 def publish_steps(ctx: project_run.ProjectRun) -> bool:
