@@ -33,6 +33,7 @@ from ctplib import (
     metrics,
     pinning,
     resources,
+    runner_args,
     runtime,
     toolchain,
 )
@@ -385,14 +386,14 @@ def test_manifest_only_filter_keeps_just_the_named_projects(tmp_path):
 def test_script_supports_reads_the_configured_runner(runner_script, text, flag, expected):
     """The refusal in cmd_run is only as good as this probe."""
     runner_script(text)
-    assert ctp.script_supports(flag) is expected
+    assert runner_args.script_supports(flag) is expected
 
 
 def test_script_supports_returns_false_when_the_script_is_missing(sandbox):
     """A missing checkout must report 'unsupported', never raise: cmd_run calls
     this before anything else and a traceback there hides the real problem."""
     (sandbox.cregit / "run_pipeline_process.sh").unlink()
-    assert ctp.script_supports("--skip-html") is False
+    assert runner_args.script_supports("--skip-html") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -1531,13 +1532,13 @@ def test_shard_class_helper_needs_both_a_count_and_a_matching_class():
     L = dict(size_class="L")
     runtime.opts.clear()
     runtime.opts.update(shards=6, shard_classes=("L",))
-    assert ctp.shard_class(L) is True
+    assert runner_args.shard_class(L) is True
     runtime.opts.update(shards=1)
-    assert ctp.shard_class(L) is False
+    assert runner_args.shard_class(L) is False
     runtime.opts.update(shards=6, shard_classes=("M",))
-    assert ctp.shard_class(L) is False
+    assert runner_args.shard_class(L) is False
     runtime.opts.clear()
-    assert ctp.shard_class(L) is False, "an unset _OPTS must not shard"
+    assert runner_args.shard_class(L) is False, "an unset _OPTS must not shard"
 
 
 # --------------------------------------------------------------------------- #
@@ -3384,9 +3385,11 @@ WORKER_USAGE = (
 
 def test_tokenizer_worker_is_passed_to_the_runner(sandbox, runner, jq):
     opts = {**runtime.opts, "tokenizer_worker": True}
-    argv = ctp.build_pipeline_args(jq, opts, sandbox.out / "jq")
+    argv = runner_args.build_pipeline_args(jq, opts, sandbox.out / "jq")
     assert "--tokenizer-worker" in argv
-    assert "--tokenizer-worker" not in ctp.build_pipeline_args(jq, runtime.opts, sandbox.out / "jq")
+    assert "--tokenizer-worker" not in runner_args.build_pipeline_args(
+        jq, runtime.opts, sandbox.out / "jq"
+    )
 
 
 def test_tokenizer_worker_needs_a_runner_that_has_it(must_not_start, runner_script):
