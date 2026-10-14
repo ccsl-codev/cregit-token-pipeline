@@ -9,7 +9,6 @@ import argparse
 import contextlib
 import fcntl
 import functools
-import hashlib
 import json
 import os
 import re
@@ -29,7 +28,7 @@ from pathlib import Path
 import ledger
 import pin
 import retain
-from ctplib import config, console, manifest_file, memory, metrics, resources, runtime
+from ctplib import artifacts, config, console, manifest_file, memory, metrics, resources, runtime
 from retain import lock_path, state_dir
 
 DEVENV = Path.home() / ".nix-profile/bin/devenv"
@@ -351,37 +350,6 @@ def checkout_matches(name: str, workdir: Path, pinned: str) -> tuple[bool, str]:
     return True, seen
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def parquet_info(name: str) -> dict:
-    """Path, size, sha256 and validated row count of a project's Parquet."""
-    workdir = config.OUT / name
-    parquet = workdir / f"{name}-dataset.parquet"
-    stamp = workdir / f"{name}.validated"
-    info: dict = {"path": str(parquet)}
-    try:
-        info["bytes"] = parquet.stat().st_size
-        info["sha256"] = sha256_file(parquet)
-    except OSError as exc:
-        info["error"] = f"{type(exc).__name__}: {exc}"
-    try:
-        kv = dict(line.split("=", 1) for line in stamp.read_text().splitlines() if "=" in line)
-        info["rows"] = int(kv["rows"])
-    except (OSError, KeyError, ValueError):
-        info["rows"] = None
-    return info
-
-
 def latest_log(name: str, phase: str) -> str:
     link = state_dir(name) / "logs" / f"{phase}-latest.log"
     try:
@@ -430,7 +398,7 @@ class ProjectRun:
                 else {}
             ),
             "checked_out_sha": self.checked_out_sha,
-            "file_mask_sha256": sha256_text(mask),
+            "file_mask_sha256": artifacts.sha256_text(mask),
             "tools": runtime.run_info.get("tools", {}),
             "flags": runtime.run_info.get("flags", {}),
         }
@@ -648,7 +616,7 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     def after_validate(rc: int):
         if rc != 0:
             return rc, {}
-        ctx.parquet = parquet_info(name)
+        ctx.parquet = artifacts.parquet_info(name)
         return rc, {"parquet": ctx.parquet}
 
     if ctx.pinned and runtime.opts.get("latest") and not resolve_latest(ctx):
@@ -708,16 +676,6 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     return run_step(ctx, "validate", later["validate"], after_validate) == 0
 
 
-def anon_outputs(name: str) -> list[dict]:
-    anon = config.OUT / name / retain.ANON_DIR
-    if not anon.is_dir():
-        return []
-    return [
-        {"path": str(f), "bytes": f.stat().st_size, "sha256": sha256_file(f)}
-        for f in sorted(anon.glob("*.parquet"))
-    ]
-
-
 def publish_steps(ctx: ProjectRun) -> bool:
     """schema (validate_schema.py), anonymize (only with --anonymize), then join
     (an incremental consolidate into ctp.duckdb). True when every step passes."""
@@ -734,7 +692,7 @@ def publish_steps(ctx: ProjectRun) -> bool:
     if runtime.opts.get("anonymize"):
 
         def after_anonymize(rc: int):
-            outputs = anon_outputs(name)
+            outputs = artifacts.anon_outputs(name)
             if rc == 0 and not outputs:
                 return 1, {"detail": f"the anonymizer wrote no Parquet to {retain.ANON_DIR}/"}
             return rc, {"anonymized": outputs}
@@ -874,7 +832,7 @@ def run_project(
                     console.say(
                         f"{name} — validated earlier; resuming at the steps after validation"
                     )
-                    ctx.parquet = parquet_info(name)
+                    ctx.parquet = artifacts.parquet_info(name)
                     ctx.checked_out_sha = runner_checkout(name, workdir)
                 elif not build_steps(ctx, workdir, stamp):
                     return ctx.finish(ledger.FAILED)
@@ -1342,7 +1300,7 @@ def tool_versions() -> dict:
         # srcML builds from one release line print one version; the path names the build.
         "srcml_version": srcml_out.splitlines()[0] if srcml_out else "",
         "srcml_path": str(Path(srcml).resolve()) if srcml else "",
-        "blobexec_jar_sha256": sha256_file(jar) if jar.is_file() else "",
+        "blobexec_jar_sha256": artifacts.sha256_file(jar) if jar.is_file() else "",
         "git_version": _capture(["git", "--version"]),
         "ctp_python": sys.version.split()[0],
     }
@@ -1360,11 +1318,11 @@ def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
     }
     flags["manifest_path"] = str(manifest)
     flags["config_path"] = str(retain.CONFIG)
-    flags["config_sha256"] = sha256_file(retain.CONFIG) if retain.CONFIG.is_file() else ""
+    flags["config_sha256"] = artifacts.sha256_file(retain.CONFIG) if retain.CONFIG.is_file() else ""
     flags["cregit_dir"] = str(config.CREGIT)
     flags["output_dir"] = str(config.OUT)
     try:
-        flags["manifest_sha256"] = sha256_file(manifest)
+        flags["manifest_sha256"] = artifacts.sha256_file(manifest)
     except OSError:
         flags["manifest_sha256"] = ""
     return flags
