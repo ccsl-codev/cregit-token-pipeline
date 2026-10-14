@@ -131,6 +131,29 @@ Ground truth is always the files — stamps, manifests, `metrics.tsv`.
 `ctp.duckdb` is a derived index, rebuilt on demand; the runner never dual-writes
 state.
 
+## Code layout
+
+`ctp.py` is only the entry point. The code of the runner is in the `ctplib`
+package, one module for each task. The other scripts at the root are separate
+tools: ctp starts them as child processes, and you can run them alone.
+
+| Module | Task |
+| --- | --- |
+| `ctplib/cli.py` | The subcommands, their options and the dispatch. |
+| `ctplib/passes.py` | `ctp.py run`: a thread pool over the manifest, then retry passes. |
+| `ctplib/scheduler.py` | `ctp.py census`: manifest order, memory and disk gates, stop file, signals, retries. |
+| `ctplib/project_steps.py` | The steps of one project and `run_project`, which runs them in order. |
+| `ctplib/project_run.py` | One attempt at one project: its ledger rows and its outcome. |
+| `ctplib/phases.py` | One phase as a child process, with its log file and metrics row. |
+| `ctplib/runner_args.py` | The arguments of `run_pipeline_process.sh` and of the steps after it. |
+| `ctplib/preflight.py` | The checks before a run starts. A failed check exits. |
+| `ctplib/workdir_state.py` | What an earlier attempt left in the workdir, and where the next one resumes. |
+| `ctplib/pinning.py`, `ctplib/remote_head.py` | The pinned staging clone, and `--latest`. |
+| `ctplib/report.py` | `status`, `progress`, `audit` and `db`. |
+| `ctplib/run_ledger.py`, `ctplib/metrics.py`, `ctplib/resources.py` | The run rows of `ledger.jsonl`, `runs.log`, `metrics.tsv` and `resources.tsv`. |
+| `ctplib/toolchain.py`, `ctplib/memory.py`, `ctplib/artifacts.py` | devenv, git and tool versions; memory sizes; file hashes. |
+| `ctplib/config.py`, `ctplib/runtime.py`, `ctplib/console.py`, `ctplib/manifest_file.py` | The paths from `pipeline.cfg`, the shared state of one process, the event lines, the manifest reader. |
+
 ## Observability
 
 - Event lines on every phase start and finish; a heartbeat every 30 s listing
@@ -172,3 +195,10 @@ CI deselects nothing. Tests that assert facts about the cregit checkout named in
 `pipeline.cfg` self-skip when that checkout is absent, which it is on any runner.
 Tests that read a real Parquet need DuckDB and self-skip without it, so install
 the `dev` extra to run the whole suite.
+
+`tests/ctplib/` has one test file for each `ctplib` module. Its `conftest.py`
+moves every path into a temporary directory and blocks every child process, so
+no test there touches real data.
+
+`ruff check .` and `ruff format --check .` must pass. The configuration is in
+`pyproject.toml`.
