@@ -20,6 +20,7 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "coverage==7.16.0",
+    "ruff==0.17.0",
 ]
 
 # Optional, not installable from here: perl and a cregit checkout, for
@@ -28,6 +29,18 @@ dev = [
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "C90", "RUF"]
+# dict(a=1) reads as well as {"a": 1}; the code uses both.
+ignore = ["C408"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.setuptools]
 # The scripts sit at the repository root and form no package.
