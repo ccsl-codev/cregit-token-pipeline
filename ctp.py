@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import json
 import os
 import shutil
@@ -29,15 +28,12 @@ from ctplib import (
     console,
     manifest_file,
     memory,
-    pinning,
     project_run,
-    remote_head,
+    project_steps,
     runner_args,
     runtime,
     toolchain,
-    workdir_state,
 )
-from retain import lock_path, state_dir
 
 HEARTBEAT_S = 30
 
@@ -48,282 +44,6 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 # The last step, which writes the Parquet. The runner accepts --from-step 11+ and
 # exits 0 having done nothing, so such a run cannot publish a blank Parquet.
 DATASET_STEP = 10
-
-
-def build_steps(ctx: project_run.ProjectRun, workdir: Path, stamp: Path) -> bool:
-    """clone (when pinned), pipeline, firm, validate. True when the project validated."""
-    name = ctx.name
-
-    def after_clone(rc: int):
-        if rc != 0:
-            return rc, {}
-        try:
-            result = json.loads(pinning.pin_result_path(name).read_text())
-        except (OSError, ValueError) as exc:
-            return 1, {"detail": f"no pin result: {exc}"}
-        return rc, {"pin": result}
-
-    def after_pipeline(rc: int):
-        if rc != 0:
-            return rc, {}
-        ok, seen = workdir_state.checkout_matches(name, workdir, ctx.pinned)
-        ctx.checked_out_sha = seen
-        if not ok:
-            return 1, {
-                "detail": f"checked out {seen or 'nothing readable'}, not the pinned {ctx.pinned}"
-            }
-        return rc, {}
-
-    def after_validate(rc: int):
-        if rc != 0:
-            return rc, {}
-        ctx.parquet = artifacts.parquet_info(name)
-        return rc, {"parquet": ctx.parquet}
-
-    if ctx.pinned and runtime.opts.get("latest") and not remote_head.resolve_latest(ctx):
-        return False
-    if (
-        ctx.pinned
-        and project_run.run_step(
-            ctx, "clone", pinning.pin_args(ctx.project, ctx.latest), after_clone
-        )
-        != 0
-    ):
-        return False
-    opts = runtime.opts
-    resume: dict = {}
-    stale = workdir_state.stale_workdir(name, workdir, ctx.pinned)
-    if stale:
-        console.say(
-            f"{name} — the workdir holds commit {stale}, not {ctx.pinned}; "
-            "the runner wipes it (--force-clean)"
-        )
-        resume = {"stale_workdir": stale}
-        opts = {**runtime.opts, "force_clean": True}
-    if runtime.opts.get("auto_resume") and runtime.opts.get("from_step", 1) == 1:
-        step = 1 if stale else workdir_state.resume_step(name, workdir, ctx.pinned)
-        if step > 1:
-            dropped, errors = workdir_state.drop_derived(name, workdir)
-            console.say(
-                f"{name} — an earlier attempt left its clone and blob map; resuming the "
-                f"runner at step {step}"
-                + (f", after dropping {', '.join(dropped)}" if dropped else "")
-            )
-            resume = {"from_step": step, "dropped": dropped}
-            if errors:
-                now = time.time()
-                ctx.record(
-                    "pipeline",
-                    "failed",
-                    now,
-                    now,
-                    exit_code=None,
-                    resume=resume,
-                    detail=f"could not drop the derived artifacts: {errors}",
-                )
-                ctx.failed_step = "pipeline"
-                return False
-            opts = {**runtime.opts, "from_step": step}
-
-    def after_pipeline_resumed(rc: int):
-        rc, extra = after_pipeline(rc)
-        return rc, ({**extra, "resume": resume} if resume else extra)
-
-    if (
-        project_run.run_step(
-            ctx,
-            "pipeline",
-            runner_args.build_pipeline_args(ctx.project, opts, workdir),
-            after_pipeline_resumed,
-        )
-        != 0
-    ):
-        return False
-    # firm adds the 3 firm columns to cregit's 67; validate gates the 70.
-    later = dict(runner_args.project_phases(ctx.project, runtime.opts, workdir, stamp))
-    if project_run.run_step(ctx, "firm", later["firm"]) != 0:
-        return False
-    return project_run.run_step(ctx, "validate", later["validate"], after_validate) == 0
-
-
-def publish_steps(ctx: project_run.ProjectRun) -> bool:
-    """schema (validate_schema.py), anonymize (only with --anonymize), then join
-    (an incremental consolidate into ctp.duckdb). True when every step passes."""
-    name = ctx.name
-    parquet = config.OUT / name / f"{name}-dataset.parquet"
-    if (
-        runtime.opts.get("join")
-        and project_run.run_step(
-            ctx, "schema", ["python3", str(config.CORPUS / "validate_schema.py"), str(parquet)]
-        )
-        != 0
-    ):
-        return False
-    if runtime.opts.get("anonymize"):
-
-        def after_anonymize(rc: int):
-            outputs = artifacts.anon_outputs(name)
-            if rc == 0 and not outputs:
-                return 1, {"detail": f"the anonymizer wrote no Parquet to {retain.ANON_DIR}/"}
-            return rc, {"anonymized": outputs}
-
-        # The interface of anonymize_parquet.py: an output directory, then the inputs.
-        if (
-            project_run.run_step(
-                ctx,
-                "anonymize",
-                [
-                    "python3",
-                    runtime.opts["anonymize"],
-                    str(config.OUT / name / retain.ANON_DIR),
-                    str(parquet),
-                ],
-                after_anonymize,
-            )
-            != 0
-        ):
-            return False
-    if not runtime.opts.get("join"):
-        return True
-    return (
-        project_run.run_step(
-            ctx,
-            "join",
-            [
-                "python3",
-                str(config.CORPUS / "consolidate.py"),
-                "--join",
-                name,
-                "--manifest",
-                runtime.opts["manifest"],
-            ],
-        )
-        == 0
-    )
-
-
-def cleanup_step(ctx: project_run.ProjectRun) -> bool:
-    """Remove the staging clone; then, with --cleanup, every bulky work file (the
-    clones, memo/, blame/, the work databases), or only memo/ under --drop-memo.
-    The Parquet, its stamp, the logs and the ledger stay. True when clean."""
-    name = ctx.name
-    start = time.time()
-    errors = pinning.drop_pinned_clone(name)
-    removed = [] if errors else ([str(pinning.pinned_clone_path(name))] if ctx.pinned else [])
-    for err in errors:
-        console.say(f"{name} — staging clone not fully removed: {err}")
-    if runtime.opts.get("cleanup"):
-        result = retain.clean_workdir(name, drop_html=bool(runtime.opts.get("drop_html")))
-        removed += [r["entry"] for r in result["removed"]]
-        errors += result["errors"]
-        for err in result["errors"]:
-            console.say(f"{name} — cleanup could not remove: {err}")
-        console.say(
-            f"{name} — cleanup freed {retain.human(result['bytes_freed'])}, kept "
-            f"{', '.join(result['kept']) or 'nothing'}"
-        )
-        ctx.record(
-            "cleanup",
-            "ok" if not errors else "failed",
-            start,
-            time.time(),
-            cleanup={
-                "removed": removed,
-                "errors": errors,
-                "kept": result["kept"],
-                "bytes_freed": result["bytes_freed"],
-                "removed_bytes": {r["entry"]: r["bytes"] for r in result["removed"]},
-            },
-        )
-        return not errors
-    if runtime.opts.get("drop_memo"):
-        # prune checks the keepers itself.
-        _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
-        if ok:
-            removed.append("memo")
-        else:
-            errors.append("retain refused to prune memo/ (see the run log)")
-            console.say(f"{name} — memo/ kept, retain refused the prune (see above)")
-    ctx.record(
-        "cleanup",
-        "ok" if not errors else "failed",
-        start,
-        time.time(),
-        cleanup={"removed": removed, "errors": errors},
-    )
-    return not errors
-
-
-def run_project(
-    project: dict,
-    queue_pos: int | None = None,
-    queue_total: int | None = None,
-    attempt: int = 1,
-    resume_validated: bool = False,
-) -> project_run.RunOutcome:
-    """Runs one project's steps and appends a ledger row for each. Returns a RunOutcome.
-    A validated project is skipped, unless resume_validated: then only the steps after
-    validation run (schema, join, cleanup), as after a crash between them."""
-    ctx = project_run.ProjectRun(project, queue_pos, queue_total, attempt)
-    name = project["name"]
-    if runtime.opts.get("latest") and project.get(manifest_file.PINNED_FIELD):
-        # An attempt that only runs the steps after validation clones nothing, so
-        # its rows carry the commit the validated run chose.
-        ctx.latest = remote_head.recorded_latest(name)
-    workdir = config.OUT / name
-    stamp = workdir / f"{name}.validated"
-    post_only = stamp.exists()
-    if post_only and not resume_validated:
-        console.say(f"{name} — already validated, skip")
-        return project_run.RunOutcome.SKIPPED
-
-    workdir.mkdir(parents=True, exist_ok=True)
-    state_dir(name).mkdir(parents=True, exist_ok=True)
-
-    with lock_path(name).open("w") as lockfile:
-        try:
-            fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            console.say(f"{name} — another run holds the lock, skipping")
-            return ctx.finish(ledger.DEFERRED, detail="another process holds the project lock")
-
-        runtime.lock_fds[name] = lockfile.fileno()
-        try:
-            if not post_only and shutil.disk_usage(config.OUT).free < config.DISK_FLOOR_GB * 2**30:
-                console.say(f"{name} — disk below {config.DISK_FLOOR_GB}G floor, deferred")
-                return ctx.finish(ledger.DEFERRED, detail=f"disk below {config.DISK_FLOOR_GB}G")
-
-            if not post_only and not workdir_state.check_memo_dir(name, runtime.opts, workdir):
-                ctx.failed_step = "preflight"
-                return ctx.finish(ledger.FAILED, detail="--memo-dir is inside the workdir")
-
-            try:
-                if post_only:
-                    console.say(
-                        f"{name} — validated earlier; resuming at the steps after validation"
-                    )
-                    ctx.parquet = artifacts.parquet_info(name)
-                    ctx.checked_out_sha = toolchain.runner_checkout(name, workdir)
-                elif not build_steps(ctx, workdir, stamp):
-                    return ctx.finish(ledger.FAILED)
-                if (
-                    runtime.opts.get("join") or runtime.opts.get("anonymize")
-                ) and not publish_steps(ctx):
-                    return ctx.finish(ledger.FAILED)
-            except OSError as exc:
-                console.say(f"{name} ✗ a phase could not start: {exc}")
-                return ctx.finish(ledger.FAILED)
-
-            clean = cleanup_step(ctx)
-            return ctx.finish(ledger.DONE if clean else ledger.DONE_DIRTY)
-        except Exception as exc:
-            # A bug here must not leave the attempt without its final row.
-            console.say(f"{name} ✗ internal error: {type(exc).__name__}: {exc}")
-            ctx.failed_step = ctx.failed_step or "internal"
-            return ctx.finish(ledger.FAILED, detail=f"internal error: {type(exc).__name__}: {exc}")
-        finally:
-            runtime.lock_fds.pop(name, None)
-            runtime.live.pop(name, None)
 
 
 def heartbeat(stop: threading.Event, results: dict) -> None:
@@ -824,7 +544,7 @@ def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
             if attempt:
                 console.say(f"retry pass {attempt}: {[p['name'] for p in todo]}")
             with ThreadPoolExecutor(max_workers=jobs) as pool:
-                for p, res in zip(todo, pool.map(run_project, todo), strict=True):
+                for p, res in zip(todo, pool.map(project_steps.run_project, todo), strict=True):
                     results[p["name"]] = res
     finally:
         stop.set()
@@ -998,7 +718,12 @@ def schedule(
                     if job is not None:
                         waiting_since = None
                         fut = pool.submit(
-                            run_project, job.project, job.pos, total, job.attempt, job.post
+                            project_steps.run_project,
+                            job.project,
+                            job.pos,
+                            total,
+                            job.attempt,
+                            job.post,
                         )
                         running[fut] = job
                         continue
