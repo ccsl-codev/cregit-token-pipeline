@@ -182,9 +182,16 @@ def test_a_broken_row_stops_the_build_and_names_the_line(tmp_path, capsys, over,
     assert not (tmp_path / "m.tsv").exists()
 
 
-def test_a_missing_column_is_named(tmp_path, capsys):
+@pytest.mark.parametrize(
+    "column, message",
+    [
+        pytest.param("head_oid", "missing column(s): head_oid", id="a-missing-column-is-named"),
+        pytest.param("slug", "slug or name_with_owner", id="a-frame-without-a-slug-is-refused"),
+    ],
+)
+def test_a_frame_without_a_required_column_is_refused(tmp_path, capsys, column, message):
     row = frame_row()
-    del row["head_oid"]
+    del row[column]
     assert (
         bm.main(
             [
@@ -197,25 +204,7 @@ def test_a_missing_column_is_named(tmp_path, capsys):
         )
         == 1
     )
-    assert "missing column(s): head_oid" in capsys.readouterr().err
-
-
-def test_a_frame_without_a_slug_column_is_refused(tmp_path, capsys):
-    row = frame_row()
-    del row["slug"]
-    assert (
-        bm.main(
-            [
-                str(write_frame(tmp_path, [row])),
-                "--manifest",
-                str(tmp_path / "m"),
-                "--project-meta",
-                str(tmp_path / "p"),
-            ]
-        )
-        == 1
-    )
-    assert "slug or name_with_owner" in capsys.readouterr().err
+    assert message in capsys.readouterr().err
 
 
 def test_two_rows_with_one_name_are_refused(tmp_path):

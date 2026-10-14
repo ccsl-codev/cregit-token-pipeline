@@ -344,20 +344,20 @@ def test_a_blank_file_filter_column_falls_back_to_the_universal_mask(tmp_path):
     assert projects[0]["file_filter"] == UNIVERSAL_MASK
 
 
-def test_the_manifests_mask_is_what_reaches_the_runner(sandbox, runner, jq):
-    """The Parquet's file_mask column must describe the mask that actually ran."""
-    runtime.opts.update(skip_html=False, drop_memo=False)
+@pytest.mark.parametrize(
+    "opts, want",
+    [
+        pytest.param({}, UNIVERSAL_MASK, id="the-manifest-mask-reaches-the-runner"),
+        pytest.param({"mask": r"\.java$"}, r"\.java$", id="mask-overrides-the-manifest"),
+    ],
+)
+def test_the_runner_gets_the_mask_that_runs(sandbox, runner, jq, opts, want):
+    """The file_mask column must describe the mask that ran. --mask is the escape
+    hatch: one project, one mask, without an edit of the manifest."""
+    runtime.opts.update(skip_html=False, drop_memo=False, **opts)
     project_steps.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
     argv = runner.argv("pipeline")
-    assert argv[argv.index("--mask") + 1] == UNIVERSAL_MASK
-
-
-def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq):
-    """The escape hatch: one project, one mask, without editing the manifest."""
-    runtime.opts.update(skip_html=False, drop_memo=False, mask=r"\.java$")
-    project_steps.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
-    argv = runner.argv("pipeline")
-    assert argv[argv.index("--mask") + 1] == r"\.java$"
+    assert argv[argv.index("--mask") + 1] == want
 
 
 # --tokenizer-worker: the runner's worker pool in step 2.

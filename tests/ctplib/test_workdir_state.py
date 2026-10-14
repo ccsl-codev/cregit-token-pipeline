@@ -6,6 +6,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import retain
 from ctplib import (
     project_run,
@@ -84,16 +86,17 @@ def test_no_blob_map_means_step_1(sandbox):
     assert workdir_state.resume_step("jq", sandbox.out / "jq", PINNED_SHA) == 1
 
 
-def test_an_unreadable_clone_means_step_1(sandbox, monkeypatch):
+@pytest.mark.parametrize(
+    "head, step",
+    [
+        pytest.param("", 1, id="an-unreadable-clone-means-step-1"),
+        pytest.param(OTHER_SHA, 2, id="an-unpinned-leftover-resumes-at-step-2"),
+    ],
+)
+def test_resume_step_of_an_unpinned_leftover(sandbox, monkeypatch, head, step):
     leftover_attempt(sandbox)
-    monkeypatch.setattr(toolchain, "git_head", lambda repo: "")
-    assert workdir_state.resume_step("jq", sandbox.out / "jq", "") == 1
-
-
-def test_an_unpinned_leftover_resumes_at_step_2(sandbox, monkeypatch):
-    leftover_attempt(sandbox)
-    monkeypatch.setattr(toolchain, "git_head", lambda repo: OTHER_SHA)
-    assert workdir_state.resume_step("jq", sandbox.out / "jq", "") == 2
+    monkeypatch.setattr(toolchain, "git_head", lambda repo: head)
+    assert workdir_state.resume_step("jq", sandbox.out / "jq", "") == step
 
 
 def test_run_without_auto_resume_keeps_step_1(monkeypatch, sandbox, pinned_jq):

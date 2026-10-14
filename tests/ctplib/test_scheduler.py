@@ -96,15 +96,23 @@ def test_census_gives_up_after_the_retries_across_restarts(
     assert "failed 2 times (last at clone)" in capsys.readouterr().out
 
 
-def test_census_retries_a_failure_within_the_run(sandbox, fake_projects, no_gates):
-    fake = fake_projects(
-        outcomes={"a": [project_run.RunOutcome.FAILED, project_run.RunOutcome.DONE]}
-    )
+@pytest.mark.parametrize(
+    "first, retries, attempt",
+    [
+        pytest.param(project_run.RunOutcome.FAILED, 1, 2, id="a-failure-is-retried"),
+        pytest.param(project_run.RunOutcome.DEFERRED, 0, 1, id="a-deferral-is-tried-again"),
+    ],
+)
+def test_a_project_is_tried_again_after_the_rest(
+    sandbox, fake_projects, no_gates, first, retries, attempt
+):
+    """A retry counts as a new attempt; a deferral does not, and needs no retries."""
+    fake = fake_projects(outcomes={"a": [first, project_run.RunOutcome.DONE]})
     results = scheduler.schedule(
-        projects_of(sandbox, "a", "b"), 1, 1, sandbox.root / "STOP", poll=0.01
+        projects_of(sandbox, "a", "b"), 1, retries, sandbox.root / "STOP", poll=0.01
     )
     assert fake.names() == ["a", "b", "a"]
-    assert fake.calls[2][3] == 2 and results["a"] == project_run.RunOutcome.DONE
+    assert fake.calls[2][3] == attempt and results["a"] == project_run.RunOutcome.DONE
 
 
 def test_census_gives_up_on_a_project_that_keeps_killing_its_run(
@@ -234,16 +242,6 @@ def test_a_closed_gate_and_a_stop_end_the_census_without_starting(
     fake = fake_projects()
     assert scheduler.schedule(projects_of(sandbox, "a"), 1, 0, stop, poll=0.01) == {}
     assert fake.calls == [] and calls
-
-
-def test_a_deferred_project_is_tried_again_after_the_rest(sandbox, fake_projects, no_gates):
-    fake = fake_projects(
-        outcomes={"a": [project_run.RunOutcome.DEFERRED, project_run.RunOutcome.DONE]}
-    )
-    results = scheduler.schedule(
-        projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01
-    )
-    assert fake.names() == ["a", "b", "a"] and results["a"] == project_run.RunOutcome.DONE
 
 
 def test_a_lone_deferred_project_waits_a_poll_before_its_next_try(
