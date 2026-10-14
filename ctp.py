@@ -29,7 +29,7 @@ from pathlib import Path
 import ledger
 import pin
 import retain
-from ctplib import config
+from ctplib import config, state
 from file_mask import UNIVERSAL_MASK
 from retain import lock_path, state_dir
 
@@ -71,8 +71,6 @@ SIZE_CLASSES = ("S", "M", "L")
 
 _metrics_lock = threading.Lock()
 _print_lock = threading.Lock()
-# name -> (phase, started_at) for the heartbeat; mutated by worker threads
-_live: dict = {}
 
 
 def now_iso() -> str:
@@ -123,18 +121,6 @@ def record_metric(project: str, cls: str, phase: str, duration: int, rc: int, lo
             config.METRICS.write_text("iso_start\tproject\tclass\tphase\tduration_s\trc\tlog\n")
         with config.METRICS.open("a") as f:
             f.write(f"{now_iso()}\t{project}\t{cls}\t{phase}\t{duration}\t{rc}\t{log}\n")
-
-
-# Captured once by cmd_run; concurrent `devenv shell` invocations race on the
-# GC root in CREGIT ("Failed to remove existing GC root"), so jobs must not
-# each start their own devenv.
-_ENV: dict = {}
-
-# Set once by cmd_run: run_project goes through pool.map and takes only the project.
-_OPTS: dict = {}
-
-# Set once per run: run_id, tools and flags, copied into every ledger row.
-_RUN: dict = {}
 
 
 @functools.cache
@@ -378,7 +364,9 @@ class ResourceSampler:
 def shard_class(project: dict) -> bool:
     """True when --shards asks for sharding and this project's class is in --shard-classes.
     For S and M, concurrent projects already fill the machine; shards would only cost disk."""
-    return _OPTS.get("shards", 0) > 1 and project["size_class"] in _OPTS.get("shard_classes", ())
+    return state.opts.get("shards", 0) > 1 and project["size_class"] in state.opts.get(
+        "shard_classes", ()
+    )
 
 
 def unique_log_name(logdir: Path, phase: str) -> Path:
@@ -398,7 +386,7 @@ def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) 
     logdir.mkdir(parents=True, exist_ok=True)
     logfile = unique_log_name(logdir, phase)
 
-    _live[name] = (phase, time.time())
+    state.live[name] = (phase, time.time())
     say(f"{name} ▶ {phase} started (log: {logfile})")
     latest = logdir / f"{phase}-latest.log"
     tmp = logdir / f".{phase}-latest.tmp"
@@ -415,17 +403,17 @@ def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) 
         # A census child gets its own session: Ctrl-C reaches only ctp, which
         # then lets the running projects finish instead of killing them mid-step.
         extra = {"pass_fds": keep_fds} if keep_fds else {}
-        if _OPTS.get("own_session"):
+        if state.opts.get("own_session"):
             extra["start_new_session"] = True
         proc = subprocess.Popen(
-            args, cwd=config.CREGIT, env=_ENV, stdout=lf, stderr=subprocess.STDOUT, **extra
+            args, cwd=config.CREGIT, env=state.env, stdout=lf, stderr=subprocess.STDOUT, **extra
         )
-        _procs[name] = proc
+        state.procs[name] = proc
         sampler.start(proc.pid)
         try:
             rc = proc.wait()
         finally:
-            _procs.pop(name, None)
+            state.procs.pop(name, None)
             peak = sampler.stop()
     duration = int(time.time() - start)
 
@@ -537,7 +525,7 @@ def git_head(repo: Path) -> str:
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD^{commit}"],
-            env=_ENV or None,
+            env=state.env or None,
             capture_output=True,
             text=True,
             timeout=120,
@@ -705,10 +693,10 @@ class ProjectRun:
         return self.latest or self.project.get(PINNED_FIELD, "")
 
     def base(self) -> dict:
-        mask = _OPTS.get("mask") or self.project["file_filter"]
+        mask = state.opts.get("mask") or self.project["file_filter"]
         return {
             "v": ledger.VERSION,
-            "run_id": _RUN.get("run_id", ""),
+            "run_id": state.run_info.get("run_id", ""),
             "project": self.name,
             "queue_pos": self.queue_pos,
             "queue_total": self.queue_total,
@@ -719,8 +707,8 @@ class ProjectRun:
             **({"snapshot_sha": self.project.get(PINNED_FIELD, "")} if self.latest else {}),
             "checked_out_sha": self.checked_out_sha,
             "file_mask_sha256": sha256_text(mask),
-            "tools": _RUN.get("tools", {}),
-            "flags": _RUN.get("flags", {}),
+            "tools": state.run_info.get("tools", {}),
+            "flags": state.run_info.get("flags", {}),
         }
 
     def record(self, step: str, status: str, start: float, end: float, **extra) -> None:
@@ -737,7 +725,7 @@ class ProjectRun:
             ledger.append(config.LEDGER, row)
         except OSError as exc:
             # The audit trail is the point of the run: stop handing out new projects.
-            _RUN["ledger_broken"] = f"{type(exc).__name__}: {exc}"
+            state.run_info["ledger_broken"] = f"{type(exc).__name__}: {exc}"
             say(f"{self.name} ✗ LEDGER WRITE FAILED ({exc}); the run stops dispatching")
 
     def finish(self, state: str, **extra) -> RunOutcome:
@@ -787,12 +775,8 @@ def run_step(ctx: ProjectRun, step: str, argv: list[str], after=None) -> int:
     return rc
 
 
-# name -> the fd of the project's held lock, so each phase's process tree keeps it.
-_lock_fds: dict = {}
-
-
 def _held_fds(name: str) -> tuple:
-    fd = _lock_fds.get(name)
+    fd = state.lock_fds.get(name)
     return (fd,) if fd is not None else ()
 
 
@@ -943,11 +927,11 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
         ctx.parquet = parquet_info(name)
         return rc, {"parquet": ctx.parquet}
 
-    if ctx.pinned and _OPTS.get("latest") and not resolve_latest(ctx):
+    if ctx.pinned and state.opts.get("latest") and not resolve_latest(ctx):
         return False
     if ctx.pinned and run_step(ctx, "clone", pin_args(ctx.project, ctx.latest), after_clone) != 0:
         return False
-    opts = _OPTS
+    opts = state.opts
     resume: dict = {}
     stale = stale_workdir(name, workdir, ctx.pinned)
     if stale:
@@ -956,8 +940,8 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
             "the runner wipes it (--force-clean)"
         )
         resume = {"stale_workdir": stale}
-        opts = {**_OPTS, "force_clean": True}
-    if _OPTS.get("auto_resume") and _OPTS.get("from_step", 1) == 1:
+        opts = {**state.opts, "force_clean": True}
+    if state.opts.get("auto_resume") and state.opts.get("from_step", 1) == 1:
         step = 1 if stale else resume_step(name, workdir, ctx.pinned)
         if step > 1:
             dropped, errors = drop_derived(name, workdir)
@@ -980,7 +964,7 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
                 )
                 ctx.failed_step = "pipeline"
                 return False
-            opts = {**_OPTS, "from_step": step}
+            opts = {**state.opts, "from_step": step}
 
     def after_pipeline_resumed(rc: int):
         rc, extra = after_pipeline(rc)
@@ -994,7 +978,7 @@ def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
     ):
         return False
     # firm adds the 3 firm columns to cregit's 67; validate gates the 70.
-    later = dict(project_phases(ctx.project, _OPTS, workdir, stamp))
+    later = dict(project_phases(ctx.project, state.opts, workdir, stamp))
     if run_step(ctx, "firm", later["firm"]) != 0:
         return False
     return run_step(ctx, "validate", later["validate"], after_validate) == 0
@@ -1016,14 +1000,14 @@ def publish_steps(ctx: ProjectRun) -> bool:
     name = ctx.name
     parquet = config.OUT / name / f"{name}-dataset.parquet"
     if (
-        _OPTS.get("join")
+        state.opts.get("join")
         and run_step(
             ctx, "schema", ["python3", str(config.CORPUS / "validate_schema.py"), str(parquet)]
         )
         != 0
     ):
         return False
-    if _OPTS.get("anonymize"):
+    if state.opts.get("anonymize"):
 
         def after_anonymize(rc: int):
             outputs = anon_outputs(name)
@@ -1038,7 +1022,7 @@ def publish_steps(ctx: ProjectRun) -> bool:
                 "anonymize",
                 [
                     "python3",
-                    _OPTS["anonymize"],
+                    state.opts["anonymize"],
                     str(config.OUT / name / retain.ANON_DIR),
                     str(parquet),
                 ],
@@ -1047,7 +1031,7 @@ def publish_steps(ctx: ProjectRun) -> bool:
             != 0
         ):
             return False
-    if not _OPTS.get("join"):
+    if not state.opts.get("join"):
         return True
     return (
         run_step(
@@ -1059,7 +1043,7 @@ def publish_steps(ctx: ProjectRun) -> bool:
                 "--join",
                 name,
                 "--manifest",
-                _OPTS["manifest"],
+                state.opts["manifest"],
             ],
         )
         == 0
@@ -1076,8 +1060,8 @@ def cleanup_step(ctx: ProjectRun) -> bool:
     removed = [] if errors else ([str(pinned_clone_path(name))] if ctx.pinned else [])
     for err in errors:
         say(f"{name} — staging clone not fully removed: {err}")
-    if _OPTS.get("cleanup"):
-        result = retain.clean_workdir(name, drop_html=bool(_OPTS.get("drop_html")))
+    if state.opts.get("cleanup"):
+        result = retain.clean_workdir(name, drop_html=bool(state.opts.get("drop_html")))
         removed += [r["entry"] for r in result["removed"]]
         errors += result["errors"]
         for err in result["errors"]:
@@ -1100,7 +1084,7 @@ def cleanup_step(ctx: ProjectRun) -> bool:
             },
         )
         return not errors
-    if _OPTS.get("drop_memo"):
+    if state.opts.get("drop_memo"):
         # prune checks the keepers itself.
         _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
         if ok:
@@ -1130,7 +1114,7 @@ def run_project(
     validation run (schema, join, cleanup), as after a crash between them."""
     ctx = ProjectRun(project, queue_pos, queue_total, attempt)
     name = project["name"]
-    if _OPTS.get("latest") and project.get(PINNED_FIELD):
+    if state.opts.get("latest") and project.get(PINNED_FIELD):
         # An attempt that only runs the steps after validation clones nothing, so
         # its rows carry the commit the validated run chose.
         ctx.latest = recorded_latest(name)
@@ -1151,13 +1135,13 @@ def run_project(
             say(f"{name} — another run holds the lock, skipping")
             return ctx.finish(ledger.DEFERRED, detail="another process holds the project lock")
 
-        _lock_fds[name] = lockfile.fileno()
+        state.lock_fds[name] = lockfile.fileno()
         try:
             if not post_only and shutil.disk_usage(config.OUT).free < config.DISK_FLOOR_GB * 2**30:
                 say(f"{name} — disk below {config.DISK_FLOOR_GB}G floor, deferred")
                 return ctx.finish(ledger.DEFERRED, detail=f"disk below {config.DISK_FLOOR_GB}G")
 
-            if not post_only and not check_memo_dir(name, _OPTS, workdir):
+            if not post_only and not check_memo_dir(name, state.opts, workdir):
                 ctx.failed_step = "preflight"
                 return ctx.finish(ledger.FAILED, detail="--memo-dir is inside the workdir")
 
@@ -1168,7 +1152,9 @@ def run_project(
                     ctx.checked_out_sha = runner_checkout(name, workdir)
                 elif not build_steps(ctx, workdir, stamp):
                     return ctx.finish(ledger.FAILED)
-                if (_OPTS.get("join") or _OPTS.get("anonymize")) and not publish_steps(ctx):
+                if (state.opts.get("join") or state.opts.get("anonymize")) and not publish_steps(
+                    ctx
+                ):
                     return ctx.finish(ledger.FAILED)
             except OSError as exc:
                 say(f"{name} ✗ a phase could not start: {exc}")
@@ -1182,14 +1168,14 @@ def run_project(
             ctx.failed_step = ctx.failed_step or "internal"
             return ctx.finish(ledger.FAILED, detail=f"internal error: {type(exc).__name__}: {exc}")
         finally:
-            _lock_fds.pop(name, None)
-            _live.pop(name, None)
+            state.lock_fds.pop(name, None)
+            state.live.pop(name, None)
 
 
 def heartbeat(stop: threading.Event, results: dict) -> None:
     while not stop.wait(HEARTBEAT_S):
         running = ", ".join(
-            f"{n}({p} {int(time.time() - t)}s)" for n, (p, t) in sorted(_live.items())
+            f"{n}({p} {int(time.time() - t)}s)" for n, (p, t) in sorted(state.live.items())
         )
         free_gb = shutil.disk_usage(config.OUT).free // 2**30
         done = sum(1 for v in results.values() if v.is_success)
@@ -1595,7 +1581,7 @@ def _capture(cmd: list[str], cwd: Path | None = None) -> str:
     """stdout of cmd under the cregit environment, or "" when it fails."""
     try:
         proc = subprocess.run(
-            cmd, cwd=cwd, env=_ENV or None, capture_output=True, text=True, timeout=120
+            cmd, cwd=cwd, env=state.env or None, capture_output=True, text=True, timeout=120
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -1614,7 +1600,9 @@ def git_describe(repo: Path) -> str:
 def tool_versions() -> dict:
     """What produced this run's Parquets. Read once per run, after the devenv capture."""
     jar = config.CREGIT / BLOBEXEC_JAR
-    srcml = shutil.which("srcml", path=_ENV.get("PATH")) if _ENV else shutil.which("srcml")
+    srcml = (
+        shutil.which("srcml", path=state.env.get("PATH")) if state.env else shutil.which("srcml")
+    )
     srcml_out = _capture(["srcml", "--version"])
     return {
         "ctp_commit": git_describe(config.CORPUS),
@@ -1633,7 +1621,7 @@ def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
     what run_project reads after the checks; `cli` is what was typed."""
     flags: dict = {
         "effective": {
-            k: (list(v) if isinstance(v, tuple) else v) for k, v in sorted(_OPTS.items())
+            k: (list(v) if isinstance(v, tuple) else v) for k, v in sorted(state.opts.items())
         },
         "cli": {k: v for k, v in sorted(vars(args).items()) if k != "fn"},
         "argv": sys.argv[1:],
@@ -1653,33 +1641,33 @@ def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
 def forward_config() -> None:
     """A step that reads the config (the join, a rebuild) must read this run's file."""
     if os.environ.get("CTP_CONFIG"):
-        _ENV["CTP_CONFIG"] = str(retain.CONFIG)
+        state.env["CTP_CONFIG"] = str(retain.CONFIG)
 
 
 def start_ledger_run(args: argparse.Namespace, manifest: Path, command: str) -> None:
     """Fill _RUN, then append the run-start row."""
     forward_config()
-    _RUN.clear()
-    _RUN["run_id"] = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
-    _RUN["tools"] = tool_versions()
-    _RUN["flags"] = run_flags(args, manifest)
+    state.run_info.clear()
+    state.run_info["run_id"] = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
+    state.run_info["tools"] = tool_versions()
+    state.run_info["flags"] = run_flags(args, manifest)
     now = time.time()
     try:
         ledger.append(
             config.LEDGER,
             {
                 "v": ledger.VERSION,
-                "run_id": _RUN["run_id"],
+                "run_id": state.run_info["run_id"],
                 "step": "run-start",
                 "command": command,
                 "start_utc": utc(now),
-                "tools": _RUN["tools"],
-                "flags": _RUN["flags"],
+                "tools": state.run_info["tools"],
+                "flags": state.run_info["flags"],
             },
         )
     except OSError as exc:
         sys.exit(f"cannot write the ledger {config.LEDGER}: {exc}")
-    say(f"ledger: {config.LEDGER} (run {_RUN['run_id']})")
+    say(f"ledger: {config.LEDGER} (run {state.run_info['run_id']})")
 
 
 def end_ledger_run(rc: int, started: float, results: dict) -> None:
@@ -1691,14 +1679,18 @@ def end_ledger_run(rc: int, started: float, results: dict) -> None:
             config.LEDGER,
             {
                 "v": ledger.VERSION,
-                "run_id": _RUN.get("run_id", ""),
+                "run_id": state.run_info.get("run_id", ""),
                 "step": "run-end",
                 "exit_code": rc,
                 "start_utc": utc(started),
                 "end_utc": utc(time.time()),
                 "duration_s": round(time.time() - started, 3),
                 "outcomes": counts,
-                **({"stop_reason": _RUN["stop_reason"]} if _RUN.get("stop_reason") else {}),
+                **(
+                    {"stop_reason": state.run_info["stop_reason"]}
+                    if state.run_info.get("stop_reason")
+                    else {}
+                ),
             },
         )
     except OSError as exc:
@@ -1738,7 +1730,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         say("nothing to run (empty manifest / --only filter matched nothing)")
         return 0
 
-    _OPTS.update(run_options(args))
+    state.opts.update(run_options(args))
     if any(p.get(PINNED_FIELD) for p in projects):
         refuse_unless_runner_accepts(
             "a pinned manifest",
@@ -1746,14 +1738,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             " Pinned projects run from a local staging clone, so the runner needs "
             "--commit-url to keep the real commit links.",
         )
-    announce_run(_OPTS, args.jobs)
+    announce_run(state.opts, args.jobs)
 
     run_start = time.time()
     say("capturing devenv environment (once)...")
-    _ENV.update(capture_devenv_env())
+    state.env.update(capture_devenv_env())
     # A deleted or private repository must fail its clone, not wait for a password.
-    _ENV.setdefault("GIT_TERMINAL_PROMPT", "0")
-    say(f"devenv environment captured ({len(_ENV)} vars)")
+    state.env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    say(f"devenv environment captured ({len(state.env)} vars)")
     start_ledger_run(args, config.CORPUS / args.manifest, "run")
     with config.RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-start\tjobs={args.jobs}\tprojects={len(projects)}\n")
@@ -1776,10 +1768,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 STOP_NAME = "STOP"
 MIN_FREE_MEM_GB = 8
 POLL_S = 15
-# Set by a signal or a broken ledger: no new project starts, running ones finish.
-_STOP = threading.Event()
-# name -> the Popen of its running phase, for the second signal.
-_procs: dict = {}
 
 
 def mem_available_gb(meminfo: Path = Path("/proc/meminfo")) -> float | None:
@@ -1806,10 +1794,10 @@ def gate_reason(opts: dict) -> str | None:
 
 
 def stop_reason(stop_file: Path) -> str | None:
-    if _STOP.is_set():
-        return _RUN.get("stop_reason") or "stop requested"
-    if _RUN.get("ledger_broken"):
-        return f"the ledger cannot be written: {_RUN['ledger_broken']}"
+    if state.stop.is_set():
+        return state.run_info.get("stop_reason") or "stop requested"
+    if state.run_info.get("ledger_broken"):
+        return f"the ledger cannot be written: {state.run_info['ledger_broken']}"
     if stop_file.exists():
         return f"{stop_file} exists"
     return None
@@ -1893,14 +1881,14 @@ def schedule(
         with ThreadPoolExecutor(max_workers=workers) as pool:
             while queue or running:
                 reason = stop_reason(stop_file)
-                if reason and not _RUN.get("stop_reason"):
-                    _RUN["stop_reason"] = reason
+                if reason and not state.run_info.get("stop_reason"):
+                    state.run_info["stop_reason"] = reason
                     say(
                         f"stopping: {reason}. No new project starts; "
                         f"{len(running)} running will finish"
                     )
                 if not reason and queue and len(running) < workers:
-                    gate = gate_reason(_OPTS)
+                    gate = gate_reason(state.opts)
                     job = next_job(queue, time.time()) if gate is None else None
                     if job is not None:
                         waiting_since = None
@@ -1951,15 +1939,15 @@ def install_signal_handlers() -> None:
     running ones, whose rows then record the failure."""
 
     def handler(signum, _frame):
-        if not _STOP.is_set():
-            _RUN["stop_reason"] = f"signal {signal.Signals(signum).name}"
-            _STOP.set()
+        if not state.stop.is_set():
+            state.run_info["stop_reason"] = f"signal {signal.Signals(signum).name}"
+            state.stop.set()
             say(
                 f"{signal.Signals(signum).name}: finishing the running projects; "
                 "send it again to terminate them"
             )
             return
-        for name, proc in list(_procs.items()):
+        for name, proc in list(state.procs.items()):
             say(f"terminating {name} (process group {proc.pid})")
             with contextlib.suppress(OSError):
                 os.killpg(proc.pid, signal.SIGTERM)
@@ -1989,14 +1977,14 @@ def cmd_census(args: argparse.Namespace) -> int:
         )
 
     args.join, args.cleanup = True, True
-    _OPTS.update(run_options(args))
-    _OPTS.update(
+    state.opts.update(run_options(args))
+    state.opts.update(
         own_session=True,
         min_free_mem_gb=args.min_free_mem_gb,
         auto_resume=True,
         latest=bool(getattr(args, "latest", False)),
     )
-    if _OPTS["latest"]:
+    if state.opts["latest"]:
         say(
             "--latest: each project pins the remote head of its default branch when its "
             "first attempt starts; the ledger records it and the manifest commit"
@@ -2009,13 +1997,13 @@ def cmd_census(args: argparse.Namespace) -> int:
             " Pinned projects run from a local staging clone, so the runner needs "
             "--commit-url to keep the real commit links.",
         )
-    announce_run(_OPTS, args.workers)
+    announce_run(state.opts, args.workers)
     say(f"stop file: {stop_file} (touch it to stop after the running projects)")
 
     run_start = time.time()
     say("capturing devenv environment (once)...")
-    _ENV.update(capture_devenv_env())
-    _ENV.setdefault("GIT_TERMINAL_PROMPT", "0")
+    state.env.update(capture_devenv_env())
+    state.env.setdefault("GIT_TERMINAL_PROMPT", "0")
     start_ledger_run(args, manifest, "census")
     install_signal_handlers()
     with config.RUNS_LOG.open("a") as f:
@@ -2023,7 +2011,7 @@ def cmd_census(args: argparse.Namespace) -> int:
 
     results = schedule(projects, args.workers, args.retries, stop_file, args.poll)
 
-    stopped = bool(_RUN.get("stop_reason"))
+    stopped = bool(state.run_info.get("stop_reason"))
     rc = 0 if all(v.is_success for v in results.values()) and not stopped else 1
     if stopped and all(v.is_success for v in results.values()):
         rc = 3
@@ -2036,7 +2024,7 @@ def cmd_census(args: argparse.Namespace) -> int:
     say(
         f"census finished rc={rc}: "
         + ", ".join(f"{k} {n}" for k, n in sorted(counts.items()))
-        + (f" (stopped: {_RUN['stop_reason']})" if stopped else "")
+        + (f" (stopped: {state.run_info['stop_reason']})" if stopped else "")
     )
     return rc
 
@@ -2193,7 +2181,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 def cmd_db(args: argparse.Namespace) -> int:
     """Rebuild ctp.duckdb (derived index over stamps/metrics/parquets)."""
     config.OUT.mkdir(parents=True, exist_ok=True)
-    _ENV.update(capture_devenv_env())
+    state.env.update(capture_devenv_env())
     forward_config()
     manifests = [
         arg
@@ -2201,7 +2189,9 @@ def cmd_db(args: argparse.Namespace) -> int:
         for arg in ("--manifest", str((config.CORPUS / m).resolve()))
     ]
     return subprocess.run(
-        ["python3", str(config.CORPUS / "consolidate.py"), *manifests], cwd=config.CREGIT, env=_ENV
+        ["python3", str(config.CORPUS / "consolidate.py"), *manifests],
+        cwd=config.CREGIT,
+        env=state.env,
     ).returncode
 
 
