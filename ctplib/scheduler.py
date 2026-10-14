@@ -326,20 +326,18 @@ def cmd_census(args: argparse.Namespace) -> int:
     runtime.env.setdefault("GIT_TERMINAL_PROMPT", "0")
     run_ledger.start_ledger_run(args, manifest, "census")
     install_signal_handlers()
-    with config.RUNS_LOG.open("a") as f:
-        f.write(
-            f"{console.now_iso()}\tcensus-start\tworkers={args.workers}\tprojects={len(projects)}\n"
-        )
+    run_ledger.append_runs_log(
+        "census-start", f"workers={args.workers}", f"projects={len(projects)}"
+    )
 
     results = schedule(projects, args.workers, args.retries, stop_file, args.poll)
 
     stopped = bool(runtime.run_info.get("stop_reason"))
     rc = run_exit_code(results, stopped)
     run_ledger.end_ledger_run(rc, run_start, results)
-    with config.RUNS_LOG.open("a") as f:
-        f.write(
-            f"{console.now_iso()}\tcensus-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n"
-        )
+    run_ledger.append_runs_log(
+        "census-end", f"rc={rc}", f"duration_s={int(time.time() - run_start)}"
+    )
     counts = Counter(str(v) for v in results.values())
     console.say(
         f"census finished rc={rc}: "

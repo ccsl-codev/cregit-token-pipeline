@@ -13,6 +13,12 @@ import retain
 from ctplib import artifacts, config, console, runtime, toolchain
 
 
+def append_runs_log(event: str, *fields: str) -> None:
+    """One tab-separated row of runs.log: the time, the event, then its fields."""
+    with config.RUNS_LOG.open("a") as f:
+        f.write("\t".join((console.now_iso(), event, *fields)) + "\n")
+
+
 def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
     """Every option of this run, JSON-safe, with the manifest it read. `effective` is
     what run_project reads after the checks; `cli` is what was typed."""

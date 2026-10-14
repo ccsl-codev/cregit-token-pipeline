@@ -81,17 +81,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     runtime.env.setdefault("GIT_TERMINAL_PROMPT", "0")
     console.say(f"devenv environment captured ({len(runtime.env)} vars)")
     run_ledger.start_ledger_run(args, config.CORPUS / args.manifest, "run")
-    with config.RUNS_LOG.open("a") as f:
-        f.write(f"{console.now_iso()}\trun-start\tjobs={args.jobs}\tprojects={len(projects)}\n")
+    run_ledger.append_runs_log("run-start", f"jobs={args.jobs}", f"projects={len(projects)}")
 
     results = run_passes(projects, args.jobs, args.retries)
 
     rc = 0 if all(v.is_success for v in results.values()) else 1
     run_ledger.end_ledger_run(rc, run_start, results)
-    with config.RUNS_LOG.open("a") as f:
-        f.write(
-            f"{console.now_iso()}\trun-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n"
-        )
+    run_ledger.append_runs_log("run-end", f"rc={rc}", f"duration_s={int(time.time() - run_start)}")
 
     console.say(
         f"run finished rc={rc} — " + " ".join(f"{n}:{v}" for n, v in sorted(results.items()))
