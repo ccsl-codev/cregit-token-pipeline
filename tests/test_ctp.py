@@ -31,6 +31,7 @@ from ctplib import (
     manifest_file,
     memory,
     metrics,
+    phases,
     pinning,
     resources,
     runner_args,
@@ -245,7 +246,7 @@ def sandbox(tmp_path, monkeypatch):
 @pytest.fixture
 def clock(monkeypatch):
     c = Clock(datetime(2026, 1, 2, 3, 4, 5))
-    monkeypatch.setattr(ctp, "datetime", c)
+    monkeypatch.setattr(phases, "datetime", c)
     monkeypatch.setattr(console, "datetime", c)
     return c
 
@@ -773,10 +774,10 @@ def test_a_second_attempt_does_not_overwrite_the_first_log(sandbox, monkeypatch,
     runner = FakeRunner(payload=b"first attempt\n")
     monkeypatch.setattr(subprocess, "Popen", runner)
 
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     runner.payload = b"second attempt\n"
     clock.moment = datetime(2026, 1, 2, 3, 4, 40)
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
 
     logs = logs_of(sandbox)
     assert [p.name for p in logs] == [
@@ -790,9 +791,9 @@ def test_two_attempts_in_the_same_second_keep_both_logs(sandbox, monkeypatch, cl
     runner = FakeRunner(payload=b"first attempt\n")
     monkeypatch.setattr(subprocess, "Popen", runner)
 
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     runner.payload = b"second attempt\n"
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
 
     logs = logs_of(sandbox)
     assert len(logs) == 2
@@ -804,9 +805,9 @@ def test_latest_symlink_points_at_the_newest_attempt(sandbox, monkeypatch, clock
     progress, not a stale attempt."""
     monkeypatch.setattr(subprocess, "Popen", FakeRunner())
 
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     clock.moment = datetime(2026, 1, 2, 3, 4, 40)
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
 
     latest = ctp.state_dir("jq") / "logs" / "pipeline-latest.log"
     assert latest.is_symlink()
@@ -818,7 +819,7 @@ def test_latest_symlink_is_created_on_the_first_attempt(sandbox, monkeypatch, cl
     monkeypatch.setattr(subprocess, "Popen", FakeRunner())
     (sandbox.out / "jq").mkdir()
     stamp = sandbox.out / "jq" / "jq.validated"
-    ctp.run_phase(jq, "validate", ["python3", "validate.py", "p.parquet", str(stamp)])
+    phases.run_phase(jq, "validate", ["python3", "validate.py", "p.parquet", str(stamp)])
     latest = ctp.state_dir("jq") / "logs" / "validate-latest.log"
     assert latest.is_symlink()
     assert not (ctp.state_dir("jq") / "logs" / ".validate-latest.tmp").exists()
@@ -827,7 +828,7 @@ def test_latest_symlink_is_created_on_the_first_attempt(sandbox, monkeypatch, cl
 def test_run_phase_records_the_live_phase_for_the_heartbeat(sandbox, monkeypatch, jq):
     """The heartbeat reads _live; an empty _live makes a long run look idle."""
     monkeypatch.setattr(subprocess, "Popen", FakeRunner())
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     assert runtime.live["jq"][0] == "pipeline"
 
 
@@ -2233,7 +2234,7 @@ def test_each_phase_hands_the_project_lock_to_its_process(sandbox, runner, jq):
 
 
 def test_run_phase_without_kept_fds_passes_none(sandbox, runner, jq):
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     assert "pass_fds" not in runner.calls[0].kwargs
 
 
@@ -3062,7 +3063,7 @@ def test_a_vanished_process_group_is_ignored(monkeypatch):
 
 def test_a_census_child_gets_its_own_session(sandbox, runner, jq):
     runtime.opts.update(own_session=True)
-    ctp.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
+    phases.run_phase(jq, "pipeline", ["./run_pipeline_process.sh"])
     assert runner.calls[0].kwargs["start_new_session"] is True
 
 
