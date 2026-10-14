@@ -71,12 +71,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     runtime.opts.update(preflight.run_options(args))
     if any(p.get(manifest_file.PINNED_FIELD) for p in projects):
-        preflight.refuse_unless_runner_accepts(
-            "a pinned manifest",
-            ("--commit-url",),
-            " Pinned projects run from a local staging clone, so the runner needs "
-            "--commit-url to keep the real commit links.",
-        )
+        preflight.require_commit_url()
     preflight.announce_run(runtime.opts, args.jobs)
 
     run_start = time.time()

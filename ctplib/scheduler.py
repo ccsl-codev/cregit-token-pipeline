@@ -316,12 +316,7 @@ def cmd_census(args: argparse.Namespace) -> int:
 
     set_run_options(args)
     if len(projects) > unpinned:
-        preflight.refuse_unless_runner_accepts(
-            "a pinned manifest",
-            ("--commit-url",),
-            " Pinned projects run from a local staging clone, so the runner needs "
-            "--commit-url to keep the real commit links.",
-        )
+        preflight.require_commit_url()
     preflight.announce_run(runtime.opts, args.workers)
     console.say(f"stop file: {stop_file} (touch it to stop after the running projects)")
 

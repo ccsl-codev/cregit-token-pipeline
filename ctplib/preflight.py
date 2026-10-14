@@ -228,6 +228,16 @@ def refuse_unless_runner_accepts(flag: str, needed: tuple[str, ...], consequence
         )
 
 
+def require_commit_url() -> None:
+    """A pinned manifest runs from a local staging clone: the runner needs --commit-url."""
+    refuse_unless_runner_accepts(
+        "a pinned manifest",
+        ("--commit-url",),
+        " Pinned projects run from a local staging clone, so the runner needs "
+        "--commit-url to keep the real commit links.",
+    )
+
+
 def resolve_project_meta(path: str) -> str:
     if not Path(path).exists():
         sys.exit(
