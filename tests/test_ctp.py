@@ -38,6 +38,7 @@ from ctplib import (
     project_steps,
     remote_head,
     resources,
+    run_ledger,
     runner_args,
     runtime,
     toolchain,
@@ -2278,19 +2279,19 @@ def test_end_ledger_run_survives_a_failed_write(monkeypatch, capsys):
         raise OSError("gone")
 
     monkeypatch.setattr(ledger, "append", boom)
-    ctp.end_ledger_run(0, time.time(), {})
+    run_ledger.end_ledger_run(0, time.time(), {})
     assert "cannot write the run-end row" in capsys.readouterr().out
 
 
 def test_run_flags_records_every_option_and_the_manifest(sandbox):
     manifest = write_manifest(sandbox.root, VALID_ROW)
     runtime.opts.update(shard_classes=("L",), drop_memo=True)
-    flags = ctp.run_flags(run_args(jobs=4), manifest)
+    flags = run_ledger.run_flags(run_args(jobs=4), manifest)
     assert flags["effective"]["shard_classes"] == ["L"]
     assert flags["effective"]["drop_memo"] is True and flags["cli"]["drop_memo"] is False
     assert flags["cli"]["jobs"] == 4 and "fn" not in flags["cli"]
     assert flags["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
-    assert ctp.run_flags(run_args(), sandbox.root / "absent.tsv")["manifest_sha256"] == ""
+    assert run_ledger.run_flags(run_args(), sandbox.root / "absent.tsv")["manifest_sha256"] == ""
 
 
 def test_tool_versions_names_every_tool(monkeypatch, sandbox):
@@ -3116,12 +3117,12 @@ def test_run_flags_name_the_config_and_the_directories(sandbox, monkeypatch):
     cfg = sandbox.root / "e2e.cfg"
     cfg.write_text("[paths]\n")
     monkeypatch.setattr(retain, "CONFIG", cfg)
-    flags = ctp.run_flags(run_args(), write_manifest(sandbox.root, VALID_ROW))
+    flags = run_ledger.run_flags(run_args(), write_manifest(sandbox.root, VALID_ROW))
     assert flags["config_path"] == str(cfg)
     assert flags["config_sha256"] == hashlib.sha256(b"[paths]\n").hexdigest()
     assert flags["cregit_dir"] == str(sandbox.cregit) and flags["output_dir"] == str(sandbox.out)
     monkeypatch.setattr(retain, "CONFIG", sandbox.root / "absent.cfg")
-    assert ctp.run_flags(run_args(), sandbox.root / "manifest.tsv")["config_sha256"] == ""
+    assert run_ledger.run_flags(run_args(), sandbox.root / "manifest.tsv")["config_sha256"] == ""
 
 
 # --------------------------------------------------------------------------- #
