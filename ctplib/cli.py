@@ -146,9 +146,21 @@ def add_project_options(p: argparse.ArgumentParser) -> None:
 
 
 def main() -> int:
+    args = build_parser().parse_args()
+    return args.fn(args)
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=DESCRIPTION)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    add_run_parser(sub)
+    add_end_to_end_parser(sub)
+    add_report_parsers(sub)
+    return ap
 
+
+def add_run_parser(sub) -> None:
+    """`ctp.py run`: thread-pool passes over the manifest."""
     run_p = sub.add_parser("run", help="run the corpus")
     run_p.add_argument("--jobs", type=int, default=2, help="concurrent projects")
     run_p.add_argument("--retries", type=int, default=1, help="extra passes over failed projects")
@@ -169,6 +181,9 @@ def main() -> int:
     )
     run_p.set_defaults(fn=passes.cmd_run)
 
+
+def add_end_to_end_parser(sub) -> None:
+    """`ctp.py census`: every project end to end, resumable."""
     ce_p = sub.add_parser(
         "census",
         help="every project end to end: clone at the pinned commit, pipeline, "
@@ -231,6 +246,9 @@ def main() -> int:
     add_project_options(ce_p)
     ce_p.set_defaults(fn=scheduler.cmd_census)
 
+
+def add_report_parsers(sub) -> None:
+    """status, progress, audit and db: they read the records and run no project."""
     st_p = sub.add_parser("status", help="one-screen pipeline status")
     st_p.add_argument("--manifest", default="manifest.tsv")
     st_p.set_defaults(fn=report.cmd_status)
@@ -259,6 +277,3 @@ def main() -> int:
         help="manifest to index, repeatable (default manifest.tsv)",
     )
     db_p.set_defaults(fn=report.cmd_db)
-
-    args = ap.parse_args()
-    return args.fn(args)
