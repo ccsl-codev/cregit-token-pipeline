@@ -96,7 +96,7 @@ def test_labels_become_the_category_and_the_manifest_category(tmp_path):
 
 def test_a_category_column_wins_over_labels(tmp_path):
     frame = write_frame(tmp_path, [frame_row(category="foundation")])
-    manifest, meta, _ = build_files(tmp_path, frame)
+    manifest, _meta, _ = build_files(tmp_path, frame)
     assert ctp.read_manifest(manifest, None)[0]["category"] == "foundation"
 
 

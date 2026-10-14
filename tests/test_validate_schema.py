@@ -38,7 +38,7 @@ def retyped(column: str, typ: str) -> list:
             [c for c in GOOD if c[0] != "person_domain"], "missing", "person_domain", id="missing"
         ),
         # An unexpected column means the generator changed and nobody recorded why.
-        pytest.param(GOOD + [("employer", "VARCHAR")], "unexpected", "employer", id="unexpected"),
+        pytest.param([*GOOD, ("employer", "VARCHAR")], "unexpected", "employer", id="unexpected"),
         pytest.param(retyped("token_index", "VARCHAR"), "type", "token_index", id="type"),
         # Parquet is read by name, so order breaks no consumer, but it is still surfaced.
         pytest.param(list(reversed(GOOD)), "order", "-", id="order"),

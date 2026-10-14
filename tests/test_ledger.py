@@ -19,7 +19,7 @@ def test_append_writes_one_json_row_per_line(tmp_path):
     ledger.append(path, {"project": "a", "step": "clone"})
     ledger.append(path, {"project": "a", "step": "pipeline", "note": "ünïcode"})
     lines = path.read_text(encoding="utf-8").splitlines()
-    assert [json.loads(l)["step"] for l in lines] == ["clone", "pipeline"]
+    assert [json.loads(line)["step"] for line in lines] == ["clone", "pipeline"]
     assert "ünïcode" in lines[1]
 
 

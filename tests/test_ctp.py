@@ -154,7 +154,7 @@ class FakeRunner:
         return SimpleNamespace(returncode=rc, pid=os.getpid(), wait=lambda: rc)
 
     def argv(self, phase: str) -> list[str]:
-        return [c.args for c in self.calls if c.phase == phase][0]
+        return next(c.args for c in self.calls if c.phase == phase)
 
 
 class Clock:
@@ -650,7 +650,7 @@ def test_status_reports_failed_after_the_runner_wiped_the_workdir(sandbox, monke
 
     write_manifest(sandbox.root, VALID_ROW)
     ctp.cmd_status(argparse.Namespace(manifest="manifest.tsv"))
-    line = [l for l in capsys.readouterr().out.splitlines() if l.startswith("jq ")][0]
+    line = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("jq "))
     assert "FAILED" in line
 
 
@@ -2882,7 +2882,7 @@ def test_a_crashing_worker_fails_only_its_project(sandbox, fake_projects, no_gat
         if name == "a":
             raise RuntimeError("boom")
 
-    fake = fake_projects(hook=crash)
+    fake_projects(hook=crash)
     results = ctp.schedule(projects_of(sandbox, "a", "b"), 1, 0, sandbox.root / "STOP", poll=0.01)
     assert results == {"a": ctp.RunOutcome.FAILED, "b": ctp.RunOutcome.DONE}
     assert "crashed the worker: RuntimeError: boom" in capsys.readouterr().out

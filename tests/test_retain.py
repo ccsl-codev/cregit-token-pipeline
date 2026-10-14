@@ -536,7 +536,7 @@ def test_a_symlink_inside_a_subtree_is_not_followed_out_of_the_tree(out, tmp_pat
     assert size == disk_bytes(workdir / "memo")
     assert size < disk_bytes(outside)  # the target was not counted
 
-    reclaimed, ok = retain.prune("jq", ("memo",), apply=True)
+    _reclaimed, ok = retain.prune("jq", ("memo",), apply=True)
     assert ok is True
     assert not (workdir / "memo").exists()
     assert snapshot(outside) == before
@@ -559,7 +559,7 @@ def test_a_broken_symlink_inside_a_subtree_does_not_block_the_prune(out):
     unreadable entry."""
     workdir = make_project(out, "jq")
     (workdir / "memo" / "dangling").symlink_to(workdir / "memo" / "gone")
-    size, entries, violations = retain.scan(workdir / "memo")
+    _size, entries, violations = retain.scan(workdir / "memo")
     assert violations == []
     assert entries == 4
     assert retain.prune("jq", ("memo",), apply=True)[1] is True
@@ -635,7 +635,7 @@ def test_scan_reports_an_unreadable_directory_as_a_violation(out):
     workdir = make_project(out, "jq", memo=False)
     (workdir / "memo").write_text("not a directory")
 
-    size, entries, violations = retain.scan(workdir / "memo")
+    _size, entries, violations = retain.scan(workdir / "memo")
     assert entries == 0
     assert len(violations) == 1 and "unreadable" in violations[0]
 
@@ -666,7 +666,7 @@ def test_scan_reports_an_entry_that_vanishes_mid_walk(out, monkeypatch):
         yield [VanishingEntry(str(Path(path) / "blob0001"))]
 
     monkeypatch.setattr(retain.os, "scandir", fake_scandir)
-    size, entries, violations = retain.scan(workdir / "memo")
+    _size, entries, violations = retain.scan(workdir / "memo")
     assert entries == 1
     assert len(violations) == 1 and "cannot stat" in violations[0]
     assert retain.prune("jq", ("memo",), apply=True) == (0, False)

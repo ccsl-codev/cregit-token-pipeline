@@ -559,7 +559,7 @@ def test_an_absolute_manifest_is_used_as_given(sandbox, tmp_path):
 # the schema gate
 # --------------------------------------------------------------------------- #
 
-LEGACY_23_COLUMNS = consolidate.EXPECTED_COLUMNS[:22] + (("repo_tag", "VARCHAR"),)
+LEGACY_23_COLUMNS = (*consolidate.EXPECTED_COLUMNS[:22], ("repo_tag", "VARCHAR"))
 RETYPED_COLUMNS = tuple(
     (name, "VARCHAR" if name == "token_index" else typ)
     for name, typ in consolidate.EXPECTED_COLUMNS

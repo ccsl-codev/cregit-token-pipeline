@@ -8,6 +8,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+import duckdb
 import pytest
 
 import firm_attribution as fa
@@ -189,7 +190,7 @@ def test_a_file_in_neither_form_is_refused_and_left_untouched(
 def test_a_failed_join_keeps_the_input_and_leaves_no_temp_file(tmp_path, tables):
     parquet = cregit_parquet(tmp_path / "p.parquet", ["intel.com"])
     before = parquet.read_bytes()
-    with pytest.raises(Exception):
+    with pytest.raises(duckdb.Error):
         fa.add_firm_columns(parquet, tmp_path / "absent.csv", tables[1])
     assert parquet.read_bytes() == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ["canon.csv", "map.csv", "p.parquet"]
