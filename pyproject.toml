@@ -39,6 +39,10 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "C90", "RUF"]
 # dict(a=1) reads as well as {"a": 1}; the code uses both.
 ignore = ["C408"]
 
+[tool.ruff.lint.isort]
+# The helper module of tests/ctplib, imported from the test directory.
+known-local-folder = ["fakes"]
+
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
