@@ -330,6 +330,30 @@ the analysis machine has no L1r output for `SAP__project-foxhound` yet.
   `9ccead6` has the trailer code of `95cdc88`. Until the rewrite runs on it, do not use
   the `footer_*` columns of `mongodb__mongo`.
 
+**Dataset v1: Python and TypeScript are not tokenized, so the dataset is incomplete in two
+ways.** The tokenizers read C, C++, Java and Rust only (srcML and the Rust lexer). This is a
+liability of the dataset, not of one run. Source: `s2-pool/pool.csv` (Linguist bytes),
+`s4-filter/frame_status.v4.csv` and `frame.v4.csv` of the dataset selection, 2026-10-16.
+
+* **Projects outside the dataset.** The language step removes a GitHub row only if Linguist
+  lists no C, C++, Java or Rust. It removed 42,061 active rows with Python or TypeScript:
+  19,929 with Python as the primary language, 11,111 with TypeScript, and 11,021 with
+  another primary language. The 5% rule (DP3) removed 1,750 more rows with Python or
+  TypeScript as the primary language; 290 of them have 5,000 commits or more (195 Python,
+  95 TypeScript). The commit counts of the 42,061 rows are not measured yet
+  (`what-if-py-ts/`), so the number with 5,000 commits or more is open.
+* **Tokens missing inside v1 projects.** Of the 3,427 v1 GitHub projects with Linguist data,
+  2,661 contain Python or TypeScript. These two languages are 5.7% of their code bytes. In
+  362 projects they are 25% of the bytes or more, and in 201 projects 50% or more (for
+  example `PostHog/posthog`, `microsoft/vscode`, `pytorch/pytorch`, `sgl-project/sglang`).
+  In these projects, the Parquet holds only the C, C++, Java or Rust part.
+* **Effect on results.** A person or a firm that writes only Python or TypeScript in a v1
+  project has no tokens there. So author and firm shares describe the tokenized languages
+  only, not the project. The machine learning and web ecosystems are under-represented.
+* **Detect.** Compare the `file_path` extensions of a Parquet with the Linguist languages of
+  its pool row. No column records the untokenized share.
+* **Workaround.** None in v1. A Python or TypeScript tokenizer is future work.
+
 **A vendored dependency attributes its whole library to the engineer who imported
 it.** cregit credits the commit that introduced a line, so a wholesale vendor drop
 credits the importing author with every token of third-party code. This is a
