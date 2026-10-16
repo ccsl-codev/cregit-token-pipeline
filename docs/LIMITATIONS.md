@@ -340,8 +340,20 @@ liability of the dataset, not of one run. Source: `s2-pool/pool.csv` (Linguist b
   19,929 with Python as the primary language, 11,111 with TypeScript, and 11,021 with
   another primary language. The 5% rule (DP3) removed 1,750 more rows with Python or
   TypeScript as the primary language; 290 of them have 5,000 commits or more (195 Python,
-  95 TypeScript). The commit counts of the 42,061 rows are not measured yet
-  (`what-if-py-ts/`), so the number with 5,000 commits or more is open.
+  95 TypeScript). The commit counts at the pinned commit (`what-if-py-ts/`, 2026-10-16; 52
+  rows have no count) give these rows with a GitHub license, for the two groups together:
+
+  | Primary language | ≥ 5,000 commits | ≥ 1,000 | ≥ 100 |
+  |---|---:|---:|---:|
+  | Python | 866 | 3,945 | 11,619 |
+  | TypeScript | 710 | 3,167 | 8,431 |
+  | another language | 1,250 | 4,246 | 9,077 |
+  | all | 2,826 | 11,358 | 29,127 |
+
+  The v1 rule (5,000 commits or more) gives 3,497 GitHub rows. So a Python and TypeScript
+  tokenizer would add up to 2,826 rows, 1,576 of them with Python or TypeScript as the
+  primary language. These are upper bounds: the rows did not go through the measure step or
+  the 5% rule for the new languages, and the near misses of DP8L v4 are not counted.
 * **Tokens missing inside v1 projects.** Of the 3,427 v1 GitHub projects with Linguist data,
   2,661 contain Python or TypeScript. These two languages are 5.7% of their code bytes. In
   362 projects they are 25% of the bytes or more, and in 201 projects 50% or more (for
