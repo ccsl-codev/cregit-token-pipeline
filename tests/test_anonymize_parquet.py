@@ -684,3 +684,41 @@ def test_fifteen_footer_columns():
     assert len(A.FOOTER_COLUMNS) == 15
     assert len(A.PROVENANCE_COLUMNS) == 29
     assert len(A.FIRM_COLUMNS) == 3
+
+
+# --------------------------------------------------------------------------
+# ctp schema 2 (dataset v0, the user's rules of 2026-10-19): the 4 organisation
+# columns pass unchanged; firm_raw, firm and firm_source are dropped.
+# --------------------------------------------------------------------------
+
+SCHEMA2 = [c for c in CONTRACT if c not in A.FIRM_COLUMNS] + list(A.ORGANISATION_COLUMNS)
+
+
+def test_schema2_organisation_columns_pass_and_firm_columns_are_dropped():
+    plan = A.classify(SCHEMA2 + list(A.FIRM_COLUMNS))
+    for c in A.ORGANISATION_COLUMNS:
+        assert plan.rule_of(c) == "pass"
+    for c in A.FIRM_COLUMNS:
+        assert plan.rule_of(c) == "drop"
+    assert plan.n_out == len(SCHEMA2)
+
+
+def test_schema2_without_firm_columns_is_the_v0_file():
+    plan = A.classify(SCHEMA2)
+    assert plan.n_in == plan.n_out == 71
+    assert not plan.dropped
+
+
+def test_schema2_needs_the_domain_column_not_firm():
+    narrow = [c for c in SCHEMA2 if c != "firm_based_on_namespace"]
+    with pytest.raises(A.MissingColumnError) as e:
+        A.classify(narrow)
+    assert "firm_based_on_namespace" in str(e.value)
+    plan = A.classify([c for c in SCHEMA2])
+    assert "firm" not in plan.column_order
+
+
+def test_schema1_keeps_the_old_rules():
+    plan = A.classify(CONTRACT)
+    assert all(plan.rule_of(c) == "pass" for c in A.FIRM_COLUMNS)
+    assert not set(A.ORGANISATION_COLUMNS) & set(plan.column_order)

@@ -187,6 +187,19 @@ PROVENANCE_COLUMNS: tuple[str, ...] = (
 # Firm attribution, resolved from person_domain. Public company data.
 FIRM_COLUMNS: tuple[str, ...] = ("firm_raw", "firm", "firm_source")
 
+# ctp schema 2 (S8 of the dataset study, the user, 2026-10-19). Dataset v0 replaces the 3 firm
+# columns of the old gitdm map with 4 organisation columns: ids of the organisation reference
+# tables and the two enterprise columns. They are organisation data, not person data, so they
+# pass unchanged. In a schema 2 input the 3 firm columns are dropped: they must not reach
+# v1-public. An input with no organisation column is schema 1 (the 70-column contract) and keeps
+# the old rules; since 2026-10-19 v1-public is made from schema 2 input only.
+ORGANISATION_COLUMNS: tuple[str, ...] = (
+    "firm_based_on_namespace", "firm_based_on_domain",
+    "project_enterprise_driven", "project_enterprise_basis",
+)
+# The invariance proof groups by this column in a schema 2 file, by `firm` in a schema 1 file.
+ORGANISATION_GROUP_KEY = "firm_based_on_domain"
+
 # Everything else that is copied verbatim: the token stream, shas, dates, paths,
 # and person_domain -- the company signal, which is why it is kept.
 OTHER_PASSTHROUGH_COLUMNS: tuple[str, ...] = (
@@ -320,8 +333,20 @@ def classify(columns: list[str], drop_footers: bool = False) -> Plan:
     dropped: list[str] = []
     unknown: list[str] = []
 
+    org_present = [c for c in ORGANISATION_COLUMNS if c in columns]
+    schema2 = bool(org_present)
+    if schema2 and len(org_present) != len(ORGANISATION_COLUMNS):
+        raise MissingColumnError(
+            "input has only some of the organisation columns (ctp schema 2): "
+            + ", ".join(c for c in ORGANISATION_COLUMNS if c not in columns)
+            + " missing. Refusing to guess.")
+
     for c in columns:
-        if c in PASSTHROUGH_COLUMNS:
+        if schema2 and c in FIRM_COLUMNS:
+            dropped.append(c)          # the old firm map leaves v1-public (schema 2)
+        elif schema2 and c in ORGANISATION_COLUMNS:
+            passthrough.append(c)      # organisation data, not person data
+        elif c in PASSTHROUGH_COLUMNS:
             passthrough.append(c)
         elif c in SCALAR_TRANSFORMS:
             scalar.append((c, SCALAR_TRANSFORMS[c]))
@@ -335,7 +360,8 @@ def classify(columns: list[str], drop_footers: bool = False) -> Plan:
         else:
             unknown.append(c)
 
-    missing = [c for c in REQUIRED_COLUMNS if c not in columns]
+    required = [ORGANISATION_GROUP_KEY if (schema2 and c == "firm") else c for c in REQUIRED_COLUMNS]
+    missing = [c for c in required if c not in columns]
     if missing and not unknown:
         raise MissingColumnError(
             "input is missing column(s) the verification needs: "
@@ -996,11 +1022,15 @@ def aggregate_profile(con, path: str) -> dict:
     so if they are identical before and after, the published numbers are too.
     """
     prof = {}
-    for col in GROUP_KEYS:
+    names = set(read_columns(con, path))
+    # A schema 2 file has no firm column: its firm group is firm_based_on_domain.
+    prof["firm_column"] = ORGANISATION_GROUP_KEY if ORGANISATION_GROUP_KEY in names else "firm"
+    for key in GROUP_KEYS:
+        col = prof["firm_column"] if key == "firm" else key
         rows = con.execute(
             f"select coalesce({col}, '<NULL>') as k, count(*) "
             f"from read_parquet(?) group by 1 order by 1", [path]).fetchall()
-        prof[col] = {k: n for k, n in rows}
+        prof[key] = {k: n for k, n in rows}
     prof["rows"] = con.execute("select count(*) from read_parquet(?)",
                                [path]).fetchone()[0]
     for col in DISTINCT_KEYS:
@@ -1015,6 +1045,8 @@ def invariance_diff(before: dict, after: dict) -> list[str]:
     problems = []
     if before["rows"] != after["rows"]:
         problems.append(f"row count {before['rows']} -> {after['rows']}")
+    if before.get("firm_column") != after.get("firm_column"):
+        problems.append(f"firm group column {before.get('firm_column')} -> {after.get('firm_column')}")
     for col in ("firm", "repo_name"):
         if before[col] != after[col]:
             problems.append(f"{col} group counts changed")
@@ -1282,7 +1314,7 @@ def run(outdir: str, paths: list[str], drop_footers: bool = False,
                   f"{' -- LOST ' + str(fe_lost) if fe_lost else ''}", file=out)
         print(f"  pass-through audit: structural columns clean="
               f"{not audit['email_shape'] and not audit['identity_name']}"
-              f" (29 provenance + 3 firm + person_domain carry no address "
+              f" (29 provenance + 3 firm or 4 organisation + person_domain carry no address "
               f"and no identity name)", file=out)
         if audit["email_shape"]:
             print(f"    FAIL e-mail address in structural pass-through "
