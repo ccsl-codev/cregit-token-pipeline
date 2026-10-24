@@ -23,6 +23,57 @@ rather than an opinion.
 >   single `github` false positive, and `--null-commit-summary` is still the only
 >   remedy the tool offers.
 
+## Status after the release rework (2026-10-24)
+
+The release tool is now `pseudonymize.py` (one registry table, a linear leak
+scan, reports with counts and registry tokens only, `--jobs`/`--threads`/
+`--memory-limit`, and a fused write for the organisation step). Its module
+docstring gives the design and the measurements. `anonymize_parquet.py` keeps
+the rules and its old command line. Do not use that command line for the
+release: its report and its standard output give examples of real values.
+
+What the documents decided, and what the new tool does:
+
+* `person_domain` is written as `lower(trim(person_domain))`, the key of
+  `build_links.py` (JOIN_PROTOTYPE.md, recommendation 4). Measured on the v1
+  files: 2 of 70,737 distinct values change.
+* `commit_summary`: question 2 below is still open. The tool keeps the two
+  documented modes (`--commit-summary scrub`, the default, and `null`). The
+  residue gate stays strict. `--summary-residue report` is option 4 of
+  question 2. It is off until the user selects it.
+
+Questions that still need the user:
+
+* **2b. The scrub form fails `verify_anon.py`.** The scrub writes the local
+  part `author` (the word `author`, the at sign, the domain).
+  `verify_anon.py` accepts only `author_<token>` and refuses each scrubbed
+  summary that had an address. Thus the default mode cannot pass the release
+  check. Options: `--commit-summary pseudonym` (new: each address gets the
+  pseudonym of the e-mail columns, and `verify_anon.py` accepts it),
+  `--commit-summary null`, or a change of `verify_anon.py`.
+* **5. `person_domain` values with an at sign.** Measured on the v1 files: 199
+  distinct values in 176 files have an at sign. 70 distinct values (275,674
+  rows, 89 files) have the shape of an address. The structural gate fails
+  these 89 files. `firm_based_on_domain` is already `unknown` for such values.
+  Options: `--person-domain-at keep` (the default; the gate fails),
+  `after-last-at` (keep the part after the last at sign) or `empty`.
+* **6. The registry file.** It is the reverse map (real identity to
+  pseudonym). It stays private (mode 0600), outside the release and outside
+  git, as the salt. Decide where it is kept, and if it is deleted after the
+  release. The salt alone gives the same pseudonyms again, so a later release
+  does not need the old registry. Only the footer hash check needs it.
+* **7. The salt on the organisation machine.** The fused write computes the
+  pseudonyms in DuckDB, so the salt file must be on the machine that writes
+  the files (release plan step 7, "the salt transfer").
+* **8. The `build_v0.py` change.** The fused write needs a change in the other
+  repository (`s8-companies/build_v0.py`): its COPY becomes a call of
+  `pseudonymize.write_public(...)` with its own SELECT as `source_sql`. Its own
+  order hash must not compare the identity columns, because they change.
+* **9. The pseudonym scheme.** Scheme 2 is a nested keyed sha256 that DuckDB
+  computes, not the blake2b of `anonymize_parquet.py`. With one salt, the two
+  tools give different tokens. Nothing is published yet, so this has no effect
+  on a reader. Confirm that scheme 2 is the release scheme.
+
 ## First, a correction to the brief
 
 The task described a conflict: `docs/DESIGN.md` §7 item 2, around line 163, was
