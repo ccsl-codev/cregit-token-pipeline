@@ -19,8 +19,12 @@ WHAT CHANGED, AND WHY
    runs on this table, so it covers all files. The leak scan reads its probes
    from this table, so a person of file A is also looked for in file B.
    The table holds real identities. It is as private as the salt: mode 0600,
-   never in the release, never in git. Its sha256 (over the sorted rows) goes
-   into the footer of each written file.
+   never in the release, never in git. The user decided (2026-10-24) to keep
+   it in the private bucket after the release, so that a later release
+   with the same salt gives the same pseudonyms and can check the old footer
+   hashes. The tool refuses a registry path under --outdir, under a
+   --release-root, or under a folder with the layout of a release root.
+   Its sha256 (over the sorted rows) goes into the footer of each written file.
 
 2. The pseudonym is a keyed hash that DuckDB computes per row.
    A join with the registry does not keep the row order of a Parquet file
@@ -31,7 +35,8 @@ WHAT CHANGED, AND WHY
 
        token = substr(sha256(K2 || sha256(K1 || space || ':' || lower(value))), 1, 14)
 
-   in SQL. K1 and K2 are the two halves of blake2b(salt, 64 bytes), as hex.
+   in SQL (scheme 2; the user chose it as the release scheme on 2026-10-24).
+   K1 and K2 are the two halves of blake2b(salt, 64 bytes), as hex.
    The nested hash stops a length-extension attack, and the result has
    PSEUDO_HEX_LEN = 14 hex characters (56 bits), as before. DuckDB runs a
    scalar function once per dictionary entry of a Parquet column, so the cost
@@ -79,17 +84,17 @@ WHAT CHANGED, AND WHY
      * person_domain is written as lower(trim(person_domain)) (the key of
        build_links.py; JOIN_PROTOTYPE.md recommendation 4). Measured on
        dataset v1: this changes 2 of 70,737 distinct values.
-     * commit_summary: the rule is still OPEN (question 2). The tool keeps the
-       two documented modes, --commit-summary scrub (the default: the local
-       part of each address becomes 'author') and --commit-summary null, and
-       adds --commit-summary pseudonym (each address gets the pseudonym of the
-       e-mail columns). verify_anon.py refuses the scrub form, so the release
-       needs pseudonym or null (question 2b). The residue gate stays strict.
-       --summary-residue report is option 4 of question 2 (an address residue
-       fails, a name residue is counted); it is off until the user selects it.
-     * person_domain values with an at sign: OPEN (question 5). The default
-       ('keep') writes them, and the structural gate fails the file.
-       --person-domain-at after-last-at or empty are the two other rules.
+     * commit_summary (the user, 2026-10-24): the default is --commit-summary
+       pseudonym. Each address in the text gets the pseudonym of the e-mail
+       columns (author_<token>, the same domain), and verify_anon.py accepts
+       it. The modes scrub (the old rule: the local part becomes 'author';
+       verify_anon.py refuses it) and null stay for tests and comparison. The
+       residue gate stays strict: a real name in the text fails the file.
+       --summary-residue report (option 4 of question 2) is not selected.
+     * person_domain with an at sign (the user, 2026-10-24): the default is
+       --person-domain-at after-last-at. The value keeps the part after the
+       last at sign, after lower(trim()). firm_based_on_domain is 'unknown'
+       for such values already.
 
 8. Speed. One file per job and one DuckDB thread per job (--jobs N
    --threads 1) is the fast form: an ordered ZSTD 19 write with more threads
@@ -150,6 +155,13 @@ SALT_CHECK_VALUE = "ctp-anon-salt-check"
 REGISTRY_COLUMNS = ("space", "identity", "token", "pseudonym", "shape",
                     "anchor", "local")
 SUMMARY_MODES = ("scrub", "pseudonym", "null")
+# The user's decisions of 2026-10-24: commit_summary addresses get the
+# pseudonym of the e-mail columns; a person_domain value with an at sign keeps
+# the part after the last at sign.
+DEFAULT_SUMMARY_MODE = "pseudonym"
+DEFAULT_DOMAIN_AT = "after-last-at"
+# Files and folders that mark the root of a release (release plan, layout).
+RELEASE_MARKERS = ("organisations", "MANIFEST.tsv", "SHA256SUMS")
 RESIDUE_MODES = ("fail", "report")
 # person_domain values with an at sign (measured on dataset v1: 199 distinct
 # values in 176 files, 70 of them address-shaped in 89 files). 'keep' writes
@@ -342,7 +354,7 @@ def file_schema(con, path: str) -> list[tuple[str, str]]:
     return describe(con, f"SELECT * FROM read_parquet({sql_str(path)})")
 
 
-def person_domain_expr(src: str, domain_at: str = "keep") -> str:
+def person_domain_expr(src: str, domain_at: str = DEFAULT_DOMAIN_AT) -> str:
     """The person_domain rule: lower(trim(value)), and the rule for a value
     with an at sign."""
     if domain_at not in DOMAIN_AT_MODES:
@@ -355,7 +367,7 @@ def person_domain_expr(src: str, domain_at: str = "keep") -> str:
 
 
 def output_expr(plan: A.Plan, col: str, alias: str, summary_mode: str,
-                domain_at: str = "keep") -> str | None:
+                domain_at: str = DEFAULT_DOMAIN_AT) -> str | None:
     """The SELECT item of one output column, or None for a dropped column."""
     rule = plan.rule_of(col)
     src = f"{alias}.{q(col)}"
@@ -440,16 +452,47 @@ def classify_all(con, paths: list[str], drop_footers: bool) -> dict[str, A.Plan]
             for p in paths}
 
 
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def check_registry_path(registry: str, forbidden: tuple[str, ...] = ()) -> None:
+    """Refuse a registry path in a published place.
+
+    The registry is the reverse map. It stays in private storage (the user,
+    2026-10-24: the private bucket, also after the release, so that a later
+    release gives the same pseudonyms). It must not be under a folder of
+    `forbidden` (the output folder of the write, a --release-root), and not
+    under a folder that has the layout of a release root (a 'parquet' folder
+    and one of RELEASE_MARKERS).
+    """
+    p = Path(registry).expanduser().resolve()
+    for root in forbidden:
+        if root and _inside(p, Path(root).expanduser().resolve()):
+            raise RegistryError("the registry path is under the output folder or a "
+                                "release root; keep it in private storage")
+    for d in p.parents:
+        if (d / "parquet").is_dir() and any((d / m).exists() for m in RELEASE_MARKERS):
+            raise RegistryError("the registry path is under a release root; keep it in "
+                                "private storage")
+
+
 def build_registry(paths: list[str], keys: tuple[str, str], registry_out: str, *,
                    memory_limit: str = "8GB", threads: int = 4,
                    temp_dir: str | None = None, drop_footers: bool = False,
-                   out=sys.stdout) -> dict:
+                   forbidden_roots: tuple[str, ...] = (), out=sys.stdout) -> dict:
     """Read all inputs once and write the one registry table.
 
     Returns a summary with counts only. Raises RegistryError on a collision.
     """
     if not paths:
         raise RegistryError("no input files")
+    check_registry_path(registry_out, tuple(forbidden_roots))
+    os.makedirs(os.path.dirname(os.path.abspath(registry_out)), mode=0o700, exist_ok=True)
     con = connect(memory_limit, threads, temp_dir)
     try:
         install(con, keys)
@@ -672,9 +715,9 @@ def file_kv(con, path: str) -> dict[str, str]:
 
 def write_public(con, src: str, dst: str, *, registry: str, registry_sha256: str,
                  source_sql: str | None = None, source_params: dict | None = None,
-                 kv: dict[str, str] | None = None, summary_mode: str = "scrub",
+                 kv: dict[str, str] | None = None, summary_mode: str = DEFAULT_SUMMARY_MODE,
                  drop_footers: bool = False, expect_schema_2: bool = True,
-                 domain_at: str = "keep",
+                 domain_at: str = DEFAULT_DOMAIN_AT,
                  source_schema: list[tuple[str, str]] | None = None) -> dict:
     """Write the pseudonymized file `dst` from `src` in one COPY.
 
@@ -974,10 +1017,12 @@ def run_file(job: dict) -> dict:
 
 def run_write(paths: list[str], outdir: str, *, keys: tuple[str, str], registry: str,
               jobs: int = 1, threads: int = 1, memory_limit: str = "4GB",
-              temp_dir: str | None = None, summary_mode: str = "scrub",
+              temp_dir: str | None = None, summary_mode: str = DEFAULT_SUMMARY_MODE,
               summary_residue: str = "fail", scan: bool = True, drop_footers: bool = False,
-              expect_schema_2: bool = True, domain_at: str = "keep",
-              content_scan: bool = True, out=sys.stdout) -> dict:
+              expect_schema_2: bool = True, domain_at: str = DEFAULT_DOMAIN_AT,
+              content_scan: bool = True, release_roots: tuple[str, ...] = (),
+              out=sys.stdout) -> dict:
+    check_registry_path(registry, (outdir, *release_roots))
     os.makedirs(outdir, exist_ok=True)
     con = connect("1GB", 1)
     try:
@@ -1190,7 +1235,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("registry", help="build the one registry over all inputs")
     r.add_argument("--salt-file", required=True)
-    r.add_argument("--registry", required=True, help="output path (private)")
+    r.add_argument("--registry", required=True, help="private path of the registry table (mode 0600); refused under --outdir, a --release-root or a folder with a release layout")
+    r.add_argument("--release-root", action="append", default=[],
+                   help="a release folder; the registry must not be under it")
     r.add_argument("--drop-footers", action="store_true")
     r.add_argument("--report", default=None)
     _add_run_opts(r, jobs=False)
@@ -1199,16 +1246,20 @@ def main(argv: list[str] | None = None) -> int:
         w = sub.add_parser(name, help=("write the pseudonymized files" if name == "write"
                                        else "build the registry, then write"))
         w.add_argument("--salt-file", required=True)
-        w.add_argument("--registry", required=True)
+        w.add_argument("--registry", required=True, help="private path of the registry table (mode 0600); refused under --outdir, a --release-root or a folder with a release layout")
+        w.add_argument("--release-root", action="append", default=[],
+                       help="a release folder; the registry must not be under it")
         w.add_argument("--outdir", required=True)
-        w.add_argument("--commit-summary", choices=SUMMARY_MODES, default="scrub")
+        w.add_argument("--commit-summary", choices=SUMMARY_MODES,
+                       default=DEFAULT_SUMMARY_MODE)
         w.add_argument("--summary-residue", choices=RESIDUE_MODES, default="fail",
                        help="'report' is option 4 of open question 2 (not decided)")
         w.add_argument("--no-scan", action="store_true", help="skip the leak scan")
         w.add_argument("--no-content-scan", action="store_true",
                        help="do not scan the content columns (their findings never fail)")
-        w.add_argument("--person-domain-at", choices=DOMAIN_AT_MODES, default="keep",
-                       help="rule for a person_domain value with an at sign (not decided)")
+        w.add_argument("--person-domain-at", choices=DOMAIN_AT_MODES,
+                       default=DEFAULT_DOMAIN_AT,
+                       help="rule for a person_domain value with an at sign")
         w.add_argument("--drop-footers", action="store_true")
         w.add_argument("--allow-schema-1", action="store_true",
                        help="do not require the output to be ctp schema 2")
@@ -1244,7 +1295,8 @@ def main(argv: list[str] | None = None) -> int:
         if a.cmd in ("registry", "run"):
             report["registry"] = build_registry(
                 paths, keys, a.registry, memory_limit=a.memory_limit, threads=a.threads,
-                temp_dir=a.temp_dir, drop_footers=a.drop_footers)
+                temp_dir=a.temp_dir, drop_footers=a.drop_footers,
+                forbidden_roots=tuple(a.release_root) + ((a.outdir,) if a.cmd == "run" else ()))
             report["failures"] = []
         if a.cmd in ("write", "run"):
             res = run_write(paths, a.outdir, keys=keys, registry=a.registry, jobs=a.jobs,
@@ -1254,7 +1306,8 @@ def main(argv: list[str] | None = None) -> int:
                             drop_footers=a.drop_footers,
                             expect_schema_2=not a.allow_schema_1,
                             domain_at=a.person_domain_at,
-                            content_scan=not a.no_content_scan)
+                            content_scan=not a.no_content_scan,
+                            release_roots=tuple(a.release_root))
             report.update(res)
         if a.cmd == "scan":
             con = connect(a.memory_limit, a.threads, a.temp_dir)

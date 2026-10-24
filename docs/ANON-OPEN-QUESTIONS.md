@@ -5,7 +5,7 @@ rather than an opinion.
 
 > **Status.** Questions 1 and 3 have since been ANSWERED and the answers are
 > implemented; the text below is preserved as the record of the choice, so the
-> measurements that drove it are not lost. Question 2 is still open.
+> measurements that drove it are not lost. Question 2 was answered on 2026-10-24.
 >
 > * **Question 1 — answered: Option B, the salted stable hash.** Implemented in
 >   `anonymize_parquet.py`. The salt is held privately outside the repository and
@@ -19,9 +19,9 @@ rather than an opinion.
 > * **Question 3 — answered: publish with disclosure.** The 84.7% single-address
 >   domain tail is stated in `docs/LIMITATIONS.md` with the project's reasoning,
 >   and no k-anonymity work is planned. The docstring hedge has been corrected.
-> * **Question 2 — still open.** `commit_summary` still fails the release on the
->   single `github` false positive, and `--null-commit-summary` is still the only
->   remedy the tool offers.
+> * **Question 2 — answered on 2026-10-24: pseudonym.** See the section
+>   "Status after the release rework" below. The text of question 2 is kept as
+>   the record of the choice.
 
 ## Status after the release rework (2026-10-24)
 
@@ -37,42 +37,53 @@ What the documents decided, and what the new tool does:
 * `person_domain` is written as `lower(trim(person_domain))`, the key of
   `build_links.py` (JOIN_PROTOTYPE.md, recommendation 4). Measured on the v1
   files: 2 of 70,737 distinct values change.
-* `commit_summary`: question 2 below is still open. The tool keeps the two
-  documented modes (`--commit-summary scrub`, the default, and `null`). The
-  residue gate stays strict. `--summary-residue report` is option 4 of
-  question 2. It is off until the user selects it.
+
+Decided by the user on 2026-10-24:
+
+* **2 and 2b. `commit_summary`: decided, pseudonym.** The default is now
+  `--commit-summary pseudonym`. Each address in a summary gets the pseudonym
+  of the e-mail columns (`author_<token>`, the same domain), and
+  `verify_anon.py` accepts it. The old scrub form (the word `author`, the at
+  sign, the domain) failed `verify_anon.py`; `scrub` and `null` stay as
+  modes for tests and comparison. The residue gate stays strict: a real name
+  in a summary fails the file. Option 4 (`--summary-residue report`) is not
+  selected.
+* **5. `person_domain` values with an at sign: decided, after-last-at.** The
+  default is now `--person-domain-at after-last-at`: the value keeps the part
+  after the last at sign (after `lower(trim())`). Measured on the v1 files: 199
+  distinct values in 176 files have an at sign, and 70 distinct values
+  (275,674 rows, 89 files) have the shape of an address. With the old rule
+  (`keep`) the structural gate failed these 89 files. `firm_based_on_domain`
+  is already `unknown` for such values.
+* **6. The registry file: decided, kept private.** The registry is the
+  reverse map (real identity to pseudonym). It is kept in the private bucket
+  after the release and is never published, so that a later release with the
+  same salt gives the same pseudonyms and can check the footer hash
+  `pseudonymization_registry_sha256`. The tool writes it with mode 0600 in a
+  folder with mode 0700. It refuses a registry path under `--outdir`, under a
+  `--release-root`, or under a folder with the layout of a release root (a
+  `parquet` folder with `organisations`, `MANIFEST.tsv` or `SHA256SUMS`).
+* **9. The pseudonym scheme: decided, scheme 2.** The release scheme is the
+  nested keyed sha256 that DuckDB computes (scheme 2), not the blake2b of
+  `anonymize_parquet.py`. With one salt, the two tools give different tokens.
+  Nothing was published with the old scheme.
 
 Questions that still need the user:
 
-* **2b. The scrub form fails `verify_anon.py`.** The scrub writes the local
-  part `author` (the word `author`, the at sign, the domain).
-  `verify_anon.py` accepts only `author_<token>` and refuses each scrubbed
-  summary that had an address. Thus the default mode cannot pass the release
-  check. Options: `--commit-summary pseudonym` (new: each address gets the
-  pseudonym of the e-mail columns, and `verify_anon.py` accepts it),
-  `--commit-summary null`, or a change of `verify_anon.py`.
-* **5. `person_domain` values with an at sign.** Measured on the v1 files: 199
-  distinct values in 176 files have an at sign. 70 distinct values (275,674
-  rows, 89 files) have the shape of an address. The structural gate fails
-  these 89 files. `firm_based_on_domain` is already `unknown` for such values.
-  Options: `--person-domain-at keep` (the default; the gate fails),
-  `after-last-at` (keep the part after the last at sign) or `empty`.
-* **6. The registry file.** It is the reverse map (real identity to
-  pseudonym). It stays private (mode 0600), outside the release and outside
-  git, as the salt. Decide where it is kept, and if it is deleted after the
-  release. The salt alone gives the same pseudonyms again, so a later release
-  does not need the old registry. Only the footer hash check needs it.
-* **7. The salt on the organisation machine.** The fused write computes the
+* **7. The salt on the write machine.** The fused write computes the
   pseudonyms in DuckDB, so the salt file must be on the machine that writes
   the files (release plan step 7, "the salt transfer").
-* **8. The `build_v0.py` change.** The fused write needs a change in the other
+* **8. The `build_v0.py` fusion.** The fused write needs a change in the other
   repository (`s8-companies/build_v0.py`): its COPY becomes a call of
   `pseudonymize.write_public(...)` with its own SELECT as `source_sql`. Its own
   order hash must not compare the identity columns, because they change.
-* **9. The pseudonym scheme.** Scheme 2 is a nested keyed sha256 that DuckDB
-  computes, not the blake2b of `anonymize_parquet.py`. With one salt, the two
-  tools give different tokens. Nothing is published yet, so this has no effect
-  on a reader. Confirm that scheme 2 is the release scheme.
+* **10. E-mail columns with two at signs (new finding).** The e-mail columns
+  keep the old rule: the published domain is the part between the first and
+  the second at sign. Measured on the v1 files: 678 distinct `author_email`
+  values (177 files), 624 `committer_email` values (106 files) and 677
+  `person_email` values (176 files) have two or more at signs. For these, the
+  published "domain" can be a part of the original local part. The rule of
+  question 5 (the part after the last at sign) would also fit these columns.
 
 ## First, a correction to the brief
 

@@ -403,7 +403,7 @@ def test_person_domain_is_lower_case_with_no_outer_spaces(tmp_path):
 @requires_duckdb
 def test_commit_summary_scrub_and_null(registry):
     tmp, paths, reg = registry
-    outdir, _ = _written(tmp, paths[:1], reg)
+    outdir, _ = _written(tmp, paths[:1], reg, outname="outscrub", summary_mode="scrub")
     con = _con()
     out = os.path.join(outdir, os.path.basename(paths[0]))
     n = con.execute(f"SELECT count(*) FROM read_parquet(?) WHERE contains(commit_summary, "
@@ -836,3 +836,127 @@ def test_the_source_schema_can_be_given(registry):
                          registry_sha256=sha, source_schema=P.file_schema(con, paths[0]))
     assert res["problems"] == []
     con.close()
+
+
+
+# --------------------------------------------------------------------------
+# The user's decisions of 2026-10-24
+# --------------------------------------------------------------------------
+
+def test_the_defaults_are_the_decisions_of_2026_10_24():
+    import inspect
+    assert P.DEFAULT_SUMMARY_MODE == "pseudonym"
+    assert P.DEFAULT_DOMAIN_AT == "after-last-at"
+    for fn in (P.write_public, P.run_write):
+        sig = inspect.signature(fn)
+        assert sig.parameters["summary_mode"].default == "pseudonym"
+        assert sig.parameters["domain_at"].default == "after-last-at"
+    assert P.SCHEME_VERSION == "2"
+
+
+@requires_duckdb
+def test_the_cli_defaults_are_the_decisions(files, capsys):
+    """A default run gives pseudonymized summaries that verify_anon.py accepts."""
+    import verify_anon
+    tmp, paths = files
+    salt = _salt_file(tmp)
+    rep = str(tmp / "rep.json")
+    rc = P.main(["run", "--salt-file", salt, "--registry", str(tmp / "private" / "reg.parquet"),
+                 "--outdir", str(tmp / "pub"), "--report", rep, *paths])
+    assert rc == 0
+    blob = json.loads(Path(rep).read_text())
+    assert blob["options"]["summary_mode"] == "pseudonym"
+    assert blob["options"]["person_domain_at"] == "after-last-at"
+    assert verify_anon.main([str(tmp / "pub")]) == 0
+    capsys.readouterr()
+
+
+@requires_duckdb
+def test_a_person_domain_with_two_at_signs_keeps_the_part_after_the_last(tmp_path):
+    src = _make(tmp_path, "two.parquet", replace={
+        "person_domain": f"CASE WHEN token_index = 2 THEN ' A{AT}B{AT}Corp1.Example ' "
+                         f"WHEN token_index = 3 THEN 'c{AT}' ELSE person_domain END"})
+    reg = str(tmp_path / "r.parquet")
+    P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
+    outdir, res = _written(tmp_path, [src], reg)          # the default rule
+    assert res["failures"] == []
+    con = _con()
+    got = dict(con.execute("SELECT token_index, person_domain FROM read_parquet(?) "
+                           "WHERE token_index IN (2, 3)",
+                           [os.path.join(outdir, "two.parquet")]).fetchall())
+    assert got == {2: "corp1.example", 3: ""}
+    con.close()
+
+
+@requires_duckdb
+def test_a_summary_with_an_address_and_a_known_name(tmp_path):
+    """Default mode: the address gets the pseudonym of the e-mail columns; the
+    known name stays in the text, and the strict gate fails the file."""
+    addr = "p150" + AT + "corp0.example"
+    src = _make(tmp_path, "s.parquet", replace={
+        "commit_summary": f"CASE WHEN token_index = 6 THEN 'thanks P150 Person, mail {addr}' "
+                          f"WHEN token_index = 7 THEN 'mail {addr} again' ELSE commit_summary END"})
+    reg = str(tmp_path / "r.parquet")
+    P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
+    keys = P.derive_keys(SALT)
+    pseudo = f"author_{P.token_py(keys, 'email', addr)}{AT}corp0.example"
+    con = _con(keys)
+    # The same address in the e-mail columns gets the same pseudonym.
+    assert con.execute("SELECT anon_email(?)", [addr]).fetchone()[0] == pseudo
+    sha = P.registry_meta(con, reg)["registry_sha256"]
+    dst = str(tmp_path / "s-out.parquet")
+    res = P.write_public(con, src, dst, registry=reg, registry_sha256=sha)
+    assert res["problems"] == []
+    got = dict(con.execute("SELECT token_index, commit_summary FROM read_parquet(?) "
+                           "WHERE token_index IN (6, 7)", [dst]).fetchall())
+    assert got[7] == f"mail {pseudo} again"
+    assert got[6] == f"thanks P150 Person, mail {pseudo}"
+    scan = P.leak_scan(con, dst, reg)
+    entry = scan["columns"]["commit_summary"]
+    assert entry["name_values"] == 1 and entry["local_values"] == 0
+    assert entry["name_tokens"] == [P.token_py(keys, "name", "p150 person")]
+    assert any(f.startswith("commit_summary") for f in scan["failures"])
+    con.close()
+
+
+@requires_duckdb
+def test_the_registry_is_refused_in_a_published_place(files, tmp_path):
+    tmp, paths = files
+    keys = P.derive_keys(SALT)
+    sink = io.StringIO()
+    release = tmp_path / "release"
+    (release / "parquet").mkdir(parents=True)
+    (release / "SHA256SUMS").write_text("")
+    for bad, roots in ((release / "parquet" / "r.parquet", ()),
+                       (release / "r.parquet", ()),
+                       (tmp_path / "rel2" / "r.parquet", (str(tmp_path / "rel2"),))):
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        with pytest.raises(P.RegistryError):
+            P.build_registry(paths, keys, str(bad), forbidden_roots=roots, out=sink)
+        assert not bad.exists()
+    good = tmp_path / "private" / "r.parquet"
+    good.parent.mkdir()
+    P.build_registry(paths, keys, str(good), out=sink)
+    # The write refuses a registry under its output folder.
+    out = tmp_path / "pub"
+    out.mkdir()
+    inside = out / "r.parquet"
+    inside.write_bytes(good.read_bytes())
+    with pytest.raises(P.RegistryError):
+        P.run_write(paths, str(out), keys=keys, registry=str(inside), out=sink)
+    with pytest.raises(P.RegistryError):
+        P.run_write(paths, str(tmp_path / "pub2"), keys=keys, registry=str(good),
+                    release_roots=(str(tmp_path / "private"),), out=sink)
+
+
+@requires_duckdb
+def test_the_cli_refuses_a_registry_under_the_output_folder(files, capsys):
+    tmp, paths = files
+    salt = _salt_file(tmp)
+    rc = P.main(["run", "--salt-file", salt, "--registry", str(tmp / "pub" / "reg.parquet"),
+                 "--outdir", str(tmp / "pub"), *paths])
+    assert rc == 2
+    assert "private storage" in capsys.readouterr().err
+    rc = P.main(["registry", "--salt-file", salt, "--registry", str(tmp / "rr" / "reg.parquet"),
+                 "--release-root", str(tmp / "rr"), *paths])
+    assert rc == 2
