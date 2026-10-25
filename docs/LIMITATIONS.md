@@ -415,14 +415,20 @@ release.
 | --- | --- | --- | --- | --- | --- |
 | `kitao__pyxel` | 5,000+ | `50f9bd77` | - | The repository is gone: GitHub disabled the owner's account. | no file in the release |
 | `BRL-CAD__brlcad` | 5,000+ | `27ba3c4` | - | The repository is gone: GitHub answers "Repository not found". | no file in the release |
-| `googleapis__discovery-artifact-manager` | 5,000+ | `9b6a724` | `bb221e1` | No C, C++, Java or Rust file at the run commit: the project deleted its Java code on 2026-10-07. | excluded (user decision 2026-10-11) |
-| `signalwire__freeswitch` | 5,000+ | `3dee68e` | - | blobExec stops in step 2 on a commit with no committer. Tool defect, not fixed. | excluded (user decision 2026-10-11) |
-| `Librelancer__Librelancer` | 1,000-4,999 | `dcbcf80` | `c113747` | The run commit has 4 files (`.gitmodules`, a README, `.gitignore`, `.editorconfig`). The source is in git submodules, and the pipeline does not follow submodules. History: 122 in-scope paths. 4 attempts. | out of scope (user decision 2026-10-20) |
-| `vllm-project__semantic-router` | 1,000-4,999 | `41c0903` | `c9b65d5` | 11,665 files (Go, Python, TypeScript), 0 in scope. History: 253 in-scope paths. 4 attempts. | out of scope (user decision 2026-10-20) |
-| `visgl__loaders.gl` | 1,000-4,999 | `81ad3e5` | `6773abc` | 6,822 files (TypeScript, JavaScript), 0 in scope. History: 670 in-scope paths. 4 attempts. | out of scope (user decision 2026-10-20) |
-| `greta-dev__greta` | 1,000-4,999 | `179021a` | `c656bd5` | 426 files (R), 0 in scope. History: 477 in-scope paths. 4 attempts. | out of scope (user decision 2026-10-20) |
-| `notnotype__neuro-book` | 1,000-4,999 | `6faecf8` | `532ebb8` | 8,976 files (TypeScript, Vue, Markdown), 0 in scope. History: 4 in-scope paths. 11 attempts. | out of scope (user decision 2026-10-20) |
-| `pur1fying__blue_archive_auto_script` | 1,000-4,999 | `8a7ff4c` | `0d57f47` | 3,788 files (PNG, Python), 0 in scope. History: 46 in-scope paths. 11 attempts. | out of scope (user decision 2026-10-20) |
+| `googleapis__discovery-artifact-manager` | 5,000+ | `9b6a724` | `bb221e1` | Not a failure. The project deleted its Java code on 2026-10-07, after the frame measurement: the frame commit has 559 C, C++, Java or Rust files, the run commit has 0. | code removed after the frame measurement (user decision 2026-10-11) |
+| `signalwire__freeswitch` | 5,000+ | `3dee68e` | - | The only pipeline failure of the 10 rows. blobExec stops in step 2 on a commit with no committer. Tool defect, not fixed. | excluded (user decision 2026-10-11) |
+| `Librelancer__Librelancer` | 1,000-4,999 | `dcbcf80` | `c113747` | Not a failure. After the frame measurement, the project moved its C and C++ code to git submodules: the frame commit has 44 such files, the run commit has 0. The run commit has 4 files (`.gitmodules`, a README, `.gitignore`, `.editorconfig`). The source is in git submodules, and the pipeline does not follow submodules. History: 122 in-scope paths. 4 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
+| `vllm-project__semantic-router` | 1,000-4,999 | `41c0903` | `c9b65d5` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 244 such files, the run commit has 0. 11,665 files (Go, Python, TypeScript), 0 in scope. History: 253 in-scope paths. 4 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
+| `visgl__loaders.gl` | 1,000-4,999 | `81ad3e5` | `6773abc` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 335 such files, the run commit has 0. 6,822 files (TypeScript, JavaScript), 0 in scope. History: 670 in-scope paths. 4 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
+| `greta-dev__greta` | 1,000-4,999 | `179021a` | `c656bd5` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 449 such files, the run commit has 0. 426 files (R), 0 in scope. History: 477 in-scope paths. 4 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
+| `notnotype__neuro-book` | 1,000-4,999 | `6faecf8` | `532ebb8` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 2 such files, the run commit has 0. 8,976 files (TypeScript, Vue, Markdown), 0 in scope. History: 4 in-scope paths. 11 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
+| `pur1fying__blue_archive_auto_script` | 1,000-4,999 | `8a7ff4c` | `0d57f47` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 46 such files, the run commit has 0. 3,788 files (PNG, Python), 0 in scope. History: 46 in-scope paths. 11 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
+
+Only 1 of the 10 rows is a pipeline failure (`signalwire__freeswitch`). 2 repositories are gone. The other 7
+rows are not failures: each project had C, C++, Java or Rust files at its frame commit (the commit that the
+selection measured, 2026-09-23 to 2026-10-05), and it deleted them, or moved them to git submodules, before its
+run commit (the newest commit on the run date, 2026-10-10 to 2026-10-20). The file counts come from the GitHub
+trees of both commits (2026-10-25). The code-size rule was right for the commit that it measured.
 
 The 6 rows of the 1,000-4,999 commit layer have the case of
 `googleapis__discovery-artifact-manager`. The run uses the newest head at the first attempt
