@@ -1037,7 +1037,7 @@ anonymization by design and must be disclosed by any analysis: the e-mail
 at a rare or vanity domain is re-identifiable; and `owner`/`repo_name`/
 `clone_url` carry the GitHub namespace, which for a personal repository is a
 person's handle. `source_text` and `token_value` are source code and are not
-scrubbed, so copyright headers and `@author` tags pass through.
+scrubbed, so copyright headers and Javadoc author tags pass through.
 
 **84.7% of the corpus's `person_domain` values carry exactly one contributor, and
 the project publishes anyway.** Combined with the preserved domain above, a
