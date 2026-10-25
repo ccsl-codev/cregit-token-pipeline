@@ -366,6 +366,280 @@ liability of the dataset, not of one run. Source: `s2-pool/pool.csv` (Linguist b
   its pool row. No column records the untokenized share.
 * **Workaround.** None in v1. A Python or TypeScript tokenizer is future work.
 
+**Both commit layers: the release is one dataset in two commit layers.** The frame has
+10,763 projects: 3,548 with 5,000 or more commits and 7,215 with 1,000 to 4,999 commits.
+The dataset has 10,753 project files: 3,544 in the 5,000+ layer and 7,209 in the
+1,000-4,999 commit layer. The other 10 frame rows have no file (see "10 frame rows have no
+project file" below). The files hold 32,626,028,860 token rows: 23,692,479,892 in the
+5,000+ layer and 8,933,548,968 in the 1,000-4,999 commit layer. Each size names its stage:
+
+* **Run output:** 241.3 GB. That is 186.2 GB for the 5,000+ layer (before ZSTD 19) and
+  55.09 GB for the 1,000-4,999 commit layer (the input of its merge).
+* **Release files (ZSTD 19):** 162.6 GB. That is 125.83 GB for the 5,000+ layer with the
+  organisation columns and 36.81 GB for the 1,000-4,999 commit layer before its
+  organisation columns.
+
+The "Dataset v1" entries above are about the 5,000+ layer. Sources: `STATUS.md` section 0
+of the dataset selection records (the token counts are the input check of the links run of
+2026-10-24); `RELEASE_PLAN.md`, decision "One dataset" (2026-10-23).
+
+**The 1,000-4,999 commit layer ran with the code of the 5,000+ layer, on two kinds of
+machine.** The frame of this layer has 7,215 projects: the rows of `frame.v4` with 1,000 to
+4,999 commits (`x1k/frame.x1k.csv` of the dataset selection; user decision 2026-10-19: the
+rows join the released dataset). No row of this layer is in a manifest of the 5,000+ layer.
+The run used the code and flags of the 5,000+ layer: ctp `ca113e3`, cregit `57551d7`,
+libexpat gate Parquet `14eb5d72`, the flags of the fed parts with `--latest`.
+
+* Two machines ran 7,204 rows (2026-10-19 17:24 UTC to 2026-10-20 17:05 UTC).
+* A third machine with EBS volumes (the long-row machine) ran the 11 longest rows. A spot
+  reclaim stopped it on 2026-10-20 at 00:48 UTC. It started again at 12:28 UTC (later on an
+  on-demand machine). It resumed each row at its last step and kept the finished `.blame`
+  files. Its last row ended on 2026-10-23 at 16:53 UTC.
+* The 18 rows of the path defect ran again with cregit `14b8db4` (see "blame dropped
+  in-scope files with a special path name" below).
+* The merge (metadata rewrite, ZSTD 19) holds 7,209 of 7,209 projects, 0 failed. Its
+  second pass took the 4 slowest rows and ended on 2026-10-23 at 19:31 UTC.
+* The stratum labels of this layer come from the same rules and rosters as those of the
+  5,000+ layer (2026-10-20, `x1k/project_meta.x1k.final.json`). They have no review by hand.
+
+Sources: `~/s3-work/dataset-x1k/README.md`; `STATUS.md` sections 0 and 1.
+
+**Both commit layers: 10 frame rows have no project file.** The frame has 10,763 rows and
+the dataset has 10,753 files. The rows below stay in the frame with their reason. Count them
+in the frame, not in the token tables. The entries "`kitao__pyxel` is pending" and "three
+more frame rows have no Parquet" above give the details of the 4 rows of the 5,000+ layer.
+Their status there is of 2026-10-13 and 2026-10-14. This table gives the status of the
+release.
+
+| project | layer | frame commit | run commit | reason | status |
+| --- | --- | --- | --- | --- | --- |
+| `kitao__pyxel` | 5,000+ | `50f9bd77` | - | The repository is gone: GitHub disabled the owner's account. | no file in the release |
+| `BRL-CAD__brlcad` | 5,000+ | `27ba3c4` | - | The repository is gone: GitHub answers "Repository not found". | no file in the release |
+| `googleapis__discovery-artifact-manager` | 5,000+ | `9b6a724` | `bb221e1` | No C, C++, Java or Rust file at the run commit: the project deleted its Java code on 2026-10-07. | excluded (user decision 2026-10-11) |
+| `signalwire__freeswitch` | 5,000+ | `3dee68e` | - | blobExec stops in step 2 on a commit with no committer. Tool defect, not fixed. | excluded (user decision 2026-10-11) |
+| `Librelancer__Librelancer` | 1,000-4,999 | `dcbcf80` | `c113747` | The run commit has 4 files (`.gitmodules`, a README, `.gitignore`, `.editorconfig`). The source is in git submodules, and the pipeline does not follow submodules. History: 122 in-scope paths. 4 attempts. | out of scope (user decision 2026-10-20) |
+| `vllm-project__semantic-router` | 1,000-4,999 | `41c0903` | `c9b65d5` | 11,665 files (Go, Python, TypeScript), 0 in scope. History: 253 in-scope paths. 4 attempts. | out of scope (user decision 2026-10-20) |
+| `visgl__loaders.gl` | 1,000-4,999 | `81ad3e5` | `6773abc` | 6,822 files (TypeScript, JavaScript), 0 in scope. History: 670 in-scope paths. 4 attempts. | out of scope (user decision 2026-10-20) |
+| `greta-dev__greta` | 1,000-4,999 | `179021a` | `c656bd5` | 426 files (R), 0 in scope. History: 477 in-scope paths. 4 attempts. | out of scope (user decision 2026-10-20) |
+| `notnotype__neuro-book` | 1,000-4,999 | `6faecf8` | `532ebb8` | 8,976 files (TypeScript, Vue, Markdown), 0 in scope. History: 4 in-scope paths. 11 attempts. | out of scope (user decision 2026-10-20) |
+| `pur1fying__blue_archive_auto_script` | 1,000-4,999 | `8a7ff4c` | `0d57f47` | 3,788 files (PNG, Python), 0 in scope. History: 46 in-scope paths. 11 attempts. | out of scope (user decision 2026-10-20) |
+
+The 6 rows of the 1,000-4,999 commit layer have the case of
+`googleapis__discovery-artifact-manager`. The run uses the newest head at the first attempt
+(`--latest`). At that commit the repository has no C, C++, Java or Rust file, but its
+history has such files. Blame finds 0 files, and step 10 stops with "no .blame files found"
+and "no tokens processed" at each attempt. A rerun gives the same result. A run at the
+frame commit can give tokens, but it breaks the `--latest` rule of the dataset.
+
+Sources: `V1_NOT_IN_DATASET` in `report/build_status_html.py` of the dataset selection
+records (the 4 rows of the 5,000+ layer); `x1k/manifest.x1k.tsv` (frame commits) and
+`~/s3-work/dataset-x1k/README.md` (run commits, file counts, attempts) for the other 6;
+`STATUS.md` section 2 (decision of 2026-10-20).
+
+**Both commit layers: blame dropped in-scope files with a special path name. cregit
+`14b8db4` fixes this, and 35 projects ran again.** Step 7 (blame) of cregit `57551d7` and
+of all earlier commits of the fork has these defects:
+
+1. `blameRepoFiles.pl` read `git ls-files` without `-z`. git quotes a path that has a byte
+   above 0x7F, a `"`, a `\` or a control byte (`core.quotePath` is not set on the run
+   machines). The quoted name ends in `"`, so the mask (`\.(c|...)$`) does not match it.
+   The file has no `.blame` file and no row in the Parquet. No log line names it.
+2. `blameRepoFiles.pl` gave the path to `formatBlame.pl`, and `formatBlame.pl` gave it to
+   `git blame`, with no `--` before it. `GetOptions` reads a path that starts with `-` as
+   an option ("Error in command line arguments"). Step 7 then exits 1 and the project
+   fails. A later path segment that starts with `-` (`a/-b.c`) is not affected.
+3. Only in cregit `95cdc88` and `1f17663` (and the commits before them): `formatBlame.pl`
+   ran git through a shell string. A `'` in the path breaks the command. The script then
+   wrote an empty `.blame` file and exited 0, so the file has no rows and no error.
+   cregit `57551d7`, `9ccead6` and `23e4ccb` run git with an argument list and do not have
+   this defect.
+
+* **Measured (scan of 2026-10-20, the tree of each project, the run mask):** 5,000+ layer:
+  1,709 files (2,523,350 bytes) in 19 projects. Defect 1: 1,661 files in 16 projects.
+  Defect 3: 48 files in 4 projects (the 2 files of `github__codeql` are empty). Defect 2: 0
+  (a project with such a path failed and is not in this layer). 1,000-4,999 commit layer:
+  3,097 files (16,694,820 bytes) in 18 projects. Defect 1: 3,042 files in 17 projects.
+  Defect 2: 55 files in 1 project (`saleha-muzammil__Academic-Time-Machine`, which failed).
+  `huaweicloud__ModelArts-Lab` lost all its 8 in-scope files and failed.
+* **Check:** in 61 local Parquets of the 5,000+ layer (the affected ones and 40 at random),
+  the in-scope files with no row are exactly the files of the scan.
+* **Fix:** cregit `14b8db4` (`57551d7` with `git ls-files -z` and `--` before the paths in
+  both scripts). The libexpat gate Parquet does not change (`14eb5d72`, 2,196,248 bytes).
+* **Rerun:** 35 projects (17 of the 5,000+ layer, 18 of the 1,000-4,999 commit layer), with
+  the full pipeline, ctp `ca113e3`, cregit `14b8db4`, the flags of the fed parts, at the
+  commit of the first run. The rerun ended on 2026-10-20 at 23:25 UTC: 35 of 35 OK.
+  Not run again: `github__codeql` (its 2 lost files are empty, so no tokens are lost),
+  `JetBrains__intellij-plugins` and `KDE__labplot` (their runs used `57551d7`, so their files
+  with a `'` have rows), and `alibaba__AliSQL` (next item).
+* **`alibaba__AliSQL` (5,000+ layer) keeps the defect (user decision 2026-10-20).** Its
+  Parquet (cregit `57551d7`, commit `9e121f27`) has no rows for 1 in-scope file (defect 1):
+  458 bytes, 10 lines, a Boost.Wave test file in a folder with a non-ASCII name. That is 1 of
+  50,284 blamed files of the project. It did not run again, because its first run took 66 h
+  (63 h of blame).
+* **Not measured:**
+  * The scan of the 1,000-4,999 commit layer read the tree at the manifest commit, not at
+    the run commit (the read of the run commits was denied). The runs started 2.7 to 3.6
+    days after the manifest. A file with a special name that came in between is not in the
+    scan, and its project did not run again.
+  * `git.savannah.gnu.org__denemo` (5,000+ layer): the scan could not list its tree.
+  * Old file names in the history: a `;` in the old name of a renamed file breaks the
+    record split in step 10. The scan found 0 paths with `;` in the trees, but it did not
+    read the old names.
+  * The rerun files have no recorded check (the rows of the other files equal in all
+    columns, the new rows exactly the lost files).
+* **Detect:** compare the in-scope paths of the run commit (`git ls-tree -r -z`) with the
+  `file_path` values of the Parquet.
+
+Sources: `~/Projects/cregit-workspace/path-defect/affected.tsv` and `README-scan.txt`
+(scan); `~/s3-work/dataset-pathfix/README.md` (rows, decision "35 rows, no AliSQL");
+`STATUS.md` section 2 (rerun result).
+
+**The 1,000-4,999 commit layer: some files have blame without copy detection.** The
+mechanism is the time limit of cregit `57551d7` (see the entry "Dataset v1: some files have
+blame without copy detection"). cregit `14b8db4` has the same limit. After 3600 s of
+`-C100`, the script stops git, runs plain blame and logs a `PLAIN-BLAME` line. The effect on
+these files is not measured.
+
+Count of 2026-10-24, from the pipeline logs of all 7,209 projects (0 projects with no log).
+A file that falls back in two attempts counts once.
+
+| rows | logs read | projects | with `PLAIN-BLAME` | files |
+| --- | --- | ---: | ---: | ---: |
+| long-row machine (11 rows less the 2 rows with no tokens) | all logs of each project: a resume at step 7 keeps the `.blame` files of the attempts before it | 9 | 6 | 229 |
+| the two other machines | the newest log | 7,182 | 92 | 138 |
+| path-fix rerun | the newest log of the rerun | 18 | 0 | 0 |
+| extra machines (`awslabs__aws-sdk-rust` 5 parts, `aws__aws-sdk-java` 2 parts) | their own `plainblame.log` | - | 0 | 0 |
+| **total** | | **7,209** | **98** | **367** |
+
+* The limit is wall time. From 2026-10-20 the slow rows of the long-row machine got more
+  blame jobs (more parallel git processes), which can push more files over the limit. A
+  file can fall back on one machine and not on another.
+* The count of the 5,000+ layer (201 files, see the entry above) is of 2026-10-14. It was
+  not made again for the 17 projects of that layer that ran again with the path fix.
+
+Sources: `plainblame.x1k.json` of the links run
+(`~/Projects/cregit-workspace/companies/x1k-links/dataset-x1k-links-1/`); `RELEASE_PLAN.md`,
+decision "Links of both layers" (the count rules).
+
+**The 1,000-4,999 commit layer: a retry limit stopped `awslabs__aws-sdk-rust` once.** On
+2026-10-23 at 14:19 UTC, ctp stopped the row with "not retried".
+
+* **Cause:** two timers of the long-row machine restart a slow row in step 7. The
+  rebalance timer gives it more blame jobs. The pull timers drop the files that extra
+  machines blamed (next entry). Each restart stops the row with SIGTERM, and ctp counts
+  each such stop as a failed "interrupted" attempt. After 11 attempts the count was more
+  than `--retries 10`.
+* **Fix (14:30 UTC):** the retries went from 10 to 30, and the row started again at step 7
+  with the finished `.blame` files kept. The row ended on 2026-10-23 at 16:53:50 UTC with
+  293,153,594 token rows.
+* **Effect on the data:** none known. A test resume at step 7 gave Parquets that are
+  byte-equal to the gate Parquet `14eb5d72` (0 differing rows). The restarts can change
+  which files fall back to plain blame (the limit is wall time).
+* **Lesson:** raise `--retries` before you use a restart scheme.
+
+Sources: `STATUS.md` section 0; `~/s3-work/dataset-x1k/README.md` (resume test).
+
+**The 1,000-4,999 commit layer: extra machines blamed part of the files of
+`awslabs__aws-sdk-rust` and `aws__aws-sdk-java`.** These two rows are generated SDK code.
+On the long-row machine alone, their step 7 needed days to weeks. The files that were left
+went into parts. Each extra machine ran the cregit `57551d7` blame script with the same git
+path as the long-row machine (the setup refuses another git). Before its part, each extra
+machine blamed 30 files that the long-row machine already had, and compared them byte for
+byte. The long-row machine pulled the finished `.blame` files and restarted the row, so its
+file list skipped them.
+
+* `awslabs__aws-sdk-rust`: 5 parts on spot machines, with 7 replacements (2026-10-21
+  20:37 UTC to 2026-10-22 00:00 UTC). Spot reclaims stopped all of them. The byte check
+  gave 30 of 30 equal on every part that reached it. The row uses the pulled files, but
+  their exact count is not measured.
+* `aws__aws-sdk-java`: 2 on-demand machines (c7a.48xlarge), done 2026-10-23 12:25 UTC. The
+  byte check gave 30 of 30 equal on both. 65,087 files were pulled (0 bad, 0 refused). The
+  row restarted once (12:40 UTC) with 0 files left in step 7.
+* `PLAIN-BLAME` on the extra machines: 0 files for both rows.
+* **Detect:** nothing in the Parquet tells which machine blamed a file.
+
+Sources: `~/s3-work/dataset-x1k/rust-split/README.md` and `java-split/README.md`;
+`STATUS.md` section 2 (rows "Extra spot machines for aws-sdk-rust" and "On-demand extra
+machines for aws-sdk-java"); `plainblame.x1k.json` (extra machines).
+
+**Both commit layers: the code-size rule of the selection counts bytes by extension. A
+line counter gives a slightly different frame.** The selection keeps a project when its own
+C, C++, Java and Rust bytes (not vendored) are at least 5% of its code bytes. Code bytes are
+the bytes of the extensions that every claiming Linguist language marks as "programming",
+plus the language mask. The release keeps this byte rule (user decision 2026-10-23).
+tokei 15.0.0 is a check. A stratified sample of 100 projects (84 rows of the two layers in 4
+share bands, 16 rows that the Linguist gate removed) gives this estimate:
+
+| layer | rows at the rule | tokei drops (95% interval) | tokei adds (95% interval) | net |
+| --- | ---: | ---: | ---: | ---: |
+| 5,000+ | 3,497 | 99 (86-115) | 34 (21-53) | -65 (-1.9%) |
+| 1,000-4,999 | 7,215 | 201 (172-237) | 81 (49-125) | -121 (-1.7%) |
+
+The intervals show only the sampling error of the ratio, not the error of the model. The
+3,497 rows of the 5,000+ layer do not include its 51 GitLab rows. The causes (from the
+whole frame, exact):
+
+* `.ts` and `.tsx` (and `.mm`, `.pm`, `.inc`) are not code bytes, because Linguist also
+  gives these extensions to a data language. If `.ts` and `.tsx` count as code, 67 rows of
+  the 5,000+ layer and 135 rows of the other layer fail the rule. This is most of the
+  tokei drop.
+* Vendored bytes are in the code total but not in the share. If they also leave the
+  total, 25 rows of the 5,000+ layer and 48 rows of the other layer pass.
+* `measure_clones` reads `git ls-tree` without `-z`, so a path with non-ASCII characters
+  gets a wrong extension. This affects only the rows measured from a clone (other hosts,
+  truncated trees). In the sample it changed the bytes of 2 rows and no result.
+* sloccount 2.26 is not used: it does not know Rust.
+
+Sources: `~/Projects/cregit-workspace/agent-runs-20261023/loc-tools/SUMMARY.md`;
+`RELEASE_PLAN.md`, decision "Code-size rule" (2026-10-23).
+
+**Both commit layers: identities get pseudonyms, but `commit_summary` is published as git
+has it.**
+
+* `commit_summary` is the subject line exactly as git has it. A name or an address that a
+  person wrote into a message stays (user decision 2026-10-25; it replaces the choice of
+  2026-10-24).
+* The trailer columns (`footer_*`) get pseudonyms. The release uses `pseudonymize.py` of
+  ctp-anon `f3fdd7a` (scheme 2, nested sha256), not `anonymize_parquet.py` of the entries
+  below. The registry (real identity to pseudonym) stays private. It is never published.
+* An e-mail value is published as a pseudonym, an at sign and a domain. Some values have
+  two or more at signs. In the 5,000+ layer: 680 distinct values in 178 files, on
+  15,282,753 token rows (0.0645% of the tokens of the layer). 96% of these token rows hold
+  git-svn ids: an svn user name that is an address, an at sign, then the repository UUID.
+* For these values, the domain is the first part after an at sign that is a valid domain
+  (strict characters, a dot, an ICANN public suffix), else empty. `person_domain` uses the
+  same rule, and the organisation columns use the same domain. Thus the release publishes
+  no local part and no UUID. Of the 677 distinct `person_email` values, 668 give a valid
+  domain and 9 give an empty domain (user decision 2026-10-25; it replaces the rule "after
+  the last at sign" of 2026-10-24).
+* **Not measured:** these values in the 1,000-4,999 commit layer. The analysis read the
+  3,544 files of the 5,000+ layer only.
+
+Sources: `RELEASE_PLAN.md`, decisions "Pseudonymization", "E-mail values with two or more at
+signs" and "Commit messages"; `~/Projects/cregit-workspace/agent-runs-20261023/two-at/PROGRESS.md`
+(counts only).
+
+**The 1,000-4,999 commit layer: the organisation columns of the new domains rest on a
+review of 99% of their tokens.** The links of both layers exist since 2026-10-24 (label
+v4.6). In this layer, 22,276 new domains (not in the 5,000+ layer) had no row in the
+database and showed `independent`. They hold 9.17% of the tokens of the layer and 2.51% of
+all tokens.
+
+* Review round 10 (2026-10-25, database v4.7) judged the new domains with the most tokens,
+  up to 99% of their tokens (3,175 domains), with fetched web evidence and DNS records. It
+  judged the new namespaces at the same level (3,528 of 4,706), and a seeded 10% sample
+  (93 of 921) of the new domains that already link by a rule.
+* The other new domains (0.025% of all tokens) keep `independent` by the default rule: a
+  real domain with no row maps to `independent`.
+* **Open:** the user check of the undecided items and of the seeded sample; the links and
+  the organisation columns of this layer from database v4.7.
+* **Open: the error model of this layer.** The audit of its strata and its error numbers
+  follow. Until then, no error number covers this layer.
+
+Sources: `RELEASE_PLAN.md`, decision "Review of the new domains" (2026-10-25);
+`~/Projects/cregit-workspace/companies/review/ai/r10/PROGRESS.md`; `STATUS.md` section 0
+(links of both layers).
+
 **A vendored dependency attributes its whole library to the engineer who imported
 it.** cregit credits the commit that introduced a line, so a wholesale vendor drop
 credits the importing author with every token of third-party code. This is a
