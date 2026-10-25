@@ -99,16 +99,51 @@ Questions that still need the user:
   order hash must not compare the identity columns, because they change.
   The call is in the module docstring of `pseudonymize.py`
   (`write_public()`).
-* **11. The name probes of the structural gate (new finding, 2026-10-25).**
-  With the new defaults the structural gate fails all 3,544 v1 files, only
+* **11. The name probes of the structural gate: decided by the main session
+  on 2026-10-26 (a false-positive fix, open to the user's review).** With the
+  defaults of 2026-10-25 the structural gate failed all 3,544 v1 files, only
   because of name probes: 366 distinct values, nearly all a single-word
-  registry name that is also a word of the column vocabulary. Failing files
-  per column: `token_type` 3,544, `manifest_category` 3,544, `source` 324,
+  registry name that is also a word of a closed vocabulary. Failing files per
+  column: `token_type` 3,544, `manifest_category` 3,544, `source` 324,
   `person_domain` 209, `language` 100, `license` 11, `stars` 1. Without the
-  name probes no file fails (no address shape and no local part). The
-  identity columns pass (a sample of 60 files: 0 failures). The user must
-  choose a rule, for example: no name probes in these vocabulary columns, or
-  no single-word name probes in the structural columns.
+  name probes no file failed (no address shape and no local part). The
+  identity columns passed (a sample of 60 files: 0 failures).
+
+  The rule (`NO_NAME_PROBE_COLUMNS` in `pseudonymize.py`): no name probes in
+  (a) the closed-vocabulary columns, (b) `person_domain` (domains are
+  published by design), and (c) the numeric, date and hash columns. (d) The
+  address-shape and local-part probes stay on every column. The columns:
+
+  * closed vocabularies (`VOCABULARY_COLUMNS`): `provenance_status`,
+    `source`, `stratum`, `contested`, `roster_lang`, `language`,
+    `size_class`, `license`, `owner_type`, `archived`, `fork`,
+    `history_relation`, `manifest_category`, `file_mask`, `token_type`, and in
+    schema 2 `firm_based_on_namespace`, `firm_based_on_domain`,
+    `project_enterprise_basis` (ids and labels of the organisations step);
+  * numbers, dates and hashes (`NUMERIC_COLUMNS`): `commits`, `size_kb`,
+    `stars`, `label_date`, `pushed_at`, `history_created`, `author_date`,
+    `committer_date`, `cregit_commit_sha`, `original_commit_sha`.
+
+  How they were found: the source column of `docs/DATASET-SCHEMA.md` (the
+  sidecar, the manifest, the tokenizer, blame and the organisation step write
+  these values from a fixed list or in a fixed format; for example `stratum`
+  is `community` | `company-owned` | `foundation`, `license` is an SPDX id,
+  `size_class` is `S` | `M` | `L`), and a count of the distinct values of each
+  structural column over the 3,544 v1 files (read only, counts only):
+  `provenance_status` 25, `source` 192, `stratum` 3, `language` 108,
+  `size_class` 3, `license` 87, `owner_type` 2, `archived` 1, `fork` 1,
+  `manifest_category` 1, `file_mask` 1, `token_type` 309, and 0 (empty in v1)
+  for `contested`, `roster_lang`, `size_kb`, `history_relation` and
+  `history_created`. All values of `commits` (3,186) and `stars` (2,550) are
+  numbers; `label_date`, `pushed_at`, `author_date` and `committer_date` are
+  dates; the two commit columns are 40-character hex. The free-text structural
+  columns keep the name probes: `repo_tag` (a repository name; empty in v1)
+  and `history_cluster`, `history_shared_with`, `history_includes`,
+  `history_first` (project names; empty in v1).
+
+  Measured again on the 3,544 v1 files with this rule (read only, counts
+  only): 0 distinct structural values fail, so 0 files fail the structural
+  gate (no name, no local part, no address shape).
 
 ## First, a correction to the brief
 

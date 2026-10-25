@@ -104,6 +104,10 @@ WHAT CHANGED, AND WHY
      * The pseudonym forms ('Author <token>', 'author <token>',
        'author_<token>') are masked in the leak scan. The registry holds the
        name 'author', so without the mask every pseudonym was a leak.
+     * No name probes in the closed-vocabulary columns, the numeric, date and
+       hash columns, and person_domain (NO_NAME_PROBE_COLUMNS; the main
+       session, 2026-10-26, a false-positive fix open to the user's review).
+       The address shape and local part probes stay on every column.
 
 8. Speed. One file per job and one DuckDB thread per job (--jobs N
    --threads 1) is the fast form: an ordered ZSTD 19 write with more threads
@@ -138,8 +142,16 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
-import anonymize_parquet as A
-import validate_schema as vs
+# The sibling modules are in the folder of this file. Under `python -I` (no
+# script folder, no PYTHONPATH) that folder is not on the import path, so it
+# is put there. A caller that loads this module under -I (build_v0.py) puts
+# the folder on sys.path first, or loads the file with importlib.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import anonymize_parquet as A  # noqa: E402
+import validate_schema as vs  # noqa: E402
 
 AT = chr(64)
 SCHEME_VERSION = "2"
@@ -204,11 +216,18 @@ RE_LOCAL_BEFORE_AT = f"([{LOCAL_CHARS}]+){AT}"
 RE_SUMMARY_ADDRESS = rf"[A-Za-z0-9._%+\-]+{AT}([A-Za-z0-9.\-]+\.[A-Za-z]{{2,}})"
 
 
-class RegistryError(Exception):
+class PseudonymizeError(Exception):
+    """The public error class of this module. safe_error() shows the text of
+    this class and its subclasses, so a caller's own check (build_v0.py) can
+    raise WriteError (or this class) with a text of counts and column names.
+    The text must not hold a data value."""
+
+
+class RegistryError(PseudonymizeError):
     """The registry is missing, from another salt, or has a collision."""
 
 
-class WriteError(Exception):
+class WriteError(PseudonymizeError):
     """A check of the fused write failed. The output is not kept."""
 
 
@@ -241,7 +260,7 @@ def redact(text: str, keys: tuple[str, str] | None) -> str:
     return text
 
 
-OWN_ERRORS = (WriteError, RegistryError, A.SaltError, A.UnknownColumnError,
+OWN_ERRORS = (PseudonymizeError, A.SaltError, A.UnknownColumnError,
               A.MissingColumnError, ValueError)
 
 
@@ -992,6 +1011,9 @@ def write_public(con, src: str, dst: str, *, registry: str, registry_sha256: str
         problems.append(f"row count changed: {a[0]} -> {b[0]}")
     elif a[1] != b[1]:
         problems.append(f"the {len(same)} unchanged columns differ in value or order")
+    bad = identity_shape_violations(con, f"SELECT * FROM read_parquet({sql_str(dst)})")
+    if bad:
+        problems.append(f"pseudonym shape violated: {bad}")
     return {"rows": b[0], "columns": len(got), "identity_values": agree["values"],
             "seconds_write": round(t_write, 3), "problems": problems, "plan": plan}
 
@@ -1134,6 +1156,32 @@ def odd_local_hits(value: str, odd: dict[str, str]) -> set[str]:
 # user, 2026-10-25).
 INFORMATION_COLUMNS = frozenset(A.CONTENT_COLUMNS | {"commit_summary"})
 
+# The name probes of the structural gate (decided by the main session on
+# 2026-10-26 as a false-positive fix, open to the user's review). On dataset
+# v1 the gate failed every file only because a single-word registry name was
+# equal to a word of a closed vocabulary (366 distinct values). The address
+# shape and local part probes stay on every column; only the name probes are
+# left out of these columns.
+#
+# Closed vocabularies: the values come from a fixed list of the pipeline
+# (docs/DATASET-SCHEMA.md gives the list or its source; the measured number of
+# distinct values over the 3,544 v1 files is in docs/ANON-OPEN-QUESTIONS.md,
+# question 11).
+VOCABULARY_COLUMNS = frozenset({
+    "provenance_status", "source", "stratum", "contested", "roster_lang", "language",
+    "size_class", "license", "owner_type", "archived", "fork", "history_relation",
+    "manifest_category", "file_mask", "token_type",
+    # schema 2: the organisation ids and the basis come from the organisations table
+    "firm_based_on_namespace", "firm_based_on_domain", "project_enterprise_basis",
+})
+# Numbers, dates and commit hashes, stored as strings.
+NUMERIC_COLUMNS = frozenset({
+    "commits", "size_kb", "stars", "label_date", "pushed_at", "history_created",
+    "author_date", "committer_date", "cregit_commit_sha", "original_commit_sha",
+})
+# Domains are published by design.
+NO_NAME_PROBE_COLUMNS = VOCABULARY_COLUMNS | NUMERIC_COLUMNS | {"person_domain"}
+
 
 def leak_scan(con, path: str | None, registry: str, *, plan: A.Plan | None = None,
               content: bool = True, relation: str | None = None) -> dict:
@@ -1184,16 +1232,18 @@ def leak_scan(con, path: str | None, registry: str, *, plan: A.Plan | None = Non
     # The anchor join, then (in SQL) every word of the name must be a word of
     # the value; Python applies the exact rule to the remaining pairs, which
     # come in batches so that the memory stays small.
+    # No name probes in NO_NAME_PROBE_COLUMNS.
     words = f"list_filter(string_split_regex(v, {sql_str(RE_NON_WORD)}), e -> e <> '')"
+    skip = ", ".join(sql_str(c) for c in sorted(NO_NAME_PROBE_COLUMNS))
     cur = con.execute(
         f"SELECT x.col, x.v, r.identity, r.token FROM (SELECT col, v, ws, unnest(list_distinct(ws)) "
-        f"AS w FROM (SELECT col, v, {words} AS ws FROM anon_vals)) x "
+        f"AS w FROM (SELECT col, v, {words} AS ws FROM anon_vals WHERE col NOT IN ({skip}))) x "
         f"JOIN (SELECT identity, token, anchor, list_filter(string_split_regex(identity, "
         f"{sql_str(RE_NON_WORD)}), e -> e <> '') AS nws FROM {reg} WHERE space = '{SPACE_NAME}' "
         "AND anchor IS NOT NULL AND anchor <> '') r ON r.anchor = x.w AND list_has_all(x.ws, r.nws) "
         "UNION ALL SELECT a.col, a.v, r.identity, r.token FROM anon_vals a JOIN "
         f"(SELECT identity, token FROM {reg} WHERE space = '{SPACE_NAME}' AND anchor = '') r "
-        "ON contains(a.v, r.identity)")
+        f"ON contains(a.v, r.identity) AND a.col NOT IN ({skip})")
     n_candidates = 0
     while True:
         rows = cur.fetchmany(100_000)
@@ -1240,6 +1290,51 @@ def leak_scan(con, path: str | None, registry: str, *, plan: A.Plan | None = Non
             failures.append(f"{col}: {entry['name_values']} value(s) with a real name")
     return {"columns": columns, "failures": failures, "reported": reported,
             "name_candidates": n_candidates}
+
+
+# The pseudonym shapes of the identity columns (the forms of the macros).
+_TOK = f"[0-9a-f]{{{A.PSEUDO_HEX_LEN}}}"
+_DOM = f"[^<>\\s{AT}]+"
+_ADDR = f"author_{_TOK}(?:{AT}{_DOM})?"
+SHAPES = {
+    "email": f"^{_ADDR}$",
+    "name": f"^Author {_TOK}$",
+    "personid": f"^author {_TOK}$",
+    "footer_name": f"^Author {_TOK}$",
+    "footer_personid": f"^author {_TOK}$",
+    "footer_text": f"^(?:Author {_TOK} <{_ADDR}>|{_ADDR}|Author {_TOK})$",
+}
+
+
+def identity_shape_violations(con, relation: str, plan: A.Plan | None = None) -> dict[str, int]:
+    """Count, per identity column of the SQL `relation`, the distinct values
+    that do not have a pseudonym shape (SHAPES). NULL and '' are allowed.
+    commit_summary is not checked (it is kept as git has it). Returns
+    {column: count} for the columns with a violation; counts only.
+
+    Example (build_v0.py, after its write):
+        bad = P.identity_shape_violations(con, f"SELECT * FROM read_parquet('{tmp}')")
+        if bad:
+            raise P.WriteError(f"pseudonym shape violated in {sorted(bad)}")
+    """
+    schema = describe(con, relation)
+    if plan is None:
+        plan = A.classify([c for c, _ in schema])
+    kinds = {c: k for c, k in plan.scalar if k in SHAPES}
+    kinds.update({c: "footer_text" for c in plan.footer_text})
+    kinds.update({c: f"footer_{k}" for c, k in plan.footer_derived})
+    types = dict(schema)
+    out = {}
+    for col, kind in kinds.items():
+        if col not in types:
+            continue
+        n = con.execute(
+            f"SELECT count(*) FROM (SELECT DISTINCT v FROM ({_values_sql(f'({relation})', col, types[col] == 'VARCHAR[]')}) "
+            f"WHERE v IS NOT NULL AND v <> '' AND NOT regexp_matches(v, {sql_str(SHAPES[kind])}))"
+        ).fetchone()[0]
+        if n:
+            out[col] = n
+    return out
 
 
 # --------------------------------------------------------------------------

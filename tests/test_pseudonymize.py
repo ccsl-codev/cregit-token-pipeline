@@ -613,7 +613,7 @@ def test_the_leak_scan_finds_planted_leaks(tmp_path):
     both files, so the scan finds them across files."""
     a = _make(tmp_path, "alpha.parquet", seed="alpha")
     b = _make(tmp_path, "beta.parquet", seed="beta", people=50, replace={
-        "stratum": "CASE WHEN token_index = 3 THEN 'kept by P150 Person' ELSE stratum END",
+        "repo_tag": "CASE WHEN token_index = 3 THEN 'kept by P150 Person' ELSE repo_tag END",
         "license": f"CASE WHEN token_index = 4 THEN 'x p160{AT}corp10.example' ELSE license END",
         "source_text": "CASE WHEN token_index = 5 THEN '/* P170 Person */' ELSE source_text END",
         "commit_summary": "CASE WHEN token_index = 6 THEN 'thanks P180 Person' ELSE commit_summary END",
@@ -623,7 +623,8 @@ def test_the_leak_scan_finds_planted_leaks(tmp_path):
     con = _con()
     scan = P.leak_scan(con, b, reg)
     cols = scan["columns"]
-    assert cols["stratum"]["name_values"] == 1 and cols["stratum"]["class"] == "structural"
+    assert cols["repo_tag"]["name_values"] == 1 and cols["repo_tag"]["class"] == "structural"
+    # license is a closed vocabulary: no name probe, but the address probes stay.
     assert cols["license"]["local_values"] == 1 and cols["license"]["email_shaped_values"] == 1
     assert cols["source_text"]["class"] == "content" and "source_text" in scan["reported"]
     # commit_summary is published as git has it: its finding is information.
@@ -631,11 +632,11 @@ def test_the_leak_scan_finds_planted_leaks(tmp_path):
     assert cols["commit_summary"]["class"] == "information"
     assert "commit_summary" in scan["reported"]
     failed = " ".join(scan["failures"])
-    for c in ("stratum", "license"):
+    for c in ("repo_tag", "license"):
         assert c in failed
     assert "source_text" not in failed and "commit_summary" not in failed
     tok = P.token_py(P.derive_keys(SALT), "name", "p150 person")
-    assert cols["stratum"]["name_tokens"] == [tok]
+    assert cols["repo_tag"]["name_tokens"] == [tok]
     # content=False skips the information columns.
     assert "commit_summary" not in P.leak_scan(con, b, reg, content=False)["columns"]
     con.close()
@@ -656,7 +657,7 @@ def test_the_scan_of_a_clean_output_is_clean_and_the_input_is_not(registry):
 def test_the_scan_finds_a_name_with_no_word(tmp_path):
     src = _make(tmp_path, "w.parquet", replace={
         "author_name": "CASE WHEN token_index = 0 THEN '-----' ELSE author_name END",
-        "stratum": "CASE WHEN token_index = 1 THEN 'x ----- y' ELSE stratum END"})
+        "repo_tag": "CASE WHEN token_index = 1 THEN 'x ----- y' ELSE repo_tag END"})
     reg = str(tmp_path / "r.parquet")
     P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
     con = _con()
@@ -719,7 +720,7 @@ def test_the_cli_runs_and_the_report_has_no_identity(files, capsys):
 @requires_duckdb
 def test_the_cli_report_of_a_leak_has_tokens_not_values(tmp_path, capsys):
     src = _make(tmp_path, "leak.parquet", replace={
-        "stratum": "CASE WHEN token_index = 3 THEN 'kept by P150 Person' ELSE stratum END"})
+        "repo_tag": "CASE WHEN token_index = 3 THEN 'kept by P150 Person' ELSE repo_tag END"})
     salt = _salt_file(tmp_path)
     reg = str(tmp_path / "reg.parquet")
     rep = str(tmp_path / "report.json")
@@ -979,7 +980,7 @@ def test_a_name_that_is_a_published_organisation_name_is_masked(tmp_path):
     structural column fails only without the organisations table."""
     src = _make(tmp_path, "g.parquet", replace={
         "committer_name": "CASE WHEN token_index = 1 THEN 'GitHub' ELSE committer_name END",
-        "stratum": "CASE WHEN token_index = 2 THEN 'uses github actions' ELSE stratum END"})
+        "repo_tag": "CASE WHEN token_index = 2 THEN 'uses github actions' ELSE repo_tag END"})
     orgs = _orgs_file(tmp_path, [("github", "GitHub"), ("red-hat", "Red Hat")])
     keys = P.derive_keys(SALT)
     sink = io.StringIO()
@@ -991,8 +992,8 @@ def test_a_name_that_is_a_published_organisation_name_is_masked(tmp_path):
     n = con.execute("SELECT count(*) FROM read_parquet(?) WHERE space = 'organisation' AND "
                     "identity IN ('github', 'red hat', 'red-hat', 'org1')", [with_org]).fetchone()[0]
     assert n == 4                                      # the table, and the file's org column
-    assert not any(f.startswith("stratum") for f in P.leak_scan(con, src, with_org)["failures"])
-    assert any(f.startswith("stratum") for f in P.leak_scan(con, src, no_org)["failures"])
+    assert not any(f.startswith("repo_tag") for f in P.leak_scan(con, src, with_org)["failures"])
+    assert any(f.startswith("repo_tag") for f in P.leak_scan(con, src, no_org)["failures"])
     con.close()
 
 
@@ -1000,15 +1001,58 @@ def test_a_name_that_is_a_published_organisation_name_is_masked(tmp_path):
 def test_a_name_inside_a_longer_word_is_not_a_hit(tmp_path):
     src = _make(tmp_path, "w.parquet", replace={
         "author_name": "CASE WHEN token_index = 1 THEN 'Kalle' ELSE author_name END",
-        "stratum": "CASE WHEN token_index = 2 THEN 'add kallebot and P150 Personal' "
-                   "ELSE stratum END",
-        "license": "CASE WHEN token_index = 3 THEN 'thanks kalle!' ELSE license END"})
+        "repo_tag": "CASE WHEN token_index = 2 THEN 'add kallebot and P150 Personal' "
+                    "ELSE repo_tag END",
+        "history_cluster": "CASE WHEN token_index = 3 THEN 'thanks kalle!' "
+                           "ELSE history_cluster END"})
     reg = str(tmp_path / "r.parquet")
     P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
     con = _con()
     failed = " ".join(P.leak_scan(con, src, reg)["failures"])
-    assert "stratum" not in failed and "license" in failed
+    assert "repo_tag" not in failed and "history_cluster" in failed
     con.close()
+
+
+@requires_duckdb
+def test_no_name_probes_in_vocabulary_numeric_and_domain_columns(tmp_path):
+    """The main session, 2026-10-26: a registry name in a closed vocabulary,
+    a numeric column or person_domain is not a leak. The address probes stay
+    on these columns."""
+    name = "'kept by P150 Person'"
+    src = _make(tmp_path, "v.parquet", replace={
+        "token_type": f"CASE WHEN token_index = 1 THEN {name} ELSE token_type END",
+        "manifest_category": f"CASE WHEN token_index = 2 THEN {name} ELSE manifest_category END",
+        "stars": f"CASE WHEN token_index = 3 THEN {name} ELSE stars END",
+        "person_domain": "CASE WHEN token_index = 4 THEN 'p150 person' ELSE person_domain END",
+        "firm_based_on_domain": f"CASE WHEN token_index = 5 THEN {name} "
+                                "ELSE firm_based_on_domain END",
+        "language": f"CASE WHEN token_index = 6 THEN 'x p160{AT}corp10.example' ELSE language END",
+        # (firm_based_on_domain values are published organisation names, so the
+        # free-text column gets another text.)
+        "repo_tag": "CASE WHEN token_index = 7 THEN 'thanks P150 Person' ELSE repo_tag END"})
+    reg = str(tmp_path / "r.parquet")
+    P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
+    con = _con()
+    scan = P.leak_scan(con, src, reg)            # the input: its identity columns fail too
+    failed = {f.split(":")[0] for f in scan["failures"]
+              if scan["columns"][f.split(":")[0]]["class"] == "structural"}
+    assert failed == {"language", "repo_tag"}
+    con.close()
+
+
+def test_the_no_name_probe_columns_are_release_columns():
+    names = {c for c, _ in P.SCHEMA_2}
+    assert P.NO_NAME_PROBE_COLUMNS <= names
+    plan = A.classify(sorted(names))
+    assert not P.NO_NAME_PROBE_COLUMNS & set(P.identity_columns(plan))
+    assert not P.NO_NAME_PROBE_COLUMNS & P.INFORMATION_COLUMNS
+    assert {"token_type", "manifest_category", "source", "language", "license"} <= \
+        P.VOCABULARY_COLUMNS
+    assert "stars" in P.NUMERIC_COLUMNS and "person_domain" in P.NO_NAME_PROBE_COLUMNS
+    # The free-text structural columns keep the name probes.
+    for c in ("repo_tag", "history_cluster", "history_shared_with", "history_includes",
+              "history_first"):
+        assert c not in P.NO_NAME_PROBE_COLUMNS
 
 
 def test_organisation_spans_and_pseudonym_mask():
@@ -1203,3 +1247,51 @@ def test_the_cli_takes_the_organisations_table(tmp_path, capsys):
 def test_synthetic_summaries_can_name_people():
     assert "', thanks '" in P.synthetic_select(10, name_every=5)
     assert "', thanks '" not in P.synthetic_select(10)
+
+
+# --------------------------------------------------------------------------
+# The API for the final-write kit (build_v0.py --pseudonymize)
+# --------------------------------------------------------------------------
+
+def test_the_module_runs_and_imports_under_python_isolated(tmp_path):
+    """Under -I the folder of the script is not on the import path."""
+    import subprocess
+    here = Path(P.__file__).resolve()
+    r = subprocess.run([sys.executable, "-I", str(here), "--help"], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[-500:]
+    code = ("import importlib.util, sys; "
+            f"s = importlib.util.spec_from_file_location('pseudonymize', {str(here)!r}); "
+            "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+            "print(m.SCHEME_VERSION, callable(m.rule_e_domain_sql))")
+    r = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and r.stdout.split() == [P.SCHEME_VERSION, "True"], r.stderr[-500:]
+
+
+def test_the_public_error_class_keeps_its_text():
+    assert issubclass(P.WriteError, P.PseudonymizeError)
+    assert issubclass(P.RegistryError, P.PseudonymizeError)
+    assert P.safe_error(P.WriteError("3 rows lost"), None) == "WriteError: 3 rows lost"
+    assert P.safe_error(P.PseudonymizeError("check x"), None) == "PseudonymizeError: check x"
+    assert "text not shown" in P.safe_error(KeyError("P1 Person"), None)
+
+
+@requires_duckdb
+def test_identity_shape_violations(registry):
+    tmp, paths, reg = registry
+    outdir, res = _written(tmp, paths[:1], reg)
+    assert res["failures"] == []
+    out = os.path.join(outdir, os.path.basename(paths[0]))
+    con = _con()
+    assert P.identity_shape_violations(con, f"SELECT * FROM read_parquet({P.sql_str(out)})") == {}
+    # The input has real identities: each identity column is a violation.
+    bad = P.identity_shape_violations(con, f"SELECT * FROM read_parquet({P.sql_str(paths[0])})")
+    assert {"author_name", "author_email", "personid", "footer_signed_off_by",
+            "footer_person_names"} <= set(bad)
+    assert "commit_summary" not in bad
+    # A planted value in a written file.
+    rel = (f"SELECT * REPLACE (CASE WHEN token_index = 1 THEN 'Author 0123' ELSE author_name END "
+           f"AS author_name) FROM read_parquet({P.sql_str(out)})")
+    assert P.identity_shape_violations(con, rel) == {"author_name": 1}
+    con.close()
