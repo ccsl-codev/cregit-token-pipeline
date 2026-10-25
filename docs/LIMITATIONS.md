@@ -646,6 +646,20 @@ Sources: `RELEASE_PLAN.md`, decision "Review of the new domains" (2026-10-25);
 `~/Projects/cregit-workspace/companies/review/ai/r10/PROGRESS.md`; `STATUS.md` section 0
 (links of both layers).
 
+**Both commit layers: the organisation database gives the current parent only, with no
+dates of acquisitions.** `parent_company_id` names the owner of an organisation at the time
+of the database (October 2026), not the owner in the years of the commits. The database has
+no history of owners and no date of a purchase or a sale. Example: Jeppesen has the parent
+Thoma Bravo, which bought it in 2025; from 2000 to 2025 the owner was The Boeing Company,
+and the commits of those years are not marked as Boeing work. An analysis that groups
+organisations by parent therefore uses the ownership of today for all years. A history of
+owners with dates is not a goal of this dataset (the user, 2026-10-25). The columns of the
+project files are not affected: they name the organisation of the domain or of the
+account, not its parent.
+
+Sources: the v4.9 audit page (2026-10-25), question on the history of owners;
+`manual/v49_fields.csv` (the reason of the Jeppesen row) in `dataset-selection/s8-companies/`.
+
 **A vendored dependency attributes its whole library to the engineer who imported
 it.** cregit credits the commit that introduced a line, so a wholesale vendor drop
 credits the importing author with every token of third-party code. This is a
