@@ -19,9 +19,9 @@ rather than an opinion.
 > * **Question 3 — answered: publish with disclosure.** The 84.7% single-address
 >   domain tail is stated in `docs/LIMITATIONS.md` with the project's reasoning,
 >   and no k-anonymity work is planned. The docstring hedge has been corrected.
-> * **Question 2 — answered on 2026-10-24: pseudonym.** See the section
->   "Status after the release rework" below. The text of question 2 is kept as
->   the record of the choice.
+> * **Question 2 — answered on 2026-10-25: keep.** The commit message is
+>   published as git has it. See the section "Status after the release
+>   rework" below. The text of question 2 is kept as the record of the choice.
 
 ## Status after the release rework (2026-10-24)
 
@@ -38,23 +38,43 @@ What the documents decided, and what the new tool does:
   `build_links.py` (JOIN_PROTOTYPE.md, recommendation 4). Measured on the v1
   files: 2 of 70,737 distinct values change.
 
-Decided by the user on 2026-10-24:
+Decided by the user on 2026-10-24 and 2026-10-25:
 
-* **2 and 2b. `commit_summary`: decided, pseudonym.** The default is now
-  `--commit-summary pseudonym`. Each address in a summary gets the pseudonym
-  of the e-mail columns (`author_<token>`, the same domain), and
-  `verify_anon.py` accepts it. The old scrub form (the word `author`, the at
-  sign, the domain) failed `verify_anon.py`; `scrub` and `null` stay as
-  modes for tests and comparison. The residue gate stays strict: a real name
-  in a summary fails the file. Option 4 (`--summary-residue report`) is not
-  selected.
-* **5. `person_domain` values with an at sign: decided, after-last-at.** The
-  default is now `--person-domain-at after-last-at`: the value keeps the part
-  after the last at sign (after `lower(trim())`). Measured on the v1 files: 199
-  distinct values in 176 files have an at sign, and 70 distinct values
-  (275,674 rows, 89 files) have the shape of an address. With the old rule
-  (`keep`) the structural gate failed these 89 files. `firm_based_on_domain`
-  is already `unknown` for such values.
+* **2 and 2b. `commit_summary`: decided 2026-10-25, keep.** The user: "We
+  shouldn't change commit messages; if somebody committed their name in the
+  history, we shouldn't do anything." The default is `--commit-summary keep`:
+  the commit message is published as git has it, with no name and no address
+  changed. The gate does not check `commit_summary`; the leak scan gives its
+  counts as information only, and `verify_anon.py` takes it as a content
+  column (a note, not a failure). The trailer columns (`footer_*`) are
+  separate and get pseudonyms. The modes `pseudonym` (each address gets the
+  pseudonym of the e-mail columns), `scrub` and `null` stay as options. The
+  name replacement of 2026-10-24 is removed: measured on the v1 files,
+  6,370,045 of 19,747,315 distinct summaries (3,529 of 3,544 files,
+  9,010,968,089 of 23,692,479,892 rows) hold a registry name, most of them a
+  single-word name that is also an ordinary word, so the replacement would
+  have changed 38% of the summary rows.
+* **5 and 10. The domain of an address and of `person_domain`: decided
+  2026-10-25, rule E.** The domain is the first part after an at sign that is
+  a valid domain: the STRICT_DOMAIN characters of `build_companies.py`, a
+  dot, and an ICANN public suffix (the Public Suffix List, `--psl`; default:
+  the newest list in the nix store). No valid part gives the empty domain.
+  This is the default for the e-mail columns and the trailer addresses
+  (`--email-domain first-valid`) and for a `person_domain` value with an at
+  sign (`--person-domain-at first-valid`). The old rules stay as options
+  (`--email-domain second-part`, `--person-domain-at after-last-at`).
+  `pseudonymize.rule_e_domain_sql()` and `person_domain_expr()` give the
+  rule as SQL for other tools; `build_v0.py` must use them for its domain key.
+  Measured on the v1 files: 199 distinct `person_domain` values (15,278,362
+  rows, 176 files) have an at sign; rule E changes 133 distinct values
+  (14,726,554 rows) against the after-last-at rule of 2026-10-24, and gives
+  the empty domain for 10 values (25,940 rows). Of the 471,906 registry
+  addresses, rule E changes the published domain of 11,909 against the old
+  rule (the second part, in lower case).
+* **The pseudonym mask (defect of 8223fae).** The registry holds the name
+  `author`. Without a mask, every pseudonym (`Author <token>`, `author
+  <token>`, `author_<token>`) was a known name for the leak scan, so every
+  file failed. The leak scan now masks the pseudonym forms.
 * **6. The registry file: decided, kept private.** The registry is the
   reverse map (real identity to pseudonym). It is kept in the private bucket
   after the release and is never published, so that a later release with the
@@ -77,13 +97,18 @@ Questions that still need the user:
   repository (`s8-companies/build_v0.py`): its COPY becomes a call of
   `pseudonymize.write_public(...)` with its own SELECT as `source_sql`. Its own
   order hash must not compare the identity columns, because they change.
-* **10. E-mail columns with two at signs (new finding).** The e-mail columns
-  keep the old rule: the published domain is the part between the first and
-  the second at sign. Measured on the v1 files: 678 distinct `author_email`
-  values (177 files), 624 `committer_email` values (106 files) and 677
-  `person_email` values (176 files) have two or more at signs. For these, the
-  published "domain" can be a part of the original local part. The rule of
-  question 5 (the part after the last at sign) would also fit these columns.
+  The call is in the module docstring of `pseudonymize.py`
+  (`write_public()`).
+* **11. The name probes of the structural gate (new finding, 2026-10-25).**
+  With the new defaults the structural gate fails all 3,544 v1 files, only
+  because of name probes: 366 distinct values, nearly all a single-word
+  registry name that is also a word of the column vocabulary. Failing files
+  per column: `token_type` 3,544, `manifest_category` 3,544, `source` 324,
+  `person_domain` 209, `language` 100, `license` 11, `stars` 1. Without the
+  name probes no file fails (no address shape and no local part). The
+  identity columns pass (a sample of 60 files: 0 failures). The user must
+  choose a rule, for example: no name probes in these vocabulary columns, or
+  no single-word name probes in the structural columns.
 
 ## First, a correction to the brief
 

@@ -36,6 +36,33 @@ ROWS = 3000
 PEOPLE = 200            # local parts p0 .. p199; p100 .. p199 are probes (4 characters)
 
 
+# A small Public Suffix List. 'example' is a top-level label here, so that the
+# synthetic domains (corp1.example) are valid domains under rule E.
+TEST_PSL = """// test list
+// ===BEGIN ICANN DOMAINS===
+com
+org
+example
+uk
+co.uk
+*.ck
+!www.ck
+// ===END ICANN DOMAINS===
+// ===BEGIN PRIVATE DOMAINS===
+blogspot.com
+// ===END PRIVATE DOMAINS===
+"""
+
+
+@pytest.fixture(autouse=True)
+def _test_psl(tmp_path_factory, monkeypatch):
+    path = tmp_path_factory.getbasetemp() / "test_psl.dat"
+    if not path.exists():
+        path.write_text(TEST_PSL)
+    monkeypatch.setattr(P, "DEFAULT_PSL_PATH", str(path))
+    return str(path)
+
+
 def _salt_file(tmp: Path, salt: bytes = SALT, name: str = "salt") -> str:
     p = tmp / name
     p.write_bytes(salt + b"\n")
@@ -43,9 +70,9 @@ def _salt_file(tmp: Path, salt: bytes = SALT, name: str = "salt") -> str:
     return str(p)
 
 
-def _con(keys=None):
+def _con(keys=None, **kw):
     con = P.connect("2GB", 2)
-    P.install(con, keys if keys is not None else P.derive_keys(SALT))
+    P.install(con, keys if keys is not None else P.derive_keys(SALT), **kw)
     return con
 
 
@@ -167,10 +194,10 @@ def test_sql_footer_shape_equals_the_python_shape():
 
 @requires_duckdb
 def test_sql_footer_render_equals_the_old_render():
-    """The SQL render gives the string that render_footer_element gives with
-    the same tokens."""
+    """With the old domain rule (second-part), the SQL render gives the string
+    that render_footer_element gives with the same tokens."""
     keys = P.derive_keys(SALT)
-    con = _con(keys)
+    con = _con(keys, email_domain="second-part")
     for e in TRAILERS:
         shape, name, email = A.parse_footer_element(e)
         reg = A.Registry()
@@ -195,7 +222,7 @@ def test_scalar_macros_keep_null_and_empty_and_the_domain():
                       "anon_name('P5 Person'), anon_personid('P5 Person'), anon_email('nobody')",
                       [addr]).fetchone()
     tok = P.token_py(keys, "email", addr.lower())
-    assert got[0] == f"author_{tok}{AT}Corp5.example"
+    assert got[0] == f"author_{tok}{AT}corp5.example"     # rule E: lower case
     assert got[1] == "" and got[2] is None
     assert got[3] == "Author " + P.token_py(keys, "name", "p5 person")
     assert got[4] == "author " + P.token_py(keys, "name", "p5 person")
@@ -266,8 +293,8 @@ def test_a_collision_stops_the_registry_and_names_no_identity(files, monkeypatch
     tmp, paths = files
     real_install = P.install
 
-    def colliding(con, keys):
-        real_install(con, keys)
+    def colliding(con, keys, **kw):
+        real_install(con, keys, **kw)
         con.execute("CREATE OR REPLACE TEMP MACRO anon_t(sp, k) AS 'x'")
 
     monkeypatch.setattr(P, "install", colliding)
@@ -374,9 +401,12 @@ def test_write_replaces_every_identity_and_keeps_the_rest(registry):
                        "OR o.firm_based_on_domain IS DISTINCT FROM s.fd",
                        [out, src]).fetchone()[0]
     assert diff == 0
-    # No synthetic identity string in any identity column of the output.
+    # No synthetic identity string in any identity column of the output. The
+    # commit message is published as git has it (the default mode keep).
     ident = P.identity_columns(A.classify([c for c, _ in P.file_schema(con, out)]))
     for c in ident:
+        if c == "commit_summary":
+            continue
         expr = f"array_to_string({P.q(c)}, ' ')" if c.startswith("footer_") else P.q(c)
         n = con.execute(f"SELECT count(*) FROM read_parquet(?) WHERE {expr} ILIKE '%person%' "
                         f"OR regexp_matches({expr}, '(^|[^_a-z0-9])p[0-9]+{AT}')",
@@ -521,12 +551,13 @@ def test_parallel_jobs_give_the_same_bytes(registry):
 
 
 @requires_duckdb
-def test_verify_anon_accepts_the_output_of_the_pseudonym_and_null_modes(registry, capsys):
-    """verify_anon.py needs an author_<token> local part. The old scrub writes
-    'author' and fails it: this conflict is listed in docs/ANON-OPEN-QUESTIONS.md."""
+def test_verify_anon_accepts_the_output_of_each_summary_mode(registry, capsys):
+    """verify_anon.py takes commit_summary as a content column since the user
+    decided to keep the commit message (2026-10-25): an address in it is a
+    note. Each mode, also the old scrub, passes."""
     import verify_anon
     tmp, paths, reg = registry
-    for mode, want in (("pseudonym", 0), ("null", 0), ("scrub", 1)):
+    for mode, want in (("keep", 0), ("pseudonym", 0), ("null", 0), ("scrub", 0)):
         outdir, res = _written(tmp, paths, reg, outname=f"v-{mode}", summary_mode=mode)
         assert res["failures"] == []
         assert verify_anon.main([outdir]) == want, mode
@@ -595,17 +626,18 @@ def test_the_leak_scan_finds_planted_leaks(tmp_path):
     assert cols["stratum"]["name_values"] == 1 and cols["stratum"]["class"] == "structural"
     assert cols["license"]["local_values"] == 1 and cols["license"]["email_shaped_values"] == 1
     assert cols["source_text"]["class"] == "content" and "source_text" in scan["reported"]
+    # commit_summary is published as git has it: its finding is information.
     assert cols["commit_summary"]["name_values"] == 1
+    assert cols["commit_summary"]["class"] == "information"
+    assert "commit_summary" in scan["reported"]
     failed = " ".join(scan["failures"])
-    for c in ("stratum", "license", "commit_summary"):
+    for c in ("stratum", "license"):
         assert c in failed
-    assert "source_text" not in failed
+    assert "source_text" not in failed and "commit_summary" not in failed
     tok = P.token_py(P.derive_keys(SALT), "name", "p150 person")
     assert cols["stratum"]["name_tokens"] == [tok]
-    # Option 4 of open question 2: a name in commit_summary is reported only.
-    soft = P.leak_scan(con, b, reg, summary_residue="report")
-    assert "commit_summary" in soft["reported"]
-    assert not any(f.startswith("commit_summary") for f in soft["failures"])
+    # content=False skips the information columns.
+    assert "commit_summary" not in P.leak_scan(con, b, reg, content=False)["columns"]
     con.close()
 
 
@@ -777,7 +809,8 @@ def test_the_person_domain_rules_for_a_value_with_an_at_sign(tmp_path):
     con = _con()
     assert con.execute("SELECT count(*) FROM read_parquet(?) WHERE space = 'domain' "
                        f"AND contains(identity, '{AT}')", [reg]).fetchone()[0] == 0
-    want = {"keep": None, "after-last-at": "corp1.example", "empty": ""}
+    want = {"keep": None, "after-last-at": "corp1.example", "empty": "",
+            "first-valid": "corp1.example"}
     for mode, value in want.items():
         outdir, res = _written(tmp_path, [src], reg, outname=f"o-{mode}", domain_at=mode)
         if mode == "keep":
@@ -843,20 +876,23 @@ def test_the_source_schema_can_be_given(registry):
 # The user's decisions of 2026-10-24
 # --------------------------------------------------------------------------
 
-def test_the_defaults_are_the_decisions_of_2026_10_24():
+def test_the_defaults_are_the_decisions_of_2026_10_25():
     import inspect
-    assert P.DEFAULT_SUMMARY_MODE == "pseudonym"
-    assert P.DEFAULT_DOMAIN_AT == "after-last-at"
+    assert P.DEFAULT_SUMMARY_MODE == "keep"
+    assert P.DEFAULT_DOMAIN_AT == "first-valid"
+    assert P.DEFAULT_EMAIL_DOMAIN == "first-valid"
     for fn in (P.write_public, P.run_write):
         sig = inspect.signature(fn)
-        assert sig.parameters["summary_mode"].default == "pseudonym"
-        assert sig.parameters["domain_at"].default == "after-last-at"
+        assert sig.parameters["summary_mode"].default == "keep"
+        assert sig.parameters["domain_at"].default == "first-valid"
+    assert inspect.signature(P.build_registry).parameters["email_domain"].default == "first-valid"
     assert P.SCHEME_VERSION == "2"
 
 
 @requires_duckdb
 def test_the_cli_defaults_are_the_decisions(files, capsys):
-    """A default run gives pseudonymized summaries that verify_anon.py accepts."""
+    """A default run keeps the commit message, uses rule E, and passes
+    verify_anon.py."""
     import verify_anon
     tmp, paths = files
     salt = _salt_file(tmp)
@@ -865,14 +901,22 @@ def test_the_cli_defaults_are_the_decisions(files, capsys):
                  "--outdir", str(tmp / "pub"), "--report", rep, *paths])
     assert rc == 0
     blob = json.loads(Path(rep).read_text())
-    assert blob["options"]["summary_mode"] == "pseudonym"
-    assert blob["options"]["person_domain_at"] == "after-last-at"
+    assert blob["options"]["summary_mode"] == "keep"
+    assert blob["options"]["person_domain_at"] == "first-valid"
+    assert blob["options"]["email_domain"] == "first-valid"
     assert verify_anon.main([str(tmp / "pub")]) == 0
+    con = _con()
+    out = str(tmp / "pub" / os.path.basename(paths[0]))
+    same = con.execute("SELECT count(*) FROM read_parquet(?) o POSITIONAL JOIN (SELECT "
+                       "commit_summary AS c FROM read_parquet(?)) s "
+                       "WHERE o.commit_summary IS DISTINCT FROM s.c", [out, paths[0]]).fetchone()[0]
+    assert same == 0
+    con.close()
     capsys.readouterr()
 
 
 @requires_duckdb
-def test_a_person_domain_with_two_at_signs_keeps_the_part_after_the_last(tmp_path):
+def test_a_person_domain_with_two_at_signs_gets_the_rule_e_domain(tmp_path):
     src = _make(tmp_path, "two.parquet", replace={
         "person_domain": f"CASE WHEN token_index = 2 THEN ' A{AT}B{AT}Corp1.Example ' "
                          f"WHEN token_index = 3 THEN 'c{AT}' ELSE person_domain END"})
@@ -889,34 +933,200 @@ def test_a_person_domain_with_two_at_signs_keeps_the_part_after_the_last(tmp_pat
 
 
 @requires_duckdb
-def test_a_summary_with_an_address_and_a_known_name(tmp_path):
-    """Default mode: the address gets the pseudonym of the e-mail columns; the
-    known name stays in the text, and the strict gate fails the file."""
+def test_a_summary_with_an_address_and_a_known_name_is_kept(tmp_path):
+    """Default mode keep (the user, 2026-10-25): the commit message is
+    published as git has it. The scan gives its findings as information, and
+    the gate does not fail the file. The trailers still get pseudonyms."""
     addr = "p150" + AT + "corp0.example"
+    text = f"thanks P150 Person, mail {addr}"
     src = _make(tmp_path, "s.parquet", replace={
-        "commit_summary": f"CASE WHEN token_index = 6 THEN 'thanks P150 Person, mail {addr}' "
-                          f"WHEN token_index = 7 THEN 'mail {addr} again' ELSE commit_summary END"})
+        "commit_summary": f"CASE WHEN token_index IN (6, 60, 600) THEN '{text}' "
+                          "ELSE commit_summary END"})
     reg = str(tmp_path / "r.parquet")
     P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
-    keys = P.derive_keys(SALT)
-    pseudo = f"author_{P.token_py(keys, 'email', addr)}{AT}corp0.example"
-    con = _con(keys)
-    # The same address in the e-mail columns gets the same pseudonym.
-    assert con.execute("SELECT anon_email(?)", [addr]).fetchone()[0] == pseudo
+    con = _con()
     sha = P.registry_meta(con, reg)["registry_sha256"]
     dst = str(tmp_path / "s-out.parquet")
     res = P.write_public(con, src, dst, registry=reg, registry_sha256=sha)
     assert res["problems"] == []
-    got = dict(con.execute("SELECT token_index, commit_summary FROM read_parquet(?) "
-                           "WHERE token_index IN (6, 7)", [dst]).fetchall())
-    assert got[7] == f"mail {pseudo} again"
-    assert got[6] == f"thanks P150 Person, mail {pseudo}"
+    got = {r[0] for r in con.execute("SELECT commit_summary FROM read_parquet(?) "
+                                     "WHERE token_index IN (6, 60, 600)", [dst]).fetchall()}
+    assert got == {text}
     scan = P.leak_scan(con, dst, reg)
+    assert scan["failures"] == []
     entry = scan["columns"]["commit_summary"]
-    assert entry["name_values"] == 1 and entry["local_values"] == 0
-    assert entry["name_tokens"] == [P.token_py(keys, "name", "p150 person")]
-    assert any(f.startswith("commit_summary") for f in scan["failures"])
+    assert entry["class"] == "information" and entry["name_values"] >= 1
+    assert entry["local_values"] >= 1 and "commit_summary" in scan["reported"]
+    n = con.execute("SELECT count(*) FROM read_parquet(?) WHERE array_to_string("
+                    "footer_signed_off_by, ' ') ILIKE '%person%'", [dst]).fetchone()[0]
+    assert n == 0
     con.close()
+
+
+def _orgs_file(tmp: Path, rows: list[tuple[str, str]]) -> str:
+    path = str(tmp / "organisations.parquet")
+    con = P.connect("1GB", 1)
+    vals = ", ".join(f"({P.sql_str(i)}, {P.sql_str(n)})" for i, n in rows)
+    con.execute(f"COPY (SELECT * FROM (VALUES {vals}) t(organisation_id, name)) "
+                f"TO {P.sql_str(path)} (FORMAT PARQUET)")
+    con.close()
+    return path
+
+
+@requires_duckdb
+def test_a_name_that_is_a_published_organisation_name_is_masked(tmp_path):
+    """A bot identity 'GitHub' and the organisation GitHub: 'uses github' in a
+    structural column fails only without the organisations table."""
+    src = _make(tmp_path, "g.parquet", replace={
+        "committer_name": "CASE WHEN token_index = 1 THEN 'GitHub' ELSE committer_name END",
+        "stratum": "CASE WHEN token_index = 2 THEN 'uses github actions' ELSE stratum END"})
+    orgs = _orgs_file(tmp_path, [("github", "GitHub"), ("red-hat", "Red Hat")])
+    keys = P.derive_keys(SALT)
+    sink = io.StringIO()
+    with_org = str(tmp_path / "r-org.parquet")
+    P.build_registry([src], keys, with_org, organisations=(orgs,), out=sink)
+    no_org = str(tmp_path / "r-none.parquet")
+    P.build_registry([src], keys, no_org, out=sink)
+    con = _con(keys)
+    n = con.execute("SELECT count(*) FROM read_parquet(?) WHERE space = 'organisation' AND "
+                    "identity IN ('github', 'red hat', 'red-hat', 'org1')", [with_org]).fetchone()[0]
+    assert n == 4                                      # the table, and the file's org column
+    assert not any(f.startswith("stratum") for f in P.leak_scan(con, src, with_org)["failures"])
+    assert any(f.startswith("stratum") for f in P.leak_scan(con, src, no_org)["failures"])
+    con.close()
+
+
+@requires_duckdb
+def test_a_name_inside_a_longer_word_is_not_a_hit(tmp_path):
+    src = _make(tmp_path, "w.parquet", replace={
+        "author_name": "CASE WHEN token_index = 1 THEN 'Kalle' ELSE author_name END",
+        "stratum": "CASE WHEN token_index = 2 THEN 'add kallebot and P150 Personal' "
+                   "ELSE stratum END",
+        "license": "CASE WHEN token_index = 3 THEN 'thanks kalle!' ELSE license END"})
+    reg = str(tmp_path / "r.parquet")
+    P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
+    con = _con()
+    failed = " ".join(P.leak_scan(con, src, reg)["failures"])
+    assert "stratum" not in failed and "license" in failed
+    con.close()
+
+
+def test_organisation_spans_and_pseudonym_mask():
+    assert P.org_spans("x red hat y", frozenset()) == []
+    assert P.org_spans("x Red Hat y", frozenset({"red hat"})) == [(2, 9)]
+    assert P.mask_organisations("bump github now", frozenset({"github"})) == \
+        f"bump {P.ORG_MASK} now"
+    tok = "0123456789abcd"
+    for form in (f"Author {tok}", f"author {tok}", f"author_{tok}"):
+        assert P.mask_pseudonyms(f"by {form}.") == f"by {P.PSEUDONYM_MASK}."
+        assert not P.name_hit(f"by {form}", "author", frozenset())
+    assert P.name_hit("the author field", "author", frozenset())
+
+
+@requires_duckdb
+def test_a_registry_name_author_does_not_make_pseudonyms_leaks(tmp_path):
+    """The defect of 8223fae: the registry holds the name 'author' (as dataset
+    v1 does), and every pseudonym 'Author <token>' was a leak."""
+    src = _make(tmp_path, "a.parquet", replace={
+        "author_name": "CASE WHEN token_index = 1 THEN 'Author' ELSE author_name END"})
+    reg = str(tmp_path / "r.parquet")
+    P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
+    con = _con()
+    assert con.execute("SELECT count(*) FROM read_parquet(?) WHERE space = 'name' AND "
+                       "identity = 'author'", [reg]).fetchone()[0] == 1
+    sha = P.registry_meta(con, reg)["registry_sha256"]
+    dst = str(tmp_path / "a-out.parquet")
+    assert P.write_public(con, src, dst, registry=reg, registry_sha256=sha)["problems"] == []
+    assert P.leak_scan(con, dst, reg)["failures"] == []
+    con.close()
+
+
+# --------------------------------------------------------------------------
+# Rule E (the user, 2026-10-25)
+# --------------------------------------------------------------------------
+
+def _rule_e(con, value: str | None, skip_first: bool = True) -> str | None:
+    return con.execute(f"SELECT {P.rule_e_domain_sql('v', skip_first=skip_first)} "
+                       "FROM (SELECT ?::VARCHAR AS v)", [value]).fetchone()[0]
+
+
+@requires_duckdb
+def test_rule_e_takes_the_first_valid_part_after_an_at_sign():
+    con = _con()
+    cases = {
+        # git-svn: user, at sign, domain, at sign, uuid -> the domain
+        f"user{AT}Corp1.Example{AT}0c2b5d6e-1f2a-4b3c-9d8e-7f6a5b4c3d2e": "corp1.example",
+        # a doubled at sign -> the valid part
+        f"user{AT}{AT}corp2.example": "corp2.example",
+        # two joined addresses -> the first valid part (the first part is
+        # 'corp3.examplebob', which has no ICANN suffix)
+        f"alice{AT}corp3.examplebob{AT}corp4.org": "corp4.org",
+        f"alice{AT}corp3.example, bob{AT}corp4.org": "corp4.org",
+        # no valid part -> ''
+        f"user{AT}localhost": "",
+        f"user{AT}0c2b5d6e-uuid": "",
+        f"user{AT}co.uk": "",                   # a public suffix is not a domain
+        f"user{AT}a.co.uk": "a.co.uk",
+        f"user{AT}b.ck": "",                    # the wildcard *.ck
+        f"user{AT}www.ck": "www.ck",            # the exception !www.ck
+        f"user{AT}x.blogspot.com": "x.blogspot.com",   # the PRIVATE section is not used
+        f"user{AT}x.unknowntld": "",
+        "no at sign": "",
+    }
+    for value, want in cases.items():
+        assert _rule_e(con, value) == want, value
+    assert _rule_e(con, None) is None
+    # person_domain: every part is a candidate.
+    assert _rule_e(con, f"corp1.example{AT}uuid", skip_first=False) == "corp1.example"
+    assert _rule_e(con, f"uuid{AT}corp1.example", skip_first=False) == "corp1.example"
+    con.close()
+
+
+@requires_duckdb
+def test_rule_e_in_the_email_columns_and_the_trailers():
+    keys = P.derive_keys(SALT)
+    con = _con(keys)
+    raw = f"Dev{AT}Corp1.Example{AT}uuid-1"
+    tok = P.token_py(keys, "email", raw.lower())
+    assert con.execute("SELECT anon_email(?)", [raw]).fetchone()[0] == f"author_{tok}{AT}corp1.example"
+    bad = f"dev{AT}localhost"
+    tok2 = P.token_py(keys, "email", bad)
+    assert con.execute("SELECT anon_email(?)", [bad]).fetchone()[0] == f"author_{tok2}"
+    elem = f"P1 Person <{raw}>"
+    name = P.token_py(keys, "name", "p1 person")
+    assert con.execute("SELECT anon_footer_elem(?)", [elem]).fetchone()[0] == \
+        f"Author {name} <author_{tok}{AT}corp1.example>"
+    con.close()
+    # The old rule is still there as an option.
+    old = _con(keys, email_domain="second-part")
+    assert old.execute("SELECT anon_email(?)", [raw]).fetchone()[0] == \
+        f"author_{tok}{AT}Corp1.Example"
+    old.close()
+    last = _con(keys, email_domain="after-last-at")
+    assert last.execute("SELECT anon_email(?)", [raw]).fetchone()[0] == f"author_{tok}{AT}uuid-1"
+    last.close()
+    with pytest.raises(ValueError):
+        P._macros("third-part")
+
+
+def test_load_psl_reads_the_icann_section_only(_test_psl, tmp_path):
+    psl = P.load_psl(_test_psl)
+    assert "co.uk" in psl["rules"] and "blogspot.com" not in psl["rules"]
+    assert psl["wild"] == {"ck"} and psl["exc"] == {"www.ck"}
+    assert {"uk", "ck", "example"} <= psl["tlds"] and len(psl["sha256"]) == 64
+    with pytest.raises(P.RegistryError):
+        P.load_psl(str(tmp_path / "missing.dat"))
+
+
+@requires_duckdb
+def test_the_write_refuses_another_domain_rule_or_list(registry, tmp_path):
+    tmp, paths, reg = registry
+    with pytest.raises(P.RegistryError):
+        _written(tmp, paths, reg, outname="rule", email_domain="second-part")
+    other = tmp_path / "other_psl.dat"
+    other.write_text(TEST_PSL + "// changed\n")
+    with pytest.raises(P.RegistryError):
+        _written(tmp, paths, reg, outname="psl", psl=str(other))
 
 
 @requires_duckdb
@@ -960,3 +1170,36 @@ def test_the_cli_refuses_a_registry_under_the_output_folder(files, capsys):
     rc = P.main(["registry", "--salt-file", salt, "--registry", str(tmp / "rr" / "reg.parquet"),
                  "--release-root", str(tmp / "rr"), *paths])
     assert rc == 2
+
+
+@requires_duckdb
+def test_the_registry_does_not_depend_on_the_batch_size(files):
+    tmp, paths = files
+    keys = P.derive_keys(SALT)
+    a = P.build_registry(paths, keys, str(tmp / "b1.parquet"), batch_files=1, out=io.StringIO())
+    b = P.build_registry(paths, keys, str(tmp / "b9.parquet"), batch_files=9, out=io.StringIO())
+    assert a["registry_sha256"] == b["registry_sha256"]
+
+
+@requires_duckdb
+def test_the_cli_takes_the_organisations_table(tmp_path, capsys):
+    src = _make(tmp_path, "g.parquet", replace={
+        "committer_name": "CASE WHEN token_index = 1 THEN 'GitHub' ELSE committer_name END",
+        "commit_summary": "CASE WHEN token_index = 2 THEN 'ci: bump github actions' "
+                          "ELSE commit_summary END"})
+    orgs = _orgs_file(tmp_path, [("github", "GitHub")])
+    salt = _salt_file(tmp_path)
+    rc = P.main(["run", "--salt-file", salt, "--registry", str(tmp_path / "p" / "r.parquet"),
+                 "--organisations", orgs, "--outdir", str(tmp_path / "pub"), src])
+    assert rc == 0
+    con = _con()
+    got = con.execute("SELECT commit_summary FROM read_parquet(?) WHERE token_index = 2",
+                      [str(tmp_path / "pub" / "g.parquet")]).fetchone()[0]
+    assert got == "ci: bump github actions"
+    con.close()
+    capsys.readouterr()
+
+
+def test_synthetic_summaries_can_name_people():
+    assert "', thanks '" in P.synthetic_select(10, name_every=5)
+    assert "', thanks '" not in P.synthetic_select(10)

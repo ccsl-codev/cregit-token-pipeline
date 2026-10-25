@@ -99,9 +99,13 @@ EXACT_SHAPE = {
 # and shown but do not fail the run. anonymize_parquet.py's docstring discloses
 # this as residual risk; the point of listing it here is that a release cannot
 # pretend it is not there.
+#
+# commit_summary is in this set since 2026-10-25: the user decided that the
+# commit message is published as git has it (pseudonymize.py --commit-summary
+# keep), so an address in it is a note, not a failure.
 CONTENT_COLUMNS = frozenset({"source_text", "token_value", "file_path",
                              "repo_name", "clone_url", "owner", "repo",
-                             "roster_name", "fact", "file_mask"})
+                             "roster_name", "fact", "file_mask", "commit_summary"})
 
 
 def connect():
