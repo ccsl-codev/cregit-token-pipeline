@@ -1126,11 +1126,26 @@ def mask_pseudonyms(value: str) -> str:
     return PSEUDONYM_RE.sub(PSEUDONYM_MASK, value)
 
 
+# The three mask texts hold words: pseudonym, preserved, domain, organisation.
+# The registry can hold a name that is one of these words (the registry of both
+# commit layers holds the names 'domain' and 'pseudonym'). Then the probe found
+# the name in the mask text itself, for example in a published domain with the
+# word 'domain' (the defect of 2026-10-27: 7 Linux files of the final write).
+# So the probe runs on the masked value with each mask text replaced by one
+# character that is not a word character and not a space: the word boundaries
+# stay as they were, and no name can match in a mask.
+MASK_TEXTS = (PSEUDONYM_MASK, ORG_MASK, A.DOMAIN_MASK)
+MASK_GAP = "\x00"
+
+
 def name_hit(value: str, name: str, domains: frozenset[str],
              orgs: frozenset[str] = frozenset()) -> bool:
     """The old rule: the whole name between word boundaries, after the
-    pseudonyms, the published domains and organisation names are masked."""
+    pseudonyms, the published domains and organisation names are masked. The
+    mask texts do not count as text (MASK_TEXTS)."""
     masked = mask_organisations(mask_domains(mask_pseudonyms(value), domains), orgs)
+    for m in MASK_TEXTS:
+        masked = masked.replace(m, MASK_GAP)
     return re.search(rf"\b{re.escape(name)}\b", masked, re.I) is not None
 
 

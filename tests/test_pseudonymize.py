@@ -1295,3 +1295,52 @@ def test_identity_shape_violations(registry):
            f"AS author_name) FROM read_parquet({P.sql_str(out)})")
     assert P.identity_shape_violations(con, rel) == {"author_name": 1}
     con.close()
+
+
+# --------------------------------------------------------------------------
+# The mask texts are not text (the defect of 2026-10-27)
+# --------------------------------------------------------------------------
+
+def test_a_name_equal_to_a_word_of_a_mask_text_is_no_hit():
+    """The registry of both commit layers holds the names 'domain' and
+    'pseudonym'. A published domain with the word 'domain' became
+    '<PRESERVED-DOMAIN>', and the probe found 'domain' in the mask text."""
+    tok = "0123456789abcd"
+    for name, value, doms in (
+            ("domain", f"author_{tok}{AT}corp-domain.example", {"corp-domain.example"}),
+            ("domain", f"author {tok} <author_{tok}{AT}corp-domain.example>", {"corp-domain.example"}),
+            ("pseudonym", f"author_{tok}{AT}pseudonym.example", {"pseudonym.example"}),
+            ("preserved", f"author_{tok}{AT}preserved.example", {"preserved.example"}),
+            ("organisation", "see the red hat team", set())):
+        assert not P.name_hit(value, name, frozenset(doms), frozenset({"red hat"})), name
+    # The mask text keeps the word boundaries: a name next to a mask is found,
+    # and a name of two words across a mask is not.
+    assert P.name_hit(f"p7 person{AT}corp1.example", "p7 person", frozenset({"corp1.example"}))
+    assert not P.name_hit(f"p7{AT}corp1.example person", "p7 person", frozenset({"corp1.example"}))
+    # A real name in free text is still a hit, also when it is a mask word.
+    assert P.name_hit("fixed by domain in the summary", "domain", frozenset())
+    assert P.name_hit("thanks pseudonym!", "pseudonym", frozenset())
+
+
+@requires_duckdb
+def test_a_registry_name_domain_does_not_make_a_published_domain_a_leak(tmp_path):
+    """End to end: a person named 'Domain' and another person with an address
+    at a domain with the word 'domain'. The write passes the leak scan."""
+    src = _make(tmp_path, "a.parquet", replace={
+        "author_name": "CASE WHEN token_index = 1 THEN 'Domain' ELSE author_name END",
+        "author_email": f"CASE WHEN token_index = 2 THEN 'p2{AT}corp-domain.example' ELSE author_email END"})
+    reg = str(tmp_path / "r.parquet")
+    P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
+    con = _con()
+    assert con.execute("SELECT count(*) FROM read_parquet(?) WHERE space = 'name' AND "
+                       "identity = 'domain'", [reg]).fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM read_parquet(?) WHERE space = 'domain' AND "
+                       "identity = 'corp-domain.example'", [reg]).fetchone()[0] == 1
+    sha = P.registry_meta(con, reg)["registry_sha256"]
+    dst = str(tmp_path / "a-out.parquet")
+    assert P.write_public(con, src, dst, registry=reg, registry_sha256=sha)["problems"] == []
+    assert con.execute("SELECT count(*) FROM read_parquet(?) WHERE author_email LIKE ?",
+                       [dst, f"%{AT}corp-domain.example"]).fetchone()[0] >= 1
+    sc = P.leak_scan(con, dst, reg)
+    assert sc["failures"] == [], sc["failures"]
+    con.close()
