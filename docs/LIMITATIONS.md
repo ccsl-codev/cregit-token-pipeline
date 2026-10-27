@@ -368,16 +368,27 @@ liability of the dataset, not of one run. Source: `s2-pool/pool.csv` (Linguist b
 
 **Both commit layers: the release is one dataset in two commit layers.** The frame has
 10,763 projects: 3,548 with 5,000 or more commits and 7,215 with 1,000 to 4,999 commits.
-The dataset has 10,753 project files: 3,544 in the 5,000+ layer and 7,209 in the
-1,000-4,999 commit layer. The other 10 frame rows have no file (see "10 frame rows have no
-project file" below). The files hold 32,626,028,860 token rows: 23,692,479,892 in the
-5,000+ layer and 8,933,548,968 in the 1,000-4,999 commit layer. Each size names its stage:
+The dataset has 10,754 project files: 3,545 in the 5,000+ layer and 7,209 in the
+1,000-4,999 commit layer. The other 9 frame rows have no file (see "9 frame rows have no
+project file" below). The final write (2026-10-27) holds 10,753 files with
+32,626,508,161 token rows: 23,692,959,193 in the 5,000+ layer and 8,933,548,968 in the
+1,000-4,999 commit layer. The separate file of `BRL-CAD__brlcad` (see "`BRL-CAD__brlcad`
+ran from its new host" below) adds 8,666,457 rows. Thus the 10,754 release files hold
+32,635,174,618 token rows, 23,701,625,650 of them in the 5,000+ layer. The older count
+32,626,028,860 (5,000+ layer: 23,692,479,892) is the input check of the links run of
+2026-10-24. It is before the 17 path-fix files of the 5,000+ layer, which added 479,301 rows.
+The final error model still uses the older count (0.0015% fewer rows). Each size names its stage:
 
 * **Run output:** 241.3 GB. That is 186.2 GB for the 5,000+ layer (before ZSTD 19) and
   55.09 GB for the 1,000-4,999 commit layer (the input of its merge).
-* **Release files (ZSTD 19):** 162.6 GB. That is 125.83 GB for the 5,000+ layer with the
-  organisation columns and 36.81 GB for the 1,000-4,999 commit layer before its
-  organisation columns.
+* **Release files before the final write (ZSTD 19):** 162.6 GB. That is 125.83 GB for the
+  5,000+ layer with the organisation columns of 2026-10-21 and 36.81 GB for the 1,000-4,999
+  commit layer before its organisation columns.
+* **Release folder of the final write (ZSTD 19, organisation columns and pseudonyms of both
+  layers):** 162,429,007,486 bytes (162.4 GB): the 10,753 Parquet files and 6 metadata files
+  (`aws s3 ls --summarize`, 2026-10-27).
+* **Release folder of `BRL-CAD__brlcad` (ZSTD 19):** 45,737,481 bytes. The Parquet file is
+  45,229,873 bytes. With it, the 10,754 Parquet files are 162,466,431,130 bytes (162.5 GB).
 
 The "Dataset v1" entries above are about the 5,000+ layer. Sources: `STATUS.md` section 0
 of the dataset selection records (the token counts are the input check of the links run of
@@ -404,19 +415,19 @@ libexpat gate Parquet `14eb5d72`, the flags of the fed parts with `--latest`.
 
 Sources: `~/s3-work/dataset-x1k/README.md`; `STATUS.md` sections 0 and 1.
 
-**Both commit layers: 10 frame rows have no project file.** The frame has 10,763 rows and
-the dataset has 10,753 files. The rows below stay in the frame with their reason. Count them
+**Both commit layers: 9 frame rows have no project file.** The frame has 10,763 rows and
+the dataset has 10,754 files. The rows below stay in the frame with their reason. Count them
 in the frame, not in the token tables. The entries "`kitao__pyxel` is pending" and "three
-more frame rows have no Parquet" above give the details of the 4 rows of the 5,000+ layer.
-Their status there is of 2026-10-13 and 2026-10-14. This table gives the status of the
-release.
+more frame rows have no Parquet" above give the details of the rows of the 5,000+ layer.
+Their status there is of 2026-10-13 and 2026-10-14. One of these rows, `BRL-CAD__brlcad`,
+has a file now (see "`BRL-CAD__brlcad` ran from its new host" below). This table gives the
+status of the release.
 
 | project | layer | frame commit | run commit | reason | status |
 | --- | --- | --- | --- | --- | --- |
 | `kitao__pyxel` | 5,000+ | `50f9bd77` | - | The repository is gone: GitHub disabled the owner's account. | no file in the release |
-| `BRL-CAD__brlcad` | 5,000+ | `27ba3c4` | - | The repository is gone: GitHub answers "Repository not found". | no file in the release |
 | `googleapis__discovery-artifact-manager` | 5,000+ | `9b6a724` | `bb221e1` | Not a failure. The project deleted its Java code on 2026-10-07, after the frame measurement: the frame commit has 559 C, C++, Java or Rust files, the run commit has 0. | code removed after the frame measurement (user decision 2026-10-11) |
-| `signalwire__freeswitch` | 5,000+ | `3dee68e` | - | The only pipeline failure of the 10 rows. blobExec stops in step 2 on a commit with no committer. Tool defect, not fixed. | excluded (user decision 2026-10-11) |
+| `signalwire__freeswitch` | 5,000+ | `3dee68e` | - | The only pipeline failure of the 9 rows. blobExec stops in step 2 on a commit with no committer. Tool defect, not fixed. | excluded (user decision 2026-10-11); not fixed in this release (user decision 2026-10-26) |
 | `Librelancer__Librelancer` | 1,000-4,999 | `dcbcf80` | `c113747` | Not a failure. After the frame measurement, the project moved its C and C++ code to git submodules: the frame commit has 44 such files, the run commit has 0. The run commit has 4 files (`.gitmodules`, a README, `.gitignore`, `.editorconfig`). The source is in git submodules, and the pipeline does not follow submodules. History: 122 in-scope paths. 4 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
 | `vllm-project__semantic-router` | 1,000-4,999 | `41c0903` | `c9b65d5` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 244 such files, the run commit has 0. 11,665 files (Go, Python, TypeScript), 0 in scope. History: 253 in-scope paths. 4 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
 | `visgl__loaders.gl` | 1,000-4,999 | `81ad3e5` | `6773abc` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 335 such files, the run commit has 0. 6,822 files (TypeScript, JavaScript), 0 in scope. History: 670 in-scope paths. 4 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
@@ -424,7 +435,7 @@ release.
 | `notnotype__neuro-book` | 1,000-4,999 | `6faecf8` | `532ebb8` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 2 such files, the run commit has 0. 8,976 files (TypeScript, Vue, Markdown), 0 in scope. History: 4 in-scope paths. 11 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
 | `pur1fying__blue_archive_auto_script` | 1,000-4,999 | `8a7ff4c` | `0d57f47` | Not a failure. After the frame measurement, the project deleted its C, C++, Java and Rust code: the frame commit has 46 such files, the run commit has 0. 3,788 files (PNG, Python), 0 in scope. History: 46 in-scope paths. 11 attempts. | code removed after the frame measurement (user decision 2026-10-20) |
 
-Only 1 of the 10 rows is a pipeline failure (`signalwire__freeswitch`). 2 repositories are gone. The other 7
+Only 1 of the 9 rows is a pipeline failure (`signalwire__freeswitch`). 1 repository is gone. The other 7
 rows are not failures: each project had C, C++, Java or Rust files at its frame commit (the commit that the
 selection measured, 2026-09-23 to 2026-10-05), and it deleted them, or moved them to git submodules, before its
 run commit (the newest commit on the run date, 2026-10-10 to 2026-10-20). The file counts come from the GitHub
@@ -438,9 +449,75 @@ and "no tokens processed" at each attempt. A rerun gives the same result. A run 
 frame commit can give tokens, but it breaks the `--latest` rule of the dataset.
 
 Sources: `V1_NOT_IN_DATASET` in `report/build_status_html.py` of the dataset selection
-records (the 4 rows of the 5,000+ layer); `x1k/manifest.x1k.tsv` (frame commits) and
+records (the rows of the 5,000+ layer); `x1k/manifest.x1k.tsv` (frame commits) and
 `~/s3-work/dataset-x1k/README.md` (run commits, file counts, attempts) for the other 6;
 `STATUS.md` section 2 (decision of 2026-10-20).
+
+**5,000+ layer: `BRL-CAD__brlcad` ran from its new host, `git.brlcad.org`.** GitHub hides
+the repository of the project: GitHub answers "Repository not found" since 2026-10-11. The
+project moved its repositories to `https://git.brlcad.org/BRL-CAD/brlcad` (the owners told
+the user on 2026-10-26). The final write of the other 10,753 files had no file for it. A
+separate run made its file after the final write (user decision 2026-10-26).
+
+* **The history is the same.** The frame commit `27ba3c48` is on the new host with the same
+  commit id. Its commit count is 85,051 on both hosts (the forge API on 2026-10-26, and
+  `git rev-list --count` on the run machine). The run machine also checked that the frame
+  commit is an ancestor of the run commit, and that the tree of the frame commit gives the
+  frame measurement again. The select check passed on 2026-10-26 at 23:00 UTC. The clone
+  needed retries, because the forge answered HTTP 503. `select.json` gives: frame commit
+  `27ba3c48` present on the new host, with 85,051 commits (the frame count); the run head
+  `ed0b1e09` on `main` has 85,110 commits, and 85,051 of them are before the frame date; the
+  tree of the frame commit gives the frame measurement again (8,165 blobs, 328,062,026 bytes,
+  3,535 tokenizable files with 47,887,256 bytes, 917,970 vendored bytes, 65,815,855 code
+  bytes); the code-size share is 0.7136 (rule: at least 0.05). Thus the selection facts of the
+  row do not change.
+* **The run.** ctp `ca113e3` and cregit `14b8db4` (the cregit of the path-fix rows), with the
+  flags of the 5,000+ layer. ctp ran for 59 minutes and ended on 2026-10-27 at 00:01 UTC. The
+  file has 8,666,457 token rows. 0 files fell back to plain blame. The run commit is the head
+  of `main` at the first attempt (`--latest`). `ctp-summary.json` gives the run commit
+  `ed0b1e098a8e5bbf32e7baf15573e017eda74626`, resolved on 2026-10-26 at 23:02:59 UTC (2
+  attempts; the pipeline step took 3,441 s), and the Parquet sha256 `83cbc17f41ce`. On
+  2026-10-26 at about 21:30 UTC the head of `main` was `ed0b1e09`, with 85,110 commits
+  (`evidence/ls-remote.20261026.txt` and the forge API). The run commit is not on GitHub.
+* **The `clone_url` column keeps the GitHub URL.** The 29 provenance columns come from the
+  v1 sidecar, as for every other file of the layer. Thus `clone_url` is
+  `https://github.com/BRL-CAD/brlcad.git`, but the run fetched from `git.brlcad.org`. The
+  ledger of the run records the URL that the run used.
+* **Organisation columns and pseudonyms.** The file has the same database (v4.9) and the
+  same salt as the other 10,753 files, so a person has the same pseudonym in all files. The
+  footer of this file names registry B: the registry of the final write plus the identities
+  of this file. The other files name the registry of the final write. Each pseudonym has
+  the same value in both registries. Registry B (`56369303e6e2`) is registry A
+  (`ca284a4e1b9f`) plus the identities of BRL-CAD: 0 collisions, 0 pseudonyms changed.
+* **One mapping hash for all 10,754 files.** The links of the write are the links of the
+  final write (mapping `7b52a5155e6f`). One `build_links.py` run over the caches of all
+  10,754 files gives 0 new domain rows, so the second link set is equal to the first, and
+  there was no choice to make. The project row of BRL-CAD gets its enterprise columns from
+  its own cache. These columns are not in the mapping hash.
+* **The database has no row for `army.mil`.** The audits of the database used the domains
+  of the other 10,753 files, and BRL-CAD was not one of them. Thus a domain that only
+  BRL-CAD authors use has no review. A real domain with no row gives `independent`.
+  `links-merge.txt` gives the BRL-CAD tokens by class: 8 real domains with no row hold
+  17,847 tokens (0.2059% of its 8,666,457 tokens; they get `independent`), 12 domains of the
+  final write table hold 8,648,592 tokens (99.7939%), and 1 value with no real domain holds
+  18 tokens (0.0002%; it gets `unknown`). The database has no new domain row for BRL-CAD, so
+  the link tables with and without BRL-CAD give the same values (0 tokens change).
+* **The write.** The write ended in an alert only because of the row-group defect of the
+  check-out of the final write (DuckDB writes row groups of up to 1,001,472 rows, and the
+  check-out refused more than 1,000,000). The file passed the leak scan. The fixed check-out
+  (`final_tools.py` `83ef5cf204bd` -> `45f36393fc4a`) gives 1 file, 8,666,457 rows, 0 files
+  with problems. The release folder `dataset-brlcad/release/dataset-brlcad-1/` was uploaded
+  on 2026-10-27 at 01:05 UTC. Then the machine powered off.
+* **Detect.** The footer key `pseudonymization_registry_sha256` of this file is not the
+  value of the other files.
+* **Status:** done on 2026-10-27 (run `dataset-brlcad-1`).
+
+Sources: `~/s3-work/dataset-brlcad/README.md` (the kit, the evidence, the design) and
+`fix-20261027/README.md` (the check-out fix);
+`~/Projects/cregit-workspace/agent-runs-20261023/brlcad/evidence/` and `PROGRESS.md` (the
+remote refs and the forge facts of 2026-10-26, no person data); `STATUS.md` section 0 of the
+dataset selection records (entries of 2026-10-27); the status files and the object list of
+S3 `dataset-brlcad/work/dataset-brlcad-1/` and `dataset-brlcad/release/dataset-brlcad-1/`.
 
 **Both commit layers: blame dropped in-scope files with a special path name. cregit
 `14b8db4` fixes this, and 35 projects ran again.** Step 7 (blame) of cregit `57551d7` and
