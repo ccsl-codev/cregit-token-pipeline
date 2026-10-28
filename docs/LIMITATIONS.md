@@ -410,9 +410,9 @@ The final error model still uses the older count (0.0015% fewer rows). Each size
 * **Run output:** 241.3 GB. That is 186.2 GB for the 5,000+ layer (before ZSTD 19) and
   55.09 GB for the 1,000-4,999 commit layer (the input of its merge).
 * **Release files before the final write (ZSTD 19):** 162.6 GB. That is 125.83 GB for the
-  5,000+ layer with the organisation columns of 2026-10-21 and 36.81 GB for the 1,000-4,999
-  commit layer before its organisation columns.
-* **Release folder of the final write (ZSTD 19, organisation columns and pseudonyms of both
+  5,000+ layer with the organization columns of 2026-10-21 and 36.81 GB for the 1,000-4,999
+  commit layer before its organization columns.
+* **Release folder of the final write (ZSTD 19, organization columns and pseudonyms of both
   layers):** 162,429,007,486 bytes (162.4 GB): the 10,753 Parquet files and 6 metadata files
   (`aws s3 ls --summarize`, 2026-10-27).
 * **Release folder of `BRL-CAD__brlcad` (ZSTD 19):** 45,737,481 bytes. The Parquet file is
@@ -511,7 +511,7 @@ separate run made its file after the final write (user decision 2026-10-26).
   v1 sidecar, as for every other file of the layer. Thus `clone_url` is
   `https://github.com/BRL-CAD/brlcad.git`, but the run fetched from `git.brlcad.org`. The
   ledger of the run records the URL that the run used.
-* **Organisation columns and pseudonyms.** The file has the same database (v4.9) and the
+* **Organization columns and pseudonyms.** The file has the same database (v4.9) and the
   same salt as the other 10,753 files, so a person has the same pseudonym in all files. The
   footer of this file names registry B: the registry of the final write plus the identities
   of this file. The other files name the registry of the final write. Each pseudonym has
@@ -783,7 +783,7 @@ empty), **0** lines fail `json.loads`. So this defect lost no row of the release
   git-svn ids: an svn user name that is an address, an at sign, then the repository UUID.
 * For these values, the domain is the first part after an at sign that is a valid domain
   (strict characters, a dot, an ICANN public suffix), else empty. `person_domain` uses the
-  same rule, and the organisation columns use the same domain. Thus the release publishes
+  same rule, and the organization columns use the same domain. Thus the release publishes
   no local part and no UUID. Of the 677 distinct `person_email` values, 668 give a valid
   domain and 9 give an empty domain (user decision 2026-10-25; it replaces the rule "after
   the last at sign" of 2026-10-24).
@@ -794,7 +794,7 @@ Sources: `RELEASE_PLAN.md`, decisions "Pseudonymization", "E-mail values with tw
 signs" and "Commit messages"; `~/Projects/cregit-workspace/agent-runs-20261023/two-at/PROGRESS.md`
 (counts only).
 
-**The 1,000-4,999 commit layer: the organisation columns of the new domains rest on a
+**The 1,000-4,999 commit layer: the organization columns of the new domains rest on a
 review of 99% of their tokens.** The links of both layers exist since 2026-10-24 (label
 v4.6). In this layer, 22,276 new domains (not in the 5,000+ layer) had no row in the
 database and showed `independent`. They hold 9.17% of the tokens of the layer and 2.51% of
@@ -807,7 +807,7 @@ all tokens.
 * The other new domains (0.025% of all tokens) keep `independent` by the default rule: a
   real domain with no row maps to `independent`.
 * **Open:** the user check of the undecided items and of the seeded sample; the links and
-  the organisation columns of this layer from database v4.7.
+  the organization columns of this layer from database v4.7.
 * **Open: the error model of this layer.** The audit of its strata and its error numbers
   follow. Until then, no error number covers this layer.
 
@@ -815,15 +815,15 @@ Sources: `RELEASE_PLAN.md`, decision "Review of the new domains" (2026-10-25);
 `~/Projects/cregit-workspace/companies/review/ai/r10/PROGRESS.md`; `STATUS.md` section 0
 (links of both layers).
 
-**Both commit layers: the organisation database gives the current parent only, with no
-dates of acquisitions.** `parent_company_id` names the owner of an organisation at the time
+**Both commit layers: the organization database gives the current parent only, with no
+dates of acquisitions.** `parent_company_id` names the owner of an organization at the time
 of the database (October 2026), not the owner in the years of the commits. The database has
 no history of owners and no date of a purchase or a sale. Example: Jeppesen has the parent
 Thoma Bravo, which bought it in 2025; from 2000 to 2025 the owner was The Boeing Company,
 and the commits of those years are not marked as Boeing work. An analysis that groups
-organisations by parent therefore uses the ownership of today for all years. A history of
+organizations by parent therefore uses the ownership of today for all years. A history of
 owners with dates is not a goal of this dataset (the user, 2026-10-25). The columns of the
-project files are not affected: they name the organisation of the domain or of the
+project files are not affected: they name the organization of the domain or of the
 account, not its parent.
 
 Sources: the v4.9 audit page (2026-10-25), question on the history of owners;
@@ -841,7 +841,7 @@ code. The published `tdbctl` carries the same artifact on a smaller scale:
 **336,501** of its 574,465 Tencent tokens are the `extra/ncurses-5.7/` drop, which
 is 100% Tencent-attributed. `storage/ndb`, 4.22 M tokens, is 0.00% Tencent.
 
-Any per-organisation or per-author aggregate over a project that vendors its
+Any per-organization or per-author aggregate over a project that vendors its
 dependencies is therefore an upper bound, not a measurement. Restrict such
 aggregates to non-vendored paths. No column in the dataset marks a path as
 vendored, so the consumer must supply that list.
@@ -917,7 +917,7 @@ we omitted entirely. The mover was `44fcc479a574`, "power: supply: hwmon: move
 interface to private header".
 
 * **Consequence, for the 47 projects not yet re-blamed**: every per-author,
-  per-organisation and truck-factor result over them **systematically over-credits
+  per-organization and truck-factor result over them **systematically over-credits
   refactorers, file-movers and header-splitters** and under-credits original authors.
   This is a separate mechanism from the vendoring artefact above, and it moves
   attribution in the same direction.

@@ -239,7 +239,7 @@ Built:
 
 Not built. Each is a gap, not a plan:
 
-- **A corpus-level firm or organisation rollup.** Attribution is per token only.
+- **A corpus-level firm or organization rollup.** Attribution is per token only.
 - **A per-project metadata table / dataset card** — name, category, URL, pinned
   sha, commit count, token rows, file count, languages, run duration, and the
   cregit and tokenizer versions.

@@ -89,8 +89,8 @@ def _make(tmp: Path, name: str, *, rows: int = ROWS, people: int = PEOPLE,
         if replace:
             rep = ", ".join(f"{e} AS {P.q(c)}" for c, e in replace.items())
             base = f"SELECT * REPLACE ({rep}) FROM ({base})"
-        kv = ({"ctp_schema_version": "2", "organisations_version": "test",
-               "organisations_mapping_sha256": "0" * 64} if schema2 else {"x": "1"})
+        kv = ({"ctp_schema_version": "2", "organizations_version": "test",
+               "organizations_mapping_sha256": "0" * 64} if schema2 else {"x": "1"})
         con.execute(f"COPY ({base}) TO {P.sql_str(path)} (FORMAT PARQUET, "
                     f"KV_METADATA {P._kv_sql(kv)})")
     finally:
@@ -129,7 +129,7 @@ def _written(tmp, paths, reg, outname="out", **kw) -> tuple[str, dict]:
 def test_schema_2_is_the_71_column_contract():
     names = [c for c, _ in P.SCHEMA_2]
     assert len(P.SCHEMA_2) == 71 and len(set(names)) == 71
-    assert names[-4:] == [c for c, _ in P.ORGANISATION_TYPES]
+    assert names[-4:] == [c for c, _ in P.ORGANIZATION_TYPES]
     assert not set(names) & set(A.FIRM_COLUMNS)
     assert [c for c in names[:67]] == [c for c, _ in vs.EXPECTED_COLUMNS
                                        if c not in A.FIRM_COLUMNS]
@@ -357,7 +357,7 @@ def test_write_keeps_the_schema_the_footer_and_the_encoding(registry):
         out = os.path.join(outdir, os.path.basename(src))
         assert P.file_schema(con, out) == list(P.SCHEMA_2)
         kv = P.file_kv(con, out)
-        assert kv["ctp_schema_version"] == "2" and kv["organisations_version"] == "test"
+        assert kv["ctp_schema_version"] == "2" and kv["organizations_version"] == "test"
         assert kv[P.FOOTER_VERSION_KEY] == P.SCHEME_VERSION
         assert kv[P.FOOTER_REGISTRY_KEY] == sha
         fmt = con.execute("SELECT format_version FROM parquet_file_metadata(?)", [out]).fetchone()[0]
@@ -499,8 +499,8 @@ def test_a_schema_1_file_is_not_a_release_file(tmp_path):
 
 
 @requires_duckdb
-def test_the_fused_write_takes_the_organisation_select(tmp_path):
-    """A schema 1 file plus an organisation SELECT (as build_v0.py makes it)
+def test_the_fused_write_takes_the_organization_select(tmp_path):
+    """A schema 1 file plus an organization SELECT (as build_v0.py makes it)
     gives a schema 2 file in one COPY."""
     src = _make(tmp_path, "raw.parquet", schema2=False)
     reg = str(tmp_path / "r.parquet")
@@ -511,15 +511,15 @@ def test_the_fused_write_takes_the_organisation_select(tmp_path):
            "lower(trim(t.person_domain)) AS firm_based_on_domain, "
            "CAST(true AS BOOLEAN) AS project_enterprise_driven, "
            "CAST('test' AS VARCHAR) AS project_enterprise_basis FROM read_parquet($src) t")
-    kv = {"ctp_schema_version": "2", "organisations_version": "v-test",
-          "organisations_mapping_sha256": "1" * 64}
+    kv = {"ctp_schema_version": "2", "organizations_version": "v-test",
+          "organizations_mapping_sha256": "1" * 64}
     dst = str(tmp_path / "public.parquet")
     res = P.write_public(con, src, dst, registry=reg, registry_sha256=sha, source_sql=sel,
                          source_params={"src": src, "ns": "independent"}, kv=kv)
     assert res["problems"] == []
     assert P.file_schema(con, dst) == list(P.SCHEMA_2)
     fk = P.file_kv(con, dst)
-    assert fk["organisations_version"] == "v-test" and fk[P.FOOTER_REGISTRY_KEY] == sha
+    assert fk["organizations_version"] == "v-test" and fk[P.FOOTER_REGISTRY_KEY] == sha
     assert "x" not in fk                       # the caller's footer replaces the input's
     scan = P.leak_scan(con, dst, reg)
     assert scan["failures"] == []
@@ -965,19 +965,19 @@ def test_a_summary_with_an_address_and_a_known_name_is_kept(tmp_path):
 
 
 def _orgs_file(tmp: Path, rows: list[tuple[str, str]]) -> str:
-    path = str(tmp / "organisations.parquet")
+    path = str(tmp / "organizations.parquet")
     con = P.connect("1GB", 1)
     vals = ", ".join(f"({P.sql_str(i)}, {P.sql_str(n)})" for i, n in rows)
-    con.execute(f"COPY (SELECT * FROM (VALUES {vals}) t(organisation_id, name)) "
+    con.execute(f"COPY (SELECT * FROM (VALUES {vals}) t(organization_id, name)) "
                 f"TO {P.sql_str(path)} (FORMAT PARQUET)")
     con.close()
     return path
 
 
 @requires_duckdb
-def test_a_name_that_is_a_published_organisation_name_is_masked(tmp_path):
-    """A bot identity 'GitHub' and the organisation GitHub: 'uses github' in a
-    structural column fails only without the organisations table."""
+def test_a_name_that_is_a_published_organization_name_is_masked(tmp_path):
+    """A bot identity 'GitHub' and the organization GitHub: 'uses github' in a
+    structural column fails only without the organizations table."""
     src = _make(tmp_path, "g.parquet", replace={
         "committer_name": "CASE WHEN token_index = 1 THEN 'GitHub' ELSE committer_name END",
         "repo_tag": "CASE WHEN token_index = 2 THEN 'uses github actions' ELSE repo_tag END"})
@@ -985,11 +985,11 @@ def test_a_name_that_is_a_published_organisation_name_is_masked(tmp_path):
     keys = P.derive_keys(SALT)
     sink = io.StringIO()
     with_org = str(tmp_path / "r-org.parquet")
-    P.build_registry([src], keys, with_org, organisations=(orgs,), out=sink)
+    P.build_registry([src], keys, with_org, organizations=(orgs,), out=sink)
     no_org = str(tmp_path / "r-none.parquet")
     P.build_registry([src], keys, no_org, out=sink)
     con = _con(keys)
-    n = con.execute("SELECT count(*) FROM read_parquet(?) WHERE space = 'organisation' AND "
+    n = con.execute("SELECT count(*) FROM read_parquet(?) WHERE space = 'organization' AND "
                     "identity IN ('github', 'red hat', 'red-hat', 'org1')", [with_org]).fetchone()[0]
     assert n == 4                                      # the table, and the file's org column
     assert not any(f.startswith("repo_tag") for f in P.leak_scan(con, src, with_org)["failures"])
@@ -1027,7 +1027,7 @@ def test_no_name_probes_in_vocabulary_numeric_and_domain_columns(tmp_path):
         "firm_based_on_domain": f"CASE WHEN token_index = 5 THEN {name} "
                                 "ELSE firm_based_on_domain END",
         "language": f"CASE WHEN token_index = 6 THEN 'x p160{AT}corp10.example' ELSE language END",
-        # (firm_based_on_domain values are published organisation names, so the
+        # (firm_based_on_domain values are published organization names, so the
         # free-text column gets another text.)
         "repo_tag": "CASE WHEN token_index = 7 THEN 'thanks P150 Person' ELSE repo_tag END"})
     reg = str(tmp_path / "r.parquet")
@@ -1055,10 +1055,10 @@ def test_the_no_name_probe_columns_are_release_columns():
         assert c not in P.NO_NAME_PROBE_COLUMNS
 
 
-def test_organisation_spans_and_pseudonym_mask():
+def test_organization_spans_and_pseudonym_mask():
     assert P.org_spans("x red hat y", frozenset()) == []
     assert P.org_spans("x Red Hat y", frozenset({"red hat"})) == [(2, 9)]
-    assert P.mask_organisations("bump github now", frozenset({"github"})) == \
+    assert P.mask_organizations("bump github now", frozenset({"github"})) == \
         f"bump {P.ORG_MASK} now"
     tok = "0123456789abcd"
     for form in (f"Author {tok}", f"author {tok}", f"author_{tok}"):
@@ -1226,7 +1226,7 @@ def test_the_registry_does_not_depend_on_the_batch_size(files):
 
 
 @requires_duckdb
-def test_the_cli_takes_the_organisations_table(tmp_path, capsys):
+def test_the_cli_takes_the_organizations_table(tmp_path, capsys):
     src = _make(tmp_path, "g.parquet", replace={
         "committer_name": "CASE WHEN token_index = 1 THEN 'GitHub' ELSE committer_name END",
         "commit_summary": "CASE WHEN token_index = 2 THEN 'ci: bump github actions' "
@@ -1234,7 +1234,7 @@ def test_the_cli_takes_the_organisations_table(tmp_path, capsys):
     orgs = _orgs_file(tmp_path, [("github", "GitHub")])
     salt = _salt_file(tmp_path)
     rc = P.main(["run", "--salt-file", salt, "--registry", str(tmp_path / "p" / "r.parquet"),
-                 "--organisations", orgs, "--outdir", str(tmp_path / "pub"), src])
+                 "--organizations", orgs, "--outdir", str(tmp_path / "pub"), src])
     assert rc == 0
     con = _con()
     got = con.execute("SELECT commit_summary FROM read_parquet(?) WHERE token_index = 2",
@@ -1242,6 +1242,120 @@ def test_the_cli_takes_the_organisations_table(tmp_path, capsys):
     assert got == "ci: bump github actions"
     con.close()
     capsys.readouterr()
+
+
+# --------------------------------------------------------------------------
+# Read fallbacks for the files of release 1 (British spelling, renamed on
+# 2026-10-28): a read accepts the old names, a write writes only the new ones.
+# --------------------------------------------------------------------------
+
+def test_old_footer_keys_are_read_under_the_new_names():
+    old = {"ctp_schema_version": "2", "organisations_version": "v4.9",
+           "organisations_mapping_sha256": "a" * 64, "x": "1"}
+    got = P.new_footer_names(old)
+    assert got == {"ctp_schema_version": "2", "organizations_version": "v4.9",
+                   "organizations_mapping_sha256": "a" * 64, "x": "1"}
+    assert P.new_footer_names(got) == got
+    both = dict(got, organisations_version="v4.9")
+    assert P.new_footer_names(both) == got
+    with pytest.raises(P.WriteError):
+        P.new_footer_names(dict(got, organisations_version="v4.8"))
+
+
+@requires_duckdb
+def test_the_write_gives_old_footer_keys_the_new_names(tmp_path):
+    src = _make(tmp_path, "raw.parquet", schema2=False)
+    reg = str(tmp_path / "r.parquet")
+    P.build_registry([src], P.derive_keys(SALT), reg, out=io.StringIO())
+    con = _con()
+    sha = P.registry_meta(con, reg)["registry_sha256"]
+    sel = ("SELECT t.*, CAST('independent' AS VARCHAR) AS firm_based_on_namespace, "
+           "lower(trim(t.person_domain)) AS firm_based_on_domain, "
+           "CAST(true AS BOOLEAN) AS project_enterprise_driven, "
+           "CAST('test' AS VARCHAR) AS project_enterprise_basis FROM read_parquet($src) t")
+    kv = {"ctp_schema_version": "2", "organisations_version": "v-old",
+          "organisations_mapping_sha256": "2" * 64}
+    dst = str(tmp_path / "public.parquet")
+    res = P.write_public(con, src, dst, registry=reg, registry_sha256=sha, source_sql=sel,
+                         source_params={"src": src}, kv=kv)
+    assert res["problems"] == []
+    fk = P.file_kv(con, dst)
+    assert fk["organizations_version"] == "v-old"
+    assert fk["organizations_mapping_sha256"] == "2" * 64
+    assert not any(k.startswith("organisations") for k in fk)
+    con.close()
+
+
+@requires_duckdb
+def test_an_organizations_table_of_release_1_is_read(tmp_path):
+    """A table with the old column organisation_id gives the same registry
+    rows as a table with organization_id."""
+    src = _make(tmp_path, "g.parquet")
+    path = str(tmp_path / "organisations.parquet")
+    con = P.connect("1GB", 1)
+    con.execute("COPY (SELECT * FROM (VALUES ('red-hat', 'Red Hat')) t(organisation_id, name)) "
+                f"TO {P.sql_str(path)} (FORMAT PARQUET)")
+    con.close()
+    reg = str(tmp_path / "r.parquet")
+    P.build_registry([src], P.derive_keys(SALT), reg, organizations=(path,), out=io.StringIO())
+    con = _con()
+    got = {r[0] for r in con.execute("SELECT identity FROM read_parquet(?) WHERE space = "
+                                     "'organization'", [reg]).fetchall()}
+    assert {"red hat", "red-hat"} <= got
+    con.close()
+    bad = str(tmp_path / "bad.parquet")
+    con = P.connect("1GB", 1)
+    con.execute(f"COPY (SELECT 'x' AS id, 'X' AS name) TO {P.sql_str(bad)} (FORMAT PARQUET)")
+    con.close()
+    with pytest.raises(P.RegistryError):
+        P.build_registry([src], P.derive_keys(SALT), str(tmp_path / "r2.parquet"),
+                         organizations=(bad,), out=io.StringIO())
+
+
+@requires_duckdb
+def test_a_registry_of_release_1_masks_its_organization_names(tmp_path):
+    """The leak scan reads the old space label 'organisation' too."""
+    reg = str(tmp_path / "old-registry.parquet")
+    con = P.connect("1GB", 1)
+    con.execute("COPY (SELECT * FROM (VALUES ('organisation', 'red hat'), "
+                "('organization', 'acme corp'), ('domain', 'x.example')) t(space, identity)) "
+                f"TO {P.sql_str(reg)} (FORMAT PARQUET)")
+    assert P._orgs(con, reg) == frozenset({"red hat", "acme corp"})
+    con.close()
+
+
+def test_the_cli_takes_the_old_option_spelling(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(P, "gather_inputs", lambda inputs, inputs_from: [])
+    real = P.argparse.ArgumentParser.parse_args
+
+    def spy(self, *args, **kw):
+        a = real(self, *args, **kw)
+        seen["organizations"] = a.organizations
+        return a
+
+    monkeypatch.setattr(P.argparse.ArgumentParser, "parse_args", spy)
+    for cmd in ("registry", "run"):
+        argv = [cmd, "--salt-file", "s", "--registry", "r", "--organisations", "old.parquet",
+                "--organizations", "new.parquet"]
+        if cmd == "run":
+            argv += ["--outdir", "o"]
+        assert P.main(argv + ["in.parquet"]) == 2          # no input files: stop early
+        assert seen["organizations"] == ["old.parquet", "new.parquet"]
+
+
+def test_a_release_1_root_marks_a_published_place(tmp_path):
+    release = tmp_path / "release-1"
+    (release / "parquet").mkdir(parents=True)
+    (release / "organisations").mkdir()
+    with pytest.raises(P.RegistryError):
+        P.check_registry_path(str(release / "r.parquet"))
+    new = tmp_path / "release-2"
+    (new / "parquet").mkdir(parents=True)
+    (new / "organizations").mkdir()
+    with pytest.raises(P.RegistryError):
+        P.check_registry_path(str(new / "r.parquet"))
+    P.check_registry_path(str(tmp_path / "private" / "r.parquet"))
 
 
 def test_synthetic_summaries_can_name_people():
@@ -1311,7 +1425,7 @@ def test_a_name_equal_to_a_word_of_a_mask_text_is_no_hit():
             ("domain", f"author {tok} <author_{tok}{AT}corp-domain.example>", {"corp-domain.example"}),
             ("pseudonym", f"author_{tok}{AT}pseudonym.example", {"pseudonym.example"}),
             ("preserved", f"author_{tok}{AT}preserved.example", {"preserved.example"}),
-            ("organisation", "see the red hat team", set())):
+            ("organization", "see the red hat team", set())):
         assert not P.name_hit(value, name, frozenset(doms), frozenset({"red hat"})), name
     # The mask text keeps the word boundaries: a name next to a mask is found,
     # and a name of two words across a mask is not.

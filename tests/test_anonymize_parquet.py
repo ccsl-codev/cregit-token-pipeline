@@ -687,16 +687,16 @@ def test_fifteen_footer_columns():
 
 
 # --------------------------------------------------------------------------
-# ctp schema 2 (dataset v0, the user's rules of 2026-10-19): the 4 organisation
+# ctp schema 2 (dataset v0, the user's rules of 2026-10-19): the 4 organization
 # columns pass unchanged; firm_raw, firm and firm_source are dropped.
 # --------------------------------------------------------------------------
 
-SCHEMA2 = [c for c in CONTRACT if c not in A.FIRM_COLUMNS] + list(A.ORGANISATION_COLUMNS)
+SCHEMA2 = [c for c in CONTRACT if c not in A.FIRM_COLUMNS] + list(A.ORGANIZATION_COLUMNS)
 
 
-def test_schema2_organisation_columns_pass_and_firm_columns_are_dropped():
+def test_schema2_organization_columns_pass_and_firm_columns_are_dropped():
     plan = A.classify(SCHEMA2 + list(A.FIRM_COLUMNS))
-    for c in A.ORGANISATION_COLUMNS:
+    for c in A.ORGANIZATION_COLUMNS:
         assert plan.rule_of(c) == "pass"
     for c in A.FIRM_COLUMNS:
         assert plan.rule_of(c) == "drop"
@@ -721,4 +721,4 @@ def test_schema2_needs_the_domain_column_not_firm():
 def test_schema1_keeps_the_old_rules():
     plan = A.classify(CONTRACT)
     assert all(plan.rule_of(c) == "pass" for c in A.FIRM_COLUMNS)
-    assert not set(A.ORGANISATION_COLUMNS) & set(plan.column_order)
+    assert not set(A.ORGANIZATION_COLUMNS) & set(plan.column_order)

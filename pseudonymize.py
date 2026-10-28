@@ -60,9 +60,9 @@ WHAT CHANGED, AND WHY
        rule: the whole name between word boundaries, after the published
        domains are masked.
    The probe limits are the old ones (local part 4 characters or more, name 5
-   characters or more). The published organisation names (registry space
-   'organisation': the values of the organisation columns, and the names and
-   ids of --organisations tables) are masked as the domains are. Thus a bot
+   characters or more). The published organization names (registry space
+   'organization': the values of the organization columns, and the names and
+   ids of --organizations tables) are masked as the domains are. Thus a bot
    identity 'GitHub' does not make 'bump github actions' a leak.
 
 4. Reports without identities.
@@ -78,8 +78,8 @@ WHAT CHANGED, AND WHY
    the pseudonymized file in one COPY, with the v1 encoding (ZSTD 19,
    ROW_GROUP_SIZE 1000000, PARQUET_VERSION V2). It keeps the footer metadata
    and adds pseudonymization_version and pseudonymization_registry_sha256.
-   build_v0.py can give its organisation SELECT as the source relation, so the
-   organisation columns and the pseudonyms come from one read and one ZSTD 19
+   build_v0.py can give its organization SELECT as the source relation, so the
+   organization columns and the pseudonyms come from one read and one ZSTD 19
    encode. See write_public() for the call.
 
 7. The decided column rules of docs/ANON-OPEN-QUESTIONS.md and of the release
@@ -157,26 +157,34 @@ AT = chr(64)
 SCHEME_VERSION = "2"
 FOOTER_VERSION_KEY = "pseudonymization_version"
 FOOTER_REGISTRY_KEY = "pseudonymization_registry_sha256"
-ORG_FOOTER_KEYS = ("ctp_schema_version", "organisations_version",
-                   "organisations_mapping_sha256")
+ORG_FOOTER_KEYS = ("ctp_schema_version", "organizations_version",
+                   "organizations_mapping_sha256")
+# The footer keys of release 1 (the British spelling, renamed on 2026-10-28).
+# A read accepts them and gives them the new name; a write writes only the new
+# name (new_footer_names()).
+OLD_FOOTER_KEYS = {"organisations_version": "organizations_version",
+                   "organisations_mapping_sha256": "organizations_mapping_sha256"}
 ENCODING = ("FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 19, "
             "ROW_GROUP_SIZE 1000000, PARQUET_VERSION V2")
-ORGANISATION_TYPES = (("firm_based_on_namespace", "VARCHAR"),
+ORGANIZATION_TYPES = (("firm_based_on_namespace", "VARCHAR"),
                       ("firm_based_on_domain", "VARCHAR"),
                       ("project_enterprise_driven", "BOOLEAN"),
                       ("project_enterprise_basis", "VARCHAR"))
-# The release contract: the 67 kept cregit columns, then the 4 organisation
+# The release contract: the 67 kept cregit columns, then the 4 organization
 # columns. It is equal to SCHEMA_2 of release-staging/tools/fill_release.py.
 SCHEMA_2 = tuple((c, t) for c, t in vs.EXPECTED_COLUMNS
-                 if c not in A.FIRM_COLUMNS) + ORGANISATION_TYPES
+                 if c not in A.FIRM_COLUMNS) + ORGANIZATION_TYPES
 
 SPACE_EMAIL, SPACE_NAME, SPACE_FOOTER, SPACE_DOMAIN = (
     "email", "name", "footer", "domain")
-# Published organisation names and ids. They are not identities. The name
+# Published organization names and ids. They are not identities. The name
 # replacement and the leak scan mask them, as they mask the domains.
-SPACE_ORGANISATION = "organisation"
-ALL_SPACES = (SPACE_EMAIL, SPACE_NAME, SPACE_FOOTER, SPACE_DOMAIN, SPACE_ORGANISATION)
-ORG_MASK = "<PRESERVED-ORGANISATION>"
+SPACE_ORGANIZATION = "organization"
+# The label of this space in a registry of release 1. A read of a registry
+# file accepts both labels; a new registry has only the new label.
+OLD_SPACE_ORGANIZATION = "organisation"
+ALL_SPACES = (SPACE_EMAIL, SPACE_NAME, SPACE_FOOTER, SPACE_DOMAIN, SPACE_ORGANIZATION)
+ORG_MASK = "<PRESERVED-ORGANIZATION>"
 SALT_CHECK_VALUE = "ctp-anon-salt-check"
 REGISTRY_COLUMNS = ("space", "identity", "token", "pseudonym", "shape",
                     "anchor", "local")
@@ -189,7 +197,10 @@ DEFAULT_DOMAIN_AT = "first-valid"
 EMAIL_DOMAIN_MODES = ("first-valid", "second-part", "after-last-at")
 DEFAULT_EMAIL_DOMAIN = "first-valid"
 # Files and folders that mark the root of a release (release plan, layout).
-RELEASE_MARKERS = ("organisations", "MANIFEST.tsv", "SHA256SUMS")
+# 'organisations' is the folder name of a release 1 root.
+RELEASE_MARKERS = ("organizations", "organisations", "MANIFEST.tsv", "SHA256SUMS")
+# The id column of the organizations table, then its name in release 1.
+ORG_ID_COLUMNS = ("organization_id", "organisation_id")
 # person_domain values with an at sign (measured on dataset v1: 199 distinct
 # values in 176 files, 70 of them address-shaped in 89 files). 'keep' writes
 # them as they are, and the structural gate then fails those files.
@@ -390,7 +401,7 @@ def connect(memory_limit: str = "4GB", threads: int = 2,
 # Rule E: the first part after an at sign that is a valid domain
 # --------------------------------------------------------------------------
 
-# STRICT_DOMAIN of build_companies.py (the domain key of the organisation step).
+# STRICT_DOMAIN of build_companies.py (the domain key of the organization step).
 STRICT_DOMAIN = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*"
 PSL_GLOB = "/nix/store/*-publicsuffix-list-*/share/publicsuffix/public_suffix_list.dat"
 DEFAULT_PSL_PATH: str | None = None          # a fixed file (tests, callers)
@@ -656,18 +667,30 @@ def check_registry_path(registry: str, forbidden: tuple[str, ...] = ()) -> None:
                                 "private storage")
 
 
+def org_id_column(con, path: str) -> str:
+    """The id column of an organizations table: organization_id, or
+    organisation_id in a table of release 1."""
+    names = [r[0] for r in con.execute(
+        f"DESCRIBE SELECT * FROM read_parquet({sql_str(path)})").fetchall()]
+    for c in ORG_ID_COLUMNS:
+        if c in names:
+            return q(c)
+    raise RegistryError(f"{path}: the organizations table has no column "
+                        f"{' or '.join(ORG_ID_COLUMNS)}")
+
+
 def build_registry(paths: list[str], keys: tuple[str, str], registry_out: str, *,
                    memory_limit: str = "8GB", threads: int = 4,
                    temp_dir: str | None = None, drop_footers: bool = False,
                    forbidden_roots: tuple[str, ...] = (),
-                   organisations: tuple[str, ...] = (), batch_files: int = 100,
+                   organizations: tuple[str, ...] = (), batch_files: int = 100,
                    email_domain: str = DEFAULT_EMAIL_DOMAIN, psl: str | None = None,
                    out=sys.stdout) -> dict:
     """Read all inputs once and write the one registry table.
 
-    organisations: Parquet files with the columns organisation_id and name
-    (the published organisations table). Their names and ids, and the values
-    of the organisation columns of the inputs, become the 'organisation' rows.
+    organizations: Parquet files with the columns organization_id and name
+    (the published organizations table). Their names and ids, and the values
+    of the organization columns of the inputs, become the 'organization' rows.
     email_domain and psl: the domain rule of the trailer pseudonyms. The
     registry footer records both, and the write refuses another rule.
 
@@ -706,7 +729,7 @@ def build_registry(paths: list[str], keys: tuple[str, str], registry_out: str, *
                     con.execute(f"INSERT INTO anon_raw SELECT DISTINCT '{SPACE_DOMAIN}', {expr} "
                                 f"FROM {rel} WHERE person_domain IS NOT NULL")
             for c in sorted(cols_here & set(org_names)):
-                con.execute(f"INSERT INTO anon_raw SELECT DISTINCT '{SPACE_ORGANISATION}', "
+                con.execute(f"INSERT INTO anon_raw SELECT DISTINCT '{SPACE_ORGANIZATION}', "
                             f"lower(trim({q(c)})) FROM {rel} WHERE {q(c)} IS NOT NULL")
         con.execute("CREATE OR REPLACE TEMP TABLE anon_raw AS SELECT DISTINCT space, v FROM anon_raw")
         # Footer elements: the parsed name and address enter the two spaces.
@@ -731,10 +754,11 @@ def build_registry(paths: list[str], keys: tuple[str, str], registry_out: str, *
         con.execute(f"INSERT INTO anon_raw SELECT DISTINCT '{SPACE_DOMAIN}', d FROM (SELECT "
                     f"unnest(string_split(v, '{AT}')[2:]) AS d FROM anon_raw "
                     f"WHERE space = '{SPACE_EMAIL}' AND strpos(v, '{AT}') > 0)")
-        for f in organisations:
-            for expr in ("lower(trim(name))", "lower(trim(organisation_id))",
-                         "lower(trim(replace(organisation_id, '-', ' ')))"):
-                con.execute(f"INSERT INTO anon_raw SELECT DISTINCT '{SPACE_ORGANISATION}', "
+        for f in organizations:
+            id_col = org_id_column(con, f)
+            for expr in ("lower(trim(name))", f"lower(trim({id_col}))",
+                         f"lower(trim(replace({id_col}, '-', ' ')))"):
+                con.execute(f"INSERT INTO anon_raw SELECT DISTINCT '{SPACE_ORGANIZATION}', "
                             f"{expr} FROM read_parquet({sql_str(f)}) WHERE {expr} IS NOT NULL")
         con.execute(_REGISTRY_SQL)
         _add_anchors(con)
@@ -805,8 +829,8 @@ SELECT '{SPACE_DOMAIN}', v, NULL, NULL, NULL, NULL, NULL
 FROM (SELECT DISTINCT v FROM anon_raw WHERE space = '{SPACE_DOMAIN}' AND v <> ''
       AND strpos(v, '{AT}') = 0)
 UNION ALL
-SELECT '{SPACE_ORGANISATION}', v, NULL, NULL, NULL, NULL, NULL
-FROM (SELECT DISTINCT v FROM anon_raw WHERE space = '{SPACE_ORGANISATION}' AND v <> '')
+SELECT '{SPACE_ORGANIZATION}', v, NULL, NULL, NULL, NULL, NULL
+FROM (SELECT DISTINCT v FROM anon_raw WHERE space = '{SPACE_ORGANIZATION}' AND v <> '')
 """
 
 
@@ -914,6 +938,21 @@ def order_hash(con, path: str, exprs: list[str]) -> tuple[int, int]:
         f"FROM read_parquet({sql_str(path)}, file_row_number = true)").fetchone()
 
 
+def new_footer_names(kv: dict[str, str]) -> dict[str, str]:
+    """The footer metadata `kv` with each key of OLD_FOOTER_KEYS (release 1)
+    under its new name. If both names are present, the new one stays and the
+    old one goes; the two values must then be equal."""
+    out = dict(kv)
+    for old, new in OLD_FOOTER_KEYS.items():
+        if old not in out:
+            continue
+        value = out.pop(old)
+        if new in out and out[new] != value:
+            raise WriteError(f"footer keys {old} and {new} have different values")
+        out.setdefault(new, value)
+    return out
+
+
 def file_kv(con, path: str) -> dict[str, str]:
     return dict(con.execute("SELECT decode(key), decode(value) FROM parquet_kv_metadata(?)",
                             [path]).fetchall())
@@ -929,7 +968,7 @@ def write_public(con, src: str, dst: str, *, registry: str, registry_sha256: str
 
     con: a DuckDB connection with install() done (the keys are set).
     source_sql: the relation to read, in the row order of `src`. Default:
-        read_parquet(src). The organisation write gives its own SELECT here,
+        read_parquet(src). The organization write gives its own SELECT here,
         for example build_v0.py:
 
             psl = P.load_psl(psl_path)               # the list of the registry
@@ -942,7 +981,7 @@ def write_public(con, src: str, dst: str, *, registry: str, registry_sha256: str
 
         build_v0.py must take its domain key from person_domain_expr() (it
         was lower(trim(coalesce(person_domain, '')))), so that
-        firm_based_on_domain is the organisation of the published
+        firm_based_on_domain is the organization of the published
         person_domain. The identity columns must come unchanged from `src`.
     kv: the footer metadata. Default: the footer metadata of `src`.
     source_schema: the (column, type) list of source_sql. Give it when a
@@ -965,7 +1004,7 @@ def write_public(con, src: str, dst: str, *, registry: str, registry_sha256: str
     missing_identity = [c for c in identity_columns(plan) if c not in src_cols]
     if missing_identity:
         raise WriteError(f"identity columns not in the input file: {missing_identity}")
-    base_kv = file_kv(con, src) if kv is None else dict(kv)
+    base_kv = new_footer_names(file_kv(con, src) if kv is None else dict(kv))
     if FOOTER_VERSION_KEY in base_kv or FOOTER_VERSION_KEY in file_kv(con, src):
         raise WriteError("the input is already pseudonymized")
     agree = registry_agreement(con, src, plan, registry)
@@ -1042,12 +1081,13 @@ def _domains(con, registry: str) -> frozenset[str]:
 
 
 def _orgs(con, registry: str) -> frozenset[str]:
-    """The published organisation names, as word sequences (words joined by
+    """The published organization names, as word sequences (words joined by
     one space)."""
     key = _file_key(registry)
     if key not in _ORGS_CACHE:
-        rows = con.execute(f"SELECT identity FROM read_parquet(?) WHERE space = "
-                           f"'{SPACE_ORGANISATION}'", [registry]).fetchall()
+        rows = con.execute(f"SELECT identity FROM read_parquet(?) WHERE space IN "
+                           f"('{SPACE_ORGANIZATION}', '{OLD_SPACE_ORGANIZATION}')",
+                           [registry]).fetchall()
         _ORGS_CACHE[key] = frozenset(w for w in (" ".join(_WORD.findall(r[0])) for r in rows) if w)
     return _ORGS_CACHE[key]
 
@@ -1091,7 +1131,7 @@ _WORD = re.compile(r"\w+")
 
 
 def org_spans(text: str, orgs: frozenset[str]) -> list[tuple[int, int]]:
-    """Spans of published organisation names in `text`: whole word sequences,
+    """Spans of published organization names in `text`: whole word sequences,
     the longest first, compared in lower case."""
     if not orgs:
         return []
@@ -1109,7 +1149,7 @@ def org_spans(text: str, orgs: frozenset[str]) -> list[tuple[int, int]]:
     return spans
 
 
-def mask_organisations(value: str, orgs: frozenset[str]) -> str:
+def mask_organizations(value: str, orgs: frozenset[str]) -> str:
     for a, b in reversed(org_spans(value, orgs)):
         value = value[:a] + ORG_MASK + value[b:]
     return value
@@ -1126,7 +1166,7 @@ def mask_pseudonyms(value: str) -> str:
     return PSEUDONYM_RE.sub(PSEUDONYM_MASK, value)
 
 
-# The three mask texts hold words: pseudonym, preserved, domain, organisation.
+# The three mask texts hold words: pseudonym, preserved, domain, organization.
 # The registry can hold a name that is one of these words (the registry of both
 # commit layers holds the names 'domain' and 'pseudonym'). Then the probe found
 # the name in the mask text itself, for example in a published domain with the
@@ -1141,9 +1181,9 @@ MASK_GAP = "\x00"
 def name_hit(value: str, name: str, domains: frozenset[str],
              orgs: frozenset[str] = frozenset()) -> bool:
     """The old rule: the whole name between word boundaries, after the
-    pseudonyms, the published domains and organisation names are masked. The
+    pseudonyms, the published domains and organization names are masked. The
     mask texts do not count as text (MASK_TEXTS)."""
-    masked = mask_organisations(mask_domains(mask_pseudonyms(value), domains), orgs)
+    masked = mask_organizations(mask_domains(mask_pseudonyms(value), domains), orgs)
     for m in MASK_TEXTS:
         masked = masked.replace(m, MASK_GAP)
     return re.search(rf"\b{re.escape(name)}\b", masked, re.I) is not None
@@ -1186,7 +1226,7 @@ VOCABULARY_COLUMNS = frozenset({
     "provenance_status", "source", "stratum", "contested", "roster_lang", "language",
     "size_class", "license", "owner_type", "archived", "fork", "history_relation",
     "manifest_category", "file_mask", "token_type",
-    # schema 2: the organisation ids and the basis come from the organisations table
+    # schema 2: the organization ids and the basis come from the organizations table
     "firm_based_on_namespace", "firm_based_on_domain", "project_enterprise_basis",
 })
 # Numbers, dates and commit hashes, stored as strings.
@@ -1560,8 +1600,8 @@ def synthetic_select(rows: int, *, people: int = 2000, commits: int = 20000,
 def make_synthetic(con, path: str, rows: int, *, schema2: bool = True,
                    kv: dict[str, str] | None = None, **kw) -> None:
     if kv is None:
-        kv = ({"ctp_schema_version": "2", "organisations_version": "test",
-               "organisations_mapping_sha256": "0" * 64} if schema2 else {})
+        kv = ({"ctp_schema_version": "2", "organizations_version": "test",
+               "organizations_mapping_sha256": "0" * 64} if schema2 else {})
     opts = f", KV_METADATA {_kv_sql(kv)}" if kv else ""
     con.execute(f"COPY ({synthetic_select(rows, schema2=schema2, **kw)}) TO {sql_str(path)} "
                 f"(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 1000000{opts})")
@@ -1648,8 +1688,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--registry", required=True, help="private path of the registry table (mode 0600); refused under --outdir, a --release-root or a folder with a release layout")
     r.add_argument("--release-root", action="append", default=[],
                    help="a release folder; the registry must not be under it")
-    r.add_argument("--organisations", action="append", default=[],
-                   help="the published organisations table (Parquet: organisation_id, name)")
+    r.add_argument("--organizations", "--organisations", dest="organizations",
+                   action="append", default=[],
+                   help="the published organizations table (Parquet: organization_id, name); "
+                        "--organisations is the old spelling")
     r.add_argument("--drop-footers", action="store_true")
     r.add_argument("--report", default=None)
     _add_domain_opts(r)
@@ -1662,8 +1704,10 @@ def main(argv: list[str] | None = None) -> int:
         w.add_argument("--registry", required=True, help="private path of the registry table (mode 0600); refused under --outdir, a --release-root or a folder with a release layout")
         w.add_argument("--release-root", action="append", default=[],
                        help="a release folder; the registry must not be under it")
-        w.add_argument("--organisations", action="append", default=[],
-                       help="(run) the published organisations table (Parquet)")
+        w.add_argument("--organizations", "--organisations", dest="organizations",
+                       action="append", default=[],
+                       help="(run) the published organizations table (Parquet); "
+                            "--organisations is the old spelling")
         w.add_argument("--outdir", required=True)
         w.add_argument("--commit-summary", choices=SUMMARY_MODES,
                        default=DEFAULT_SUMMARY_MODE,
@@ -1711,7 +1755,7 @@ def main(argv: list[str] | None = None) -> int:
                 paths, keys, a.registry, memory_limit=a.memory_limit, threads=a.threads,
                 temp_dir=a.temp_dir, drop_footers=a.drop_footers,
                 forbidden_roots=tuple(a.release_root) + ((a.outdir,) if a.cmd == "run" else ()),
-                organisations=tuple(a.organisations),
+                organizations=tuple(a.organizations),
                 email_domain=a.email_domain or DEFAULT_EMAIL_DOMAIN, psl=a.psl)
             report["failures"] = []
         if a.cmd in ("write", "run"):

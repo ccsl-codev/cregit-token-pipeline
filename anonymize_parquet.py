@@ -188,17 +188,17 @@ PROVENANCE_COLUMNS: tuple[str, ...] = (
 FIRM_COLUMNS: tuple[str, ...] = ("firm_raw", "firm", "firm_source")
 
 # ctp schema 2 (S8 of the dataset study, the user, 2026-10-19). Dataset v0 replaces the 3 firm
-# columns of the old gitdm map with 4 organisation columns: ids of the organisation reference
-# tables and the two enterprise columns. They are organisation data, not person data, so they
+# columns of the old gitdm map with 4 organization columns: ids of the organization reference
+# tables and the two enterprise columns. They are organization data, not person data, so they
 # pass unchanged. In a schema 2 input the 3 firm columns are dropped: they must not reach
-# v1-public. An input with no organisation column is schema 1 (the 70-column contract) and keeps
+# v1-public. An input with no organization column is schema 1 (the 70-column contract) and keeps
 # the old rules; since 2026-10-19 v1-public is made from schema 2 input only.
-ORGANISATION_COLUMNS: tuple[str, ...] = (
+ORGANIZATION_COLUMNS: tuple[str, ...] = (
     "firm_based_on_namespace", "firm_based_on_domain",
     "project_enterprise_driven", "project_enterprise_basis",
 )
 # The invariance proof groups by this column in a schema 2 file, by `firm` in a schema 1 file.
-ORGANISATION_GROUP_KEY = "firm_based_on_domain"
+ORGANIZATION_GROUP_KEY = "firm_based_on_domain"
 
 # Everything else that is copied verbatim: the token stream, shas, dates, paths,
 # and person_domain -- the company signal, which is why it is kept.
@@ -333,19 +333,19 @@ def classify(columns: list[str], drop_footers: bool = False) -> Plan:
     dropped: list[str] = []
     unknown: list[str] = []
 
-    org_present = [c for c in ORGANISATION_COLUMNS if c in columns]
+    org_present = [c for c in ORGANIZATION_COLUMNS if c in columns]
     schema2 = bool(org_present)
-    if schema2 and len(org_present) != len(ORGANISATION_COLUMNS):
+    if schema2 and len(org_present) != len(ORGANIZATION_COLUMNS):
         raise MissingColumnError(
-            "input has only some of the organisation columns (ctp schema 2): "
-            + ", ".join(c for c in ORGANISATION_COLUMNS if c not in columns)
+            "input has only some of the organization columns (ctp schema 2): "
+            + ", ".join(c for c in ORGANIZATION_COLUMNS if c not in columns)
             + " missing. Refusing to guess.")
 
     for c in columns:
         if schema2 and c in FIRM_COLUMNS:
             dropped.append(c)          # the old firm map leaves v1-public (schema 2)
-        elif schema2 and c in ORGANISATION_COLUMNS:
-            passthrough.append(c)      # organisation data, not person data
+        elif schema2 and c in ORGANIZATION_COLUMNS:
+            passthrough.append(c)      # organization data, not person data
         elif c in PASSTHROUGH_COLUMNS:
             passthrough.append(c)
         elif c in SCALAR_TRANSFORMS:
@@ -360,7 +360,7 @@ def classify(columns: list[str], drop_footers: bool = False) -> Plan:
         else:
             unknown.append(c)
 
-    required = [ORGANISATION_GROUP_KEY if (schema2 and c == "firm") else c for c in REQUIRED_COLUMNS]
+    required = [ORGANIZATION_GROUP_KEY if (schema2 and c == "firm") else c for c in REQUIRED_COLUMNS]
     missing = [c for c in required if c not in columns]
     if missing and not unknown:
         raise MissingColumnError(
@@ -1024,7 +1024,7 @@ def aggregate_profile(con, path: str) -> dict:
     prof = {}
     names = set(read_columns(con, path))
     # A schema 2 file has no firm column: its firm group is firm_based_on_domain.
-    prof["firm_column"] = ORGANISATION_GROUP_KEY if ORGANISATION_GROUP_KEY in names else "firm"
+    prof["firm_column"] = ORGANIZATION_GROUP_KEY if ORGANIZATION_GROUP_KEY in names else "firm"
     for key in GROUP_KEYS:
         col = prof["firm_column"] if key == "firm" else key
         rows = con.execute(
@@ -1314,7 +1314,7 @@ def run(outdir: str, paths: list[str], drop_footers: bool = False,
                   f"{' -- LOST ' + str(fe_lost) if fe_lost else ''}", file=out)
         print(f"  pass-through audit: structural columns clean="
               f"{not audit['email_shape'] and not audit['identity_name']}"
-              f" (29 provenance + 3 firm or 4 organisation + person_domain carry no address "
+              f" (29 provenance + 3 firm or 4 organization + person_domain carry no address "
               f"and no identity name)", file=out)
         if audit["email_shape"]:
             print(f"    FAIL e-mail address in structural pass-through "

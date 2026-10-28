@@ -217,7 +217,7 @@ old against new on `(file_path, token_index)`:
 * **A project's single largest author can change.** It did for `buchen__portfolio`.
   It did not for `dpdk__dpdk`.
 * **Firm attribution moves less than author attribution**, 0% to 15%, because many
-  moves stay inside one organisation.
+  moves stay inside one organization.
 
 **An existing defect stays.** `dpdk__dpdk`'s top-1 author is `intel at intel.com`
 before and after the re-blame. It is a corporate address, not a person. An

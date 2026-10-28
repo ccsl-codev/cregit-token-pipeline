@@ -27,7 +27,7 @@ rather than an opinion.
 
 The release tool is now `pseudonymize.py` (one registry table, a linear leak
 scan, reports with counts and registry tokens only, `--jobs`/`--threads`/
-`--memory-limit`, and a fused write for the organisation step). Its module
+`--memory-limit`, and a fused write for the organization step). Its module
 docstring gives the design and the measurements. `anonymize_parquet.py` keeps
 the rules and its old command line. Do not use that command line for the
 release: its report and its standard output give examples of real values.
@@ -82,7 +82,7 @@ Decided by the user on 2026-10-24 and 2026-10-25:
   `pseudonymization_registry_sha256`. The tool writes it with mode 0600 in a
   folder with mode 0700. It refuses a registry path under `--outdir`, under a
   `--release-root`, or under a folder with the layout of a release root (a
-  `parquet` folder with `organisations`, `MANIFEST.tsv` or `SHA256SUMS`).
+  `parquet` folder with `organizations`, `MANIFEST.tsv` or `SHA256SUMS`).
 * **9. The pseudonym scheme: decided, scheme 2.** The release scheme is the
   nested keyed sha256 that DuckDB computes (scheme 2), not the blake2b of
   `anonymize_parquet.py`. With one salt, the two tools give different tokens.
@@ -119,13 +119,13 @@ Questions that still need the user:
     `size_class`, `license`, `owner_type`, `archived`, `fork`,
     `history_relation`, `manifest_category`, `file_mask`, `token_type`, and in
     schema 2 `firm_based_on_namespace`, `firm_based_on_domain`,
-    `project_enterprise_basis` (ids and labels of the organisations step);
+    `project_enterprise_basis` (ids and labels of the organizations step);
   * numbers, dates and hashes (`NUMERIC_COLUMNS`): `commits`, `size_kb`,
     `stars`, `label_date`, `pushed_at`, `history_created`, `author_date`,
     `committer_date`, `cregit_commit_sha`, `original_commit_sha`.
 
   How they were found: the source column of `docs/DATASET-SCHEMA.md` (the
-  sidecar, the manifest, the tokenizer, blame and the organisation step write
+  sidecar, the manifest, the tokenizer, blame and the organization step write
   these values from a fixed list or in a fixed format; for example `stratum`
   is `community` | `company-owned` | `foundation`, `license` is an SPDX id,
   `size_class` is `S` | `M` | `L`), and a count of the distinct values of each

@@ -28,11 +28,11 @@ maintainer appointments. That off-diagonal is a **result**, not an error.
 
 ## 2. Unit of labelling
 
-One **repository**, identified by `owner/repo` on GitHub. Not an organisation,
+One **repository**, identified by `owner/repo` on GitHub. Not an organization,
 not a product, not a foundation.
 
 A company can own one repository and not another in the same namespace. An
-organisation label would hide that.
+organization label would hide that.
 
 ## 3. The three strata
 
@@ -56,7 +56,7 @@ must be stated by any analysis using the strata.
 
 ### F1 — trademark owner *(strongest, automated)*
 
-The project appears on the roster of an organisation that holds its mark.
+The project appears on the roster of an organization that holds its mark.
 
 | Source | What counts | Fact recorded |
 | --- | --- | --- |
@@ -76,7 +76,7 @@ all.
 
 ### F2 — namespace owner *(automated)*
 
-The GitHub organisation that owns the repository.
+The GitHub organization that owns the repository.
 
 | Condition | Fact recorded |
 | --- | --- |
@@ -84,7 +84,7 @@ The GitHub organisation that owns the repository.
 | the login is a **verified** GitHub Organization whose profile names a company | `F2_org_verified:<login>` |
 | the login is in `FOUNDATION_ORGS` | `F2_org_foundation:<login>` |
 
-**What does NOT count.** An unverified organisation. A personal user account —
+**What does NOT count.** An unverified organization. A personal user account —
 see the gap in section 9.
 
 ### F3 — CLA or DCO *(NOT IMPLEMENTED)*
@@ -204,7 +204,7 @@ Every one of these is a limitation an analysis using the strata must state.
 | G4 | **`community` is a residual** | It is defined by the absence of evidence, so weak instrument coverage inflates it. The published cohort makes the absence citable and reproducible. It does not make it positive. |
 | G5 | **`COMPANY_ORGS` is hand-seeded** | Coverage of company namespaces is not systematic, so F2 recall is unknown. |
 | G6 | **No relicense time-boxing** | Section 7. |
-| G7 | **Unverified organisations are invisible to F2** | GitHub verification is opt-in, so a real company that never verified its namespace is missed. |
+| G7 | **Unverified organizations are invisible to F2** | GitHub verification is opt-in, so a real company that never verified its namespace is missed. |
 | G8 | **`SP_MAX_PER_COMPANY` leaks from sampling into labelling** | The cap stops one firm dominating the draw, which is correct for sampling. But a capped-out project does not leave the pipeline. It re-enters through a weaker source and takes that source's stratum, so a project our own strong-tier rule attests to a company can label `community`. Seven such rows sit in the eligible frame. `validate_spinellis.py` measures them and `docs/SPINELLIS-VALIDATION.md` section 4 lists them. The cap must bound how many rows *enter*; the registry fact must still attach wherever a row enters. One constant now serves both concerns. **Open.** |
 
 ## 10. Procedure for the second rater

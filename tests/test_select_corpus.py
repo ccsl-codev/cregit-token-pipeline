@@ -1165,7 +1165,7 @@ def test_spinellis_considers_only_fortune500_or_sec_filers(sandbox):
 
 
 def test_spinellis_requires_a_company_name(sandbox):
-    """A flagged row with no registered organisation carries no usable fact."""
+    """A flagged row with no registered organization carries no usable fact."""
     write(sc.SPINELLIS_TSV, "\n".join([
         sp_ok("https://github.com/a/named", company="Acme"),
         sp_ok("https://github.com/a/anon", company=""),
