@@ -2768,7 +2768,7 @@ def test_draw_skips_cells_allocated_nothing():
 
 # ---- draw: a phase extends the one before it
 #
-# The corpus runs in phases, so phase 2 must contain phase 1. A project costs
+# The corpus runs in phases, so a larger draw must contain the first draw. A project costs
 # hours, and a draw that reshuffled would throw that work away.
 
 

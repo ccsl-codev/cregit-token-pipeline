@@ -144,7 +144,7 @@ def test_the_provenance_columns_match_the_sidecar_field_list():
 
 def test_the_firm_columns_sit_directly_after_the_key_they_are_resolved_from():
     """Replaces test_the_contract_still_has_no_firm_column, whose docstring asked
-    for exactly this the day a firm column landed (2026-09-20, task 8c-pre).
+    for exactly this the day a firm column landed (2026-09-20).
 
     Position is the claim: firm is resolved FROM person_domain, so the key and its
     three answers are adjacent and a reader filtering on one finds the others in

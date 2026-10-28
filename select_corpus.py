@@ -1285,9 +1285,9 @@ SAMPLE_SEED = 20261110
 # loses a language stops being comparable to the others.
 SAMPLE_FLOOR = 2
 
-# The corpus runs in phases. Phase 1 is the size the schedule can absorb now;
+# The corpus runs in phases. The first draw is the size the schedule can absorb now;
 # a later phase raises the target, and `draw` guarantees the larger draw
-# contains the smaller one, so phase 1 is never re-run.
+# contains the smaller one, so the first draw is never re-run.
 SAMPLE_PHASE_1 = 200
 
 CELL_KEYS = ("stratum", "language", "size_class")
@@ -1414,7 +1414,7 @@ def draw(cells: dict[tuple, list[dict]], take: dict[tuple, int],
 
     Each cell is permuted once, then the first k rows are taken. The
     permutation does not depend on k, so a small target draws a subset of a
-    large one and a phased run can extend phase 1 instead of replacing it.
+    large one and a phased run can extend the first draw instead of replacing it.
     That matters here because a project costs hours: re-drawing would throw
     the earlier phase away.
 
@@ -1572,7 +1572,7 @@ def cmd_review(args: argparse.Namespace) -> int:
            f"- excluded: **{len(rows) - len(kept):,}**",
            # The frame is smaller than the eligible row count, and a reader who
            # meets the two numbers in two documents has to learn why here. One
-           # repository holds two rows when GitHub redirects a rename (D22).
+           # repository holds two rows when GitHub redirects a rename.
            f"- **sampling frame: {len(dedupe_by_clone_url(kept)):,} repositories**"
            f" — {len(kept) - len(dedupe_by_clone_url(kept)):,} of the eligible rows"
            " are one repository under two owner names, collapsed by clone URL", ""]
@@ -1690,8 +1690,8 @@ def main() -> int:
                        help="draw a reproducible stratified sample of the frame")
     s.add_argument("--target", type=int, default=SAMPLE_PHASE_1,
                    help=f"how many projects to draw (default {SAMPLE_PHASE_1}, "
-                        "which is phase 1). A larger target contains a smaller "
-                        "one, so phase 2 extends phase 1 instead of replacing it")
+                        "which is the first draw). A larger target contains a smaller "
+                        "one, so a larger draw extends the first draw instead of replacing it")
     s.add_argument("--seed", type=int, default=SAMPLE_SEED,
                    help=f"random seed (default {SAMPLE_SEED}); state it in the paper")
     s.add_argument("--floor", type=int, default=SAMPLE_FLOOR,

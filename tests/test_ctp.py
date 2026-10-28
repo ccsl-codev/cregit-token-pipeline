@@ -63,6 +63,7 @@ REAL_RUNNER_USAGE = """\
 #   --firm-map PATH        forward the domain->firm CSV to step 10
 #   --firm-canonical PATH  forward the canonical firm-name table to step 10
 #   --mask-widened    resume across a mask change, reusing blob_map
+#   --retokenize EXTS re-tokenize only these extensions after a tokenizer fix
 #   --mode MODE       tokenizer mode
 #   --shards N        shard count
 #   --jobs N      concurrent blame/HTML processes
@@ -498,7 +499,7 @@ def test_run_announces_a_resume_so_the_operator_sees_it(
 
 def test_run_refuses_to_start_when_the_runner_lacks_a_required_flag(
         sandbox, monkeypatch, runner_script):
-    """Defect D1, turned into a gate. Every project passes --work and --mask, so a
+    """A defect, turned into a gate. Every project passes --work and --mask, so a
     runner that does not know them costs one exit-2 per project and produces
     nothing. Refuse once instead, before the devenv capture starts anything.
     """
@@ -725,7 +726,7 @@ def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
 
     The flag names are the runner's: run_pipeline_process.sh takes --work and
     --mask. ctp used to send --work-dir and --file-filter, which the runner
-    rejects with exit 2, so every project failed before doing any work. Defect D1.
+    rejects with exit 2, so every project failed before doing any work. A defect.
     """
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
@@ -741,7 +742,7 @@ def test_pipeline_argv_is_built_exactly_like_this(sandbox, runner, jq):
 
 
 def test_the_log_survives_the_runner_deleting_the_workdir(sandbox, monkeypatch, jq):
-    """Defect D2. run_pipeline_process.sh runs `rm -rf "$WORK"` at FROM_STEP=1 and
+    """A defect. run_pipeline_process.sh runs `rm -rf "$WORK"` at FROM_STEP=1 and
     again from its EXIT trap on failure. $WORK is the project workdir. The log of
     the failing run used to live inside it, so the evidence died with the run.
 
@@ -813,7 +814,7 @@ def test_validate_argv_is_built_exactly_like_this(sandbox, runner, jq):
 def test_pipeline_argv_uses_flags_the_runner_accepts(runner_script, runner, jq):
     """Every long flag ctp passes must be advertised by the runner.
 
-    This is the general form of D1. It compares the argv against the runner's own
+    This is the general form of that defect. It compares the argv against the runner's own
     usage text, so it catches a rename in either direction. Keep it even though
     REQUIRED_RUNNER_FLAGS now preflights: the constant can drift from the argv,
     and this test reads the argv itself.
@@ -832,7 +833,7 @@ def test_required_runner_flags_are_exactly_what_run_project_sends(runner, jq):
 
     cmd_run checks REQUIRED_RUNNER_FLAGS before starting. If run_project later
     gains a flag that the constant does not list, the preflight passes and the
-    run fails per project instead — D1 again, with a check that looked green.
+    run fails per project instead — the same defect again, with a check that looked green.
     """
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
@@ -1044,13 +1045,23 @@ def test_capture_devenv_env_exits_when_devenv_fails(monkeypatch):
 
 def run_args(**over):
     """A complete `ctp run` Namespace. Every cmd_run option belongs here, so
-    adding one is a single edit rather than one per test."""
+    adding one is a single edit rather than one per test.
+
+    allow_empty_provenance defaults to True here and ONLY here. On the real CLI it
+    defaults to False, and cmd_run then refuses any step-10 run that leaves
+    --project-meta, --firm-map or --firm-canonical out. Every test in this file
+    except the provenance-guard section leaves all three empty because it is
+    testing something else entirely, so without the hatch each one would exit on a
+    refusal it never asked about. The guard's own default — False — is exercised
+    explicitly by the tests below, which pass allow_empty_provenance=False.
+    """
     base = dict(manifest="manifest.tsv", only=None, jobs=1, retries=0,
                 skip_html=False, drop_memo=False, memo_dir="",
                 shards=0, shard_classes="L",
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
-                mask="", mask_widened=False)
+                firm_map="", firm_canonical="", allow_empty_provenance=True,
+                mask="", mask_widened=False, retokenize="", reblame=False)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -1907,6 +1918,234 @@ def test_a_relative_sidecar_path_is_made_absolute(
 
 
 # --------------------------------------------------------------------------- #
+# the provenance guard
+#
+# The defect these tests exist for: `ctp.py run` used to accept --project-meta,
+# --firm-map and --firm-canonical as optional, and when they were absent it simply
+# did not forward them. generate_dataset.py treats an absent sidecar and an absent
+# firm map as supported backwards-compatible modes, so the run SUCCEEDED and
+# published a 70-column, schema-conforming Parquet whose 29 provenance columns and
+# 3 firm columns were empty strings. validate.py passed it, because the schema was
+# right.
+#
+# It is not hypothetical. On 2026-09-21 a torvalds__linux run ran 6h48m and died
+# inside step 10 for an unrelated reason; had it finished it would have published
+# the largest project in the corpus silently inconsistent with the other 185.
+#
+# The argument for an exit rather than a louder note: omitting --project-meta, the
+# 29-column half, printed NOTHING at any layer. Only the 3 firm columns had a
+# note, and a note is line 1 of a log whose other 105 lines are 30-second
+# heartbeats. The tests below therefore pin the refusal, the itemised warning the
+# escape hatch prints, and the fact that the hatch cannot arrive by default.
+# --------------------------------------------------------------------------- #
+
+def provenance_kwargs(root: Path, **override) -> dict:
+    """Real on-disk values for the three provenance flags.
+
+    The files must genuinely exist: cmd_run's per-flag checks refuse a path that
+    is not a file, and that is a DIFFERENT refusal from the guard's. Pass
+    e.g. project_meta="" to leave one flag out.
+    """
+    meta = root / "project_meta.json"
+    meta.write_text('{"jq": {}}')
+    firm = root / "affiliation.merged.csv"
+    firm.write_text("domain,company,source\nredhat.com,Red Hat,gitdm\n")
+    canonical = root / "firm_canonical.csv"
+    canonical.write_text("firm_raw,firm\nRed Hat,Red Hat\n")
+    kwargs = dict(project_meta=str(meta), firm_map=str(firm),
+                  firm_canonical=str(canonical))
+    kwargs.update(override)
+    return kwargs
+
+
+@pytest.fixture
+def ready(sandbox, monkeypatch, runner_script):
+    """A sandbox one cmd_run call away from a run that starts no process."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    return sandbox
+
+
+@pytest.fixture
+def must_not_start(sandbox, monkeypatch, runner_script):
+    """Same sandbox, but starting the run at all fails the test. The guard has to
+    fire before the devenv capture: a refusal that arrives after 6h48m of work is
+    the defect, not the fix."""
+    runner_script()
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    return sandbox
+
+
+def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
+    """The canonical corpus invocation — what tmp/wave.sh sends — must pass the
+    guard with allow_empty_provenance at its real CLI default of False."""
+    args = run_args(allow_empty_provenance=False,
+                    **provenance_kwargs(ready.root))
+    assert ctp.cmd_run(args) == 0
+    assert ctp._OPTS["project_meta"].endswith("project_meta.json")
+    assert ctp._OPTS["firm_map"].endswith("affiliation.merged.csv")
+    assert ctp._OPTS["firm_canonical"].endswith("firm_canonical.csv")
+
+
+@pytest.mark.parametrize("absent, expected", [
+    pytest.param({"project_meta": ""}, "--project-meta", id="no-sidecar"),
+    # --firm-canonical goes with it: without a map there is no firm_raw to
+    # canonicalise, and cmd_run already refuses that pair on its own grounds, so
+    # keeping it here would test the older check instead of this one.
+    pytest.param({"firm_map": "", "firm_canonical": ""}, "--firm-map",
+                 id="no-firm-map"),
+    pytest.param({"firm_canonical": ""}, "--firm-canonical",
+                 id="no-canonical-table"),
+])
+def test_each_provenance_flag_missing_on_its_own_is_refused(
+        must_not_start, absent, expected):
+    """One flag left out is enough. Each one owns a different slice of the
+    columns, so any single omission publishes a project that disagrees with the
+    rest of the corpus."""
+    kwargs = provenance_kwargs(must_not_start.root, **absent)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=False, **kwargs))
+    message = str(exc.value)
+    assert "refusing this run" in message
+    assert expected in message
+    assert "--allow-empty-provenance" in message, (
+        "a refusal that does not name its escape hatch sends the operator to "
+        "read the source")
+    assert not (must_not_start.root / "runs.log").exists()
+
+
+def test_the_refusal_names_every_missing_flag_and_the_columns_at_stake(
+        must_not_start):
+    """All three absent is the 2026-09-21 invocation exactly. The message must
+    list all three in one pass — reporting them one per re-run would cost three
+    round trips — and must name columns, because "provenance" alone does not tell
+    an operator what a consumer will see."""
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=False))
+    message = str(exc.value)
+    for flag in ("--project-meta", "--firm-map"):
+        assert flag in message
+    for column in ("stratum", "history_cluster", "firm_raw", "firm_source"):
+        assert column in message, f"{column} is blanked but is not named"
+    assert "29" in message and "3 firm columns" in message
+    # Without this sentence the reader has no reason to believe the run would not
+    # simply have failed, which is the misconception that let it happen.
+    assert "validate.py passes it" in message
+
+
+def test_the_escape_hatch_lets_a_deliberate_blank_run_proceed(ready):
+    """A blanket refusal would break a fixture, a one-project smoke run, and a
+    corpus whose sidecar does not exist yet."""
+    assert ctp.cmd_run(run_args(allow_empty_provenance=True)) == 0
+    assert ctp._OPTS["project_meta"] == ""
+    assert ctp._OPTS["firm_map"] == ""
+
+
+def test_the_escape_hatch_itemises_what_it_gave_up(ready, capsys):
+    """Opting out of the only check between this run and a quietly wrong dataset
+    must be legible in the log, per flag, without inferring it from the absence of
+    a refusal."""
+    assert ctp.cmd_run(run_args(allow_empty_provenance=True)) == 0
+    out = capsys.readouterr().out
+    assert "WARNING: --allow-empty-provenance" in out
+    assert "--project-meta absent" in out
+    assert "--firm-map absent" in out
+    assert "stratum" in out
+
+
+def test_the_escape_hatch_is_off_until_it_is_typed(monkeypatch):
+    """It must never arrive by default. This is the difference between the guard
+    and the note it replaces."""
+    seen: dict = {}
+    monkeypatch.setattr(ctp, "cmd_run", lambda args: seen.update(vars(args)) or 0)
+
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "run"])
+    assert ctp.main() == 0
+    assert seen["allow_empty_provenance"] is False
+
+    seen.clear()
+    monkeypatch.setattr(ctp.sys, "argv",
+                        ["ctp.py", "run", "--allow-empty-provenance"])
+    assert ctp.main() == 0
+    assert seen["allow_empty_provenance"] is True
+
+
+def test_the_escape_hatch_is_refused_when_nothing_would_be_blank(must_not_start):
+    """Left in a launcher script the hatch would silence the guard on the next run
+    that does omit a flag, which is how the warning it replaces became useless.
+    So it is only ever valid in the same breath as an omission."""
+    kwargs = provenance_kwargs(must_not_start.root)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=True, **kwargs))
+    assert "nothing to allow" in str(exc.value)
+    assert "wrapper" in str(exc.value)
+
+
+def test_a_run_that_cannot_reach_step_10_is_not_gated(ready, capsys):
+    """Step 10 is the LAST step of run_pipeline_process.sh, so --from-step 11
+    reaches no step at all: every step guard evaluates false and the runner exits
+    0 having done nothing. Such a run writes no Parquet, so it cannot write a
+    blank one, and gating it would refuse a harmless no-op."""
+    assert ctp.cmd_run(run_args(allow_empty_provenance=False, from_step=11)) == 0
+    assert "refusing" not in capsys.readouterr().out
+
+
+def test_a_run_starting_at_step_10_is_still_gated(must_not_start):
+    """The boundary. --from-step 10 runs the dataset step and nothing else, which
+    is exactly how a Parquet gets republished, so it is the case that most needs
+    the guard rather than the one that escapes it."""
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=False, from_step=10))
+    assert "reaches step 10" in str(exc.value)
+
+
+@pytest.mark.parametrize("absent, expected", [
+    pytest.param("project_meta", "--project-meta", id="sidecar"),
+    pytest.param("firm_canonical", "--firm-canonical", id="canonical-table"),
+])
+def test_a_provenance_path_that_is_not_a_file_is_refused_by_its_own_check(
+        must_not_start, absent, expected):
+    """The guard deliberately does NOT re-check that the paths exist. Three layers
+    already do, and every one of them fails hard: cmd_run's own per-flag checks
+    (exercised further in tests/test_firm_attribution.py), then
+    run_pipeline_process.sh's argument validation (exit 2, before the clone), then
+    generate_dataset.py at the top of step 10. A path typo therefore cannot reach
+    the Parquet, so a fourth copy of the check would only be a fourth thing to
+    keep in step.
+
+    What these two assertions pin is the ORDERING: the sharper "is not a file"
+    message must win, because the guard's general one would send an operator
+    looking for a missing flag they did in fact pass."""
+    kwargs = provenance_kwargs(must_not_start.root,
+                               **{absent: str(must_not_start.root / "typo")})
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(allow_empty_provenance=False, **kwargs))
+    message = str(exc.value)
+    assert expected in message
+    assert "does not exist" in message or "is not a file" in message
+    assert "refusing this run" not in message
+
+
+def test_project_key_is_not_an_operator_flag(monkeypatch, capsys):
+    """The brief for this guard listed --project-key as a fourth defaultable flag.
+    It is not one: ctp has no such option. run_project derives the key from the
+    manifest name and sends it with the sidecar unconditionally, so it cannot be
+    forgotten or mistyped and needs no guard. Pinned here because the next reader
+    will make the same assumption."""
+    monkeypatch.setattr(ctp.sys, "argv",
+                        ["ctp.py", "run", "--project-key", "jq"])
+    monkeypatch.setattr(ctp, "cmd_run", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.main()
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
 # cmd_progress
 # --------------------------------------------------------------------------- #
 
@@ -2306,3 +2545,114 @@ def test_an_override_warns_that_the_recorded_mask_will_not_match(sandbox, monkey
     assert r"--mask overrides the manifest" in out
     assert r"\.rs$" in out
     assert "will not match" in out
+
+
+# ---------------------------------------------------------------------------
+# --retokenize: discard ONE extension's cached tokenizations after the
+# tokenizer that produced them was corrected.
+#
+# This is not --mask-widened's problem and must not be confused with it. The
+# mask decides WHICH files are tokenized; this decides HOW. The blob map keys
+# reuse on the command string and the mask, and rebuilding a tokenizer binary
+# changes neither — which is exactly how a 16-day-stale rust_tokenizer shipped
+# shifted token columns and the run exited 0.
+# ---------------------------------------------------------------------------
+
+def test_retokenize_is_forwarded_to_the_runner(runner, jq):
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
+                     mask_widened=False, retokenize="rs")
+    ctp.run_project(jq)
+    argv = runner.argv("pipeline")
+    assert "--retokenize" in argv
+    assert argv[argv.index("--retokenize") + 1] == "rs"
+    # Still before the positional FROM_STEP, which the runner reads from the tail.
+    assert argv[-1] == "2"
+
+
+def test_no_retokenize_sends_no_flag_so_nothing_is_discarded_by_accident(runner, jq):
+    """The default must never delete cached work. This flag is opt-in only."""
+    ctp._OPTS.update(skip_html=False, drop_memo=False, from_step=2,
+                     mask_widened=False, retokenize="")
+    ctp.run_project(jq)
+    assert "--retokenize" not in runner.argv("pipeline")
+
+
+def test_a_missing_retokenize_option_sends_no_flag(runner, jq):
+    """run_project reads _OPTS directly, so a caller that never set the key gets
+    the safe behaviour rather than a crash."""
+    ctp._OPTS.clear()
+    ctp._OPTS.update(skip_html=False, drop_memo=False)
+    ctp.run_project(jq)
+    assert "--retokenize" not in runner.argv("pipeline")
+
+
+def test_retokenize_needs_step_two_exactly_not_two_or_more(sandbox, monkeypatch):
+    """Step 1 deletes the blob map this flag edits. Step 3 and later SKIP step 2,
+    so the tokens would never be remade and the rest of the pipeline would run over
+    the stale ones and exit 0 — the worst outcome, because it looks like success."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    for bad in (1, 3, 7):
+        with pytest.raises(SystemExit) as exc:
+            ctp.cmd_run(run_args(retokenize="rs", from_step=bad))
+        assert "--from-step 2 exactly" in str(exc.value)
+
+
+def test_retokenize_is_refused_on_a_runner_that_cannot_forward_it(
+        sandbox, monkeypatch, runner_script):
+    """Dropped silently, step 2 reuses the very tokenizations the operator asked to
+    discard and the run exits 0. Nothing in the output would say the corrected
+    tokenizer never ran."""
+    runner_script(REAL_RUNNER_USAGE.replace("--retokenize EXTS", "--nope EXTS"))
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(retokenize="rs", from_step=2))
+    assert "--retokenize is not implemented" in str(exc.value)
+
+
+def test_retokenize_and_mask_widened_are_refused_together(sandbox, monkeypatch):
+    """Each verifies a different invariant of the blob map. Together neither check
+    means anything: one reuses rows across a mask change, the other deletes rows a
+    tokenizer change invalidated."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(retokenize="rs", mask_widened=True, from_step=2))
+    assert "cannot be used in the same run" in str(exc.value)
+
+
+def test_retokenize_is_refused_together_with_sharding(sandbox, monkeypatch):
+    """Each shard builds a fresh blob map, so there are no cached tokenizations to
+    invalidate."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
+    monkeypatch.setattr(ctp, "run_project", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        ctp.cmd_run(run_args(retokenize="rs", from_step=2, shards=4))
+    assert "no cached tokenizations to invalidate" in str(exc.value)
+
+
+def test_retokenize_is_announced_with_what_it_discards(sandbox, monkeypatch, capsys):
+    """This flag DELETES cached work. A reader of the log must see which extensions
+    lost their tokenizations without inferring it from the absence of a refusal."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+
+    assert ctp.cmd_run(run_args(retokenize="rs", from_step=2)) == 0
+    out = capsys.readouterr().out
+    assert "DISCARD" in out
+    assert "rs" in out
+
+
+def test_a_blank_retokenize_is_treated_as_absent(sandbox, monkeypatch):
+    """Whitespace from a shell variable that expanded to nothing must not count as
+    a request, and must not trip the step-2 refusal on an ordinary run."""
+    write_manifest(sandbox.root, VALID_ROW)
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: "done")
+    assert ctp.cmd_run(run_args(retokenize="   ", from_step=1)) == 0

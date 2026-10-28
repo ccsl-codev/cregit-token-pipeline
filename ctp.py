@@ -108,6 +108,17 @@ RESOURCE_FIELDS = ("iso", "project", "class", "phase", "elapsed_s",
 # configured checkout, so an upstream rename fails once instead of per project.
 REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 
+# Step 10 is the DuckDB generator, the step that writes the Parquet, and it is
+# the LAST step: run_pipeline_process.sh ends at its end_step (verified against
+# cregit-issue61, whose file ends there; the script says so itself in the comment
+# above its --project-meta validation). So --from-step 11 or higher describes a
+# run that reaches no step at all — the runner accepts any digit string as
+# FROM_STEP without an upper bound, every step guard evaluates false, and it
+# exits 0 having done nothing. Such a run cannot publish a Parquet, so it cannot
+# publish a blank one, which is why the provenance guard in cmd_run does not gate
+# it.
+DATASET_STEP = 10
+
 _metrics_lock = threading.Lock()
 _print_lock = threading.Lock()
 # name -> (phase, started_at) for the heartbeat; mutated by worker threads
@@ -496,11 +507,26 @@ def run_project(project: dict) -> str:
         ]
         if _OPTS.get("skip_html"):
             pipeline_args.append("--skip-html")
+        # Replace every .blame file instead of skipping the ones that exist.
+        # blameRepoFiles.pl skips existing output, so a step-7 resume re-blames
+        # NOTHING without this and step 10 then rebuilds the Parquet from the old
+        # blame. cmd_run has checked the runner advertises the flag.
+        if _OPTS.get("reblame"):
+            pipeline_args.append("--reblame")
         # Reuse the tokenizations already in this project's blob map across a mask
         # change. cmd_run has already checked the runner advertises it and that
         # --from-step is 2 or more; blobExec does the per-project verification.
         if _OPTS.get("mask_widened"):
             pipeline_args.append("--mask-widened")
+        # Invalidate the tokenizations of ONE extension set, because the tokenizer
+        # that produced them was corrected. This is not --mask-widened's problem:
+        # the mask decides WHICH files are tokenized, this decides HOW, and the
+        # blob map keys reuse on the command string and the mask, neither of which
+        # a rebuilt binary changes. The runner supplies --memo-dir alongside it,
+        # because a dropped blob_map row whose memo entry survives is served the
+        # stale tokens straight back.
+        if _OPTS.get("retokenize"):
+            pipeline_args += ["--retokenize", _OPTS["retokenize"]]
         # Put the memo outside the work directory, which a FROM_STEP=1 run
         # deletes. It matters now because the mask changed corpus-wide and
         # blobExec refuses to resume against a different one (Mapping.open), so
@@ -609,7 +635,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Fail before the run, not 1,900 times during it. Every project passes these
     # flags, so a name the runner does not know costs one rc=2 per project and
-    # produces no artefact. This is defect D1, caught by a check instead of by a
+    # produces no artefact. This is a defect, caught by a check instead of by a
     # wasted run.
     missing = [f for f in REQUIRED_RUNNER_FLAGS if not script_supports(f)]
     if missing:
@@ -624,6 +650,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         sys.exit(f"--skip-html is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
                  "Patch that checkout to guard its HTML step, then re-run. Refusing to\n"
                  "start: generating the HTML and deleting it later is not what the flag says.")
+    # Same reasoning as --skip-html: a checkout that does not implement --reblame
+    # would run step 7, skip every file that already has .blame output, and exit 0
+    # having changed nothing. That is the exact failure the flag exists to close, so
+    # refuse rather than report a re-blame that did not happen.
+    if args.reblame and not script_supports("--reblame"):
+        sys.exit(f"--reblame is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                 "That checkout's step 7 cannot replace existing .blame files, so the run\n"
+                 "would skip every one of them and exit 0. Refusing to start.")
+    if args.reblame and args.from_step > 7:
+        sys.exit(f"--reblame needs --from-step 7 or less (got {args.from_step}).\n"
+                 "The re-blame happens inside step 7; from step 8 the flag is skipped and\n"
+                 "step 10 rebuilds the Parquet from the blame already on disk.")
     if args.drop_memo and "--no-memo" in sys.argv:
         say("note: --no-memo is an alias for --drop-memo and does NOT prevent the write. "
             "The tokenizer requires BFG_MEMO_DIR, so memo/ is built and then deleted.")
@@ -753,12 +791,164 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.shards > 1:
             sys.exit("--mask-widened cannot be combined with sharding: each shard builds a fresh\n"
                      "blob map, so there is no recorded mask to widen.")
+    # --retokenize, under the same rule, and with stakes of its own. An unimplemented
+    # flag would be DROPPED and step 2 would then reuse the very tokenizations the
+    # operator asked to discard, and exit 0. That reads as a successful re-run rather
+    # than as a missing feature, which is the worst of the two failures: nothing in
+    # the output says the corrected tokenizer never ran.
+    retokenize = (getattr(args, "retokenize", "") or "").strip()
+    if retokenize:
+        if not script_supports("--retokenize"):
+            sys.exit(f"--retokenize is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
+                     "That checkout would drop the flag, step 2 would reuse the cached\n"
+                     "tokenizations you asked to discard, and the run would exit 0 having\n"
+                     "changed nothing. Check pipeline.cfg points at a checkout that has it.")
+        # The runner requires EXACTLY 2, not 2-or-more. Step 1 deletes the blob map
+        # this flag edits; step 3 and later skip step 2 altogether, so the run would
+        # rebuild blame, HTML and the dataset over tokens nobody re-made.
+        if args.from_step != 2:
+            sys.exit(f"--retokenize needs --from-step 2 exactly (got {args.from_step}).\n"
+                     "Step 1 deletes the blob map this flag edits. Step 3 and later skip step 2,\n"
+                     "so the tokens would never be remade and the rest of the pipeline would run\n"
+                     "over the stale ones and exit 0.")
+        if mask_widened:
+            sys.exit("--mask-widened and --retokenize cannot be used in the same run. Each one\n"
+                     "verifies a different invariant of the blob map, and together neither check\n"
+                     "means anything: one reuses rows across a mask change, the other deletes rows\n"
+                     "a tokenizer change invalidated.")
+        if args.shards > 1:
+            sys.exit("--retokenize cannot be combined with sharding: each shard builds a fresh\n"
+                     "blob map, so there are no cached tokenizations to invalidate.")
+    # ------------------------------------------------------------------ #
+    # The provenance guard. It REFUSES rather than warns, for three reasons.
+    #
+    # 1. For 29 of the 32 columns there was nothing to warn WITH. Omitting
+    #    --project-meta produced no diagnostic at any layer: not here, not in
+    #    run_pipeline_process.sh, and not in generate_dataset.py, whose
+    #    load_project_meta() treats an absent sidecar as a supported
+    #    backwards-compatible mode and fills all 29 with ''. The only notice that
+    #    existed was the `say("note: no --firm-map ...")` this block replaces, and
+    #    it covered 3 columns.
+    #
+    # 2. A note cannot carry this weight in this log. The 2026-09-21
+    #    torvalds__linux resume ran 6 h 48 m and wrote 113 lines, 105 of them
+    #    30-second heartbeats. A note is line 1, scrolled past inside the first
+    #    minute of an overnight run, and the operator who reads the log next reads
+    #    the tail. (That run's log holds no `note:` line, so it did pass
+    #    --firm-map; what it cannot tell us either way is --project-meta, because
+    #    omitting that printed nothing at all. Which is the point of reason 1.)
+    #
+    # 3. Nothing downstream catches the result. The file still has all 70 columns
+    #    in the right order and the right types, so validate.py and
+    #    validate_schema.py both pass it, and a consumer reading `stratum = ''`
+    #    cannot distinguish a project whose stratum was never supplied from one
+    #    that genuinely has none. A quietly wrong dataset is worse than a failed
+    #    run: the cost of a false refusal is one re-typed command, the cost of a
+    #    miss is hours of compute and a corpus whose members disagree with each
+    #    other. torvalds__linux is the largest of 186; its re-run with the flags
+    #    filled stratum on 100% of rows, firm on 83.6% and history_cluster on
+    #    100%, so those columns were never "unknown", only never asked for.
+    #
+    # Refusing is also the house idiom in cmd_run. Every other flag combination
+    # that would run to completion while doing the wrong thing exits here with a
+    # message naming the consequence: --memo-dir with --drop-memo, --retokenize
+    # with the wrong --from-step, --firm-canonical without --firm-map. This is the
+    # same shape, deliberately.
+    #
+    # The escape hatch is --allow-empty-provenance, because a blanket refusal
+    # would break three legitimate uses: a test fixture, a one-project smoke run,
+    # and a corpus whose sidecar does not exist yet. It is store_true with no
+    # default, so it cannot arrive except by being typed, and taking it prints
+    # what it gave up.
+    #
+    # NOT re-checked here: that the paths exist and are readable. That check is
+    # already made three times over and it fails hard every time — this function
+    # above (`--project-meta ... does not exist`, `--firm-map ... is not a file`),
+    # run_pipeline_process.sh's own argument validation (exit 2 before the clone),
+    # and generate_dataset.py at the top of step 10 (exit 1, or an uncaught
+    # FileNotFoundError for the sidecar). A path typo therefore cannot reach the
+    # Parquet, so adding a fourth existence check here would only duplicate the
+    # first one. The failure this guard exists for is the opposite one: a flag
+    # that is not there at all, which no layer treats as an error because an
+    # absent sidecar is a supported backwards-compatible mode in the generator.
+    #
+    # Placed last, after the per-flag checks, so that a typo'd path or a checkout
+    # that cannot forward the flag is still reported by its own sharper message
+    # rather than by this general one.
+    gaps: list[tuple[str, str]] = []
+    if not project_meta:
+        gaps.append(("--project-meta",
+                     "29 provenance columns empty on every row: clone_url, "
+                     "provenance_status, source, stratum, fact, contested, "
+                     "label_date, owner, repo, roster_name, roster_lang, "
+                     "language, commits, size_class, size_kb, stars, pushed_at, "
+                     "license, owner_type, archived, fork, history_cluster, "
+                     "history_shared_with, history_relation, history_includes, "
+                     "history_first, history_created, manifest_category, "
+                     "file_mask"))
+    if not firm_map:
+        gaps.append(("--firm-map",
+                     "3 firm columns empty on every row: firm_raw, firm, "
+                     "firm_source — and firm attribution is the measurement this "
+                     "corpus exists for"))
+    elif not firm_canonical:
+        # Not an empty column, a wrong one, which is why it is listed separately:
+        # `firm` gets firm_raw's value verbatim, so the 48 split spellings stay
+        # split and every firm's share is understated.
+        gaps.append(("--firm-canonical",
+                     "`firm` repeats `firm_raw` instead of the reviewed canonical "
+                     "name, so the 48 split spellings stay split and every firm's "
+                     "share is understated"))
+    allow_empty = bool(getattr(args, "allow_empty_provenance", False))
+    reaches_dataset = args.from_step <= DATASET_STEP
+    if gaps and reaches_dataset and not allow_empty:
+        sys.exit(
+            f"refusing this run: it reaches step {DATASET_STEP} and would publish a "
+            "Parquet with blank provenance.\n"
+            + "".join(f"  {flag} absent — {cost}\n" for flag, cost in gaps)
+            + "This does not fail anything. The file keeps all 70 columns in the "
+              "right order, so validate.py passes it and no consumer can tell a "
+              "blank column from provenance that is genuinely unknown.\n"
+              "This is why it matters: a torvalds__linux run on 2026-09-21 spent "
+              "6h48m and died in step 10 for an unrelated reason. Had it "
+              "succeeded it would have published the largest project in the "
+              "corpus silently inconsistent with the other 185.\n"
+              "Pass the flags — this is what tmp/wave.sh does, and its comment says "
+              "they cannot be defaulted on:\n"
+              "  --project-meta project_meta.json \\\n"
+              "  --firm-map data/affiliation.merged.csv \\\n"
+              "  --firm-canonical data/firm_canonical.csv\n"
+              "If blank columns are genuinely what you want — a fixture, a "
+              "one-project smoke run, a corpus whose sidecar does not exist yet — "
+              "say so with --allow-empty-provenance.")
+    if allow_empty and not gaps:
+        # Refused rather than ignored, so the hatch cannot settle into a launcher
+        # script and silence a later run that does need the guard. It is only ever
+        # correct to type it in the same breath as leaving a flag out.
+        sys.exit("--allow-empty-provenance has nothing to allow: --project-meta, "
+                 "--firm-map and --firm-canonical are all present, so no column "
+                 "would be blank. Drop the flag — left in a wrapper it would "
+                 "silence the guard on the next run that does omit one.")
+    if allow_empty and gaps and reaches_dataset:
+        # Loud, and itemised, because the operator has just opted out of the only
+        # check standing between this run and a quietly wrong dataset. A reader of
+        # the log must be able to see which columns were given up without
+        # inferring it from the absence of a refusal.
+        say("WARNING: --allow-empty-provenance: this run will publish a Parquet "
+            "with blank provenance, on purpose.")
+        for flag, cost in gaps:
+            say(f"         {flag} absent — {cost}")
+        say("         Do not mix these rows into the corpus: they are "
+            "schema-valid and indistinguishable from rows whose provenance is "
+            "genuinely unknown.")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
     _OPTS.update(skip_html=args.skip_html, drop_memo=args.drop_memo,
+                 reblame=getattr(args, "reblame", False),
                  memo_dir=args.memo_dir,
                  shards=args.shards, shard_classes=shard_classes,
                  from_step=args.from_step, gc=args.gc,
                  mask_widened=mask_widened,
+                 retokenize=retokenize,
                  blame_jobs=args.blame_jobs,
                  memory_limit=args.memory_limit,
                  duckdb_threads=args.duckdb_threads,
@@ -767,10 +957,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                  mask=getattr(args, "mask", ""),
                  project_meta=project_meta,
                  firm_map=firm_map, firm_canonical=firm_canonical)
-    if not firm_map:
-        say("note: no --firm-map, so firm_raw, firm and firm_source will be "
-            "written as empty strings. Pass --firm-map data/affiliation.merged.csv "
-            "--firm-canonical data/firm_canonical.csv to attribute firms.")
     if _OPTS["mask"]:
         # Loud, because the mask in the Parquet's file_mask column comes from the
         # sidecar, which reads the manifest — so an override makes the recorded
@@ -785,6 +971,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             say(f"WARNING: {warning}")
     if args.from_step > 1:
         say(f"resuming at step {args.from_step}: the runner keeps the existing workdir")
+    if retokenize:
+        # Loud, because this flag DELETES cached work. A reader of the log must be
+        # able to see which extensions lost their tokenizations without inferring it
+        # from the absence of a refusal.
+        say(f"--retokenize {retokenize}: step 2 will DISCARD the cached tokenizations "
+            f"for these extensions and redo them.")
+        say("         Every other extension's cached work is kept. blobExec drops the "
+            "blob_map rows and the memo entries together, and refuses the run (exit 7) "
+            "if the request would have invalidated nothing — so a typo cannot pass as "
+            "a successful re-run.")
     if mask_widened:
         # Loud, because this is the one flag that lets a blob map recorded under one
         # mask be reused under another, and the reader of a log should not have to
@@ -1009,6 +1205,14 @@ def main() -> int:
     run_p.add_argument("--skip-html", action="store_true",
                        help="forward --skip-html to run_pipeline_process.sh so the HTML "
                             "views (94-255 MB per project) are never generated")
+    run_p.add_argument("--reblame", action="store_true",
+                       help="re-blame every file in step 7 instead of skipping the "
+                            "ones that already have .blame output. Needed whenever the "
+                            "blame itself changed (a git blame flag, a formatBlame.pl "
+                            "fix): without it a step-7 resume reports every file as "
+                            "already done, exits 0, and step 10 rebuilds the Parquet "
+                            "from the old blame. Do NOT use it to resume an interrupted "
+                            "run — the skip is what makes a resume cheap")
     run_p.add_argument("--drop-memo", "--no-memo", action="store_true",
                        help="delete memo/ (45-88%% of the workdir) once a project "
                             "validates. NOT prevention: the tokenizer requires "
@@ -1043,6 +1247,20 @@ def main() -> int:
                             "lost its repack at the end of step 2 with 15.2 h of "
                             "tokenizing already on disk, and --from-step 3 skips "
                             "the clone, the tokenize and the repack")
+    run_p.add_argument("--retokenize", metavar="EXTS", default="",
+                       help="re-tokenize only these extensions, because the tokenizer "
+                            "that produced their cached tokens was corrected. Comma "
+                            "separated, without dots: --retokenize rs. Needs "
+                            "--from-step 2 exactly, and cannot be combined with "
+                            "--mask-widened or sharding. This is NOT a mask change: "
+                            "the mask decides WHICH files are tokenized, this decides "
+                            "HOW. It exists because the blob map keys reuse on the "
+                            "command string and the mask, and rebuilding a tokenizer "
+                            "binary changes neither, so a plain resume would serve the "
+                            "poisoned tokens back and exit 0. blobExec drops the "
+                            "matching blob_map rows and the memo entries together, in "
+                            "one transaction with the tree, commit and ref maps, and "
+                            "refuses the run rather than invalidating nothing.")
     run_p.add_argument("--mask-widened", action="store_true",
                        help="reuse each project's existing tokenizations across a "
                             "MASK CHANGE instead of rebuilding from cold. Needs "
@@ -1082,19 +1300,57 @@ def main() -> int:
                             "project's provenance (which roster found it, which "
                             "stratum it was assigned, its shared-history cluster "
                             "and the mask it was tokenized with) into the "
-                            "Parquet. Omit and those columns are written empty")
+                            "Parquet. OMITTING THIS SILENTLY EMPTIES 29 COLUMNS "
+                            "on every row of the project: clone_url, "
+                            "provenance_status, source, stratum, fact, "
+                            "contested, label_date, owner, repo, roster_name, "
+                            "roster_lang, language, commits, size_class, "
+                            "size_kb, stars, pushed_at, license, owner_type, "
+                            "archived, fork, the seven history_* columns, "
+                            "manifest_category and file_mask. Nothing fails: the "
+                            "file keeps all 70 columns, validate.py passes it, "
+                            "and a blank column is indistinguishable from "
+                            "provenance that is genuinely unknown. ctp therefore "
+                            "REFUSES a run that reaches step 10 without it, "
+                            "unless you pass --allow-empty-provenance. The "
+                            "matching --project-key is not yours to pass: ctp "
+                            "sends the manifest name per project, so it cannot "
+                            "be forgotten or mistyped")
     run_p.add_argument("--firm-map", default="", metavar="PATH",
                        help="domain->firm CSV (data/affiliation.merged.csv) to "
                             "join per row against person_domain, filling "
                             "firm_raw and firm_source. Unlike --project-meta "
                             "this is not a per-project constant: it is a real "
                             "join, so the map stays an external auditable file. "
-                            "Omit and those columns are written empty")
+                            "OMITTING THIS SILENTLY EMPTIES 3 COLUMNS on every "
+                            "row — firm_raw, firm and firm_source — and firm "
+                            "attribution is the measurement this corpus exists "
+                            "for. The run still succeeds and still validates, so "
+                            "ctp REFUSES a run that reaches step 10 without it, "
+                            "unless you pass --allow-empty-provenance")
     run_p.add_argument("--firm-canonical", default="", metavar="PATH",
                        help="the reviewed canonical-name table "
                             "(data/firm_canonical.csv) that fills the `firm` "
-                            "column. Needs --firm-map. Omit and `firm` repeats "
-                            "`firm_raw`, so the 48 split spellings stay split")
+                            "column. Needs --firm-map. OMITTING THIS DOES NOT "
+                            "EMPTY `firm`, it fills it WRONGLY: `firm` repeats "
+                            "`firm_raw` verbatim, so the 48 split spellings stay "
+                            "split and every firm's share is understated. ctp "
+                            "REFUSES a run that reaches step 10 with --firm-map "
+                            "but without this, unless you pass "
+                            "--allow-empty-provenance")
+    run_p.add_argument("--allow-empty-provenance", action="store_true",
+                       help="publish Parquets whose provenance and firm columns "
+                            "are blank, which ctp refuses by default. There is "
+                            "no way to reach this except by typing it, and that "
+                            "is the point: omitting --project-meta used to print "
+                            "nothing at all, at any layer, while emptying 29 "
+                            "columns of a 6h48m run. Legitimate uses "
+                            "are a test fixture, a one-project smoke run, and a "
+                            "corpus whose sidecar does not exist yet. Taking it "
+                            "prints, itemised, which columns were given up. Do "
+                            "not leave it in a launcher script: ctp refuses it "
+                            "when nothing would actually be blank, so it cannot "
+                            "sit there silencing a later run")
     run_p.add_argument("--mask", default="", metavar="REGEX",
                        help="tokenize these files instead of the mask in the "
                             "manifest, for every project in this invocation. "

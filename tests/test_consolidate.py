@@ -131,6 +131,10 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(consolidate, "CORPUS", tmp_path)
     monkeypatch.setattr(consolidate, "OUT", out)
     monkeypatch.setattr(consolidate, "DB", tmp_path / "ctp.duckdb")
+    # STATE is derived from CORPUS at import, so patching CORPUS alone leaves it
+    # pointing at the real repo's state/ directory. A test that probes or creates
+    # a lock there would touch a live run's bookkeeping.
+    monkeypatch.setattr(consolidate, "STATE", tmp_path / "state")
     return SimpleNamespace(root=tmp_path, out=out)
 
 
@@ -170,11 +174,12 @@ def test_lock_held_is_true_while_another_process_holds_it(sandbox):
 # project_rows
 # --------------------------------------------------------------------------- #
 
-def test_project_rows_builds_one_nine_column_tuple_per_project(sandbox):
+def test_project_rows_builds_one_ten_column_tuple_per_project(sandbox):
     """The tuple shape must match the projects table, or executemany fails.
 
-    The shape grew from seven columns to nine: rows_unreadable and
-    parquet_missing now travel with every project, false for a healthy one.
+    The shape grew from seven columns to ten: rows_unreadable,
+    parquet_missing and excluded_because now travel with every project. The
+    first two are false for a healthy project, the third is None.
     """
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=1234\nbytes=5678\n", parquet=True)
@@ -182,7 +187,7 @@ def test_project_rows_builds_one_nine_column_tuple_per_project(sandbox):
     rows = consolidate.project_rows()
     assert rows == [("jq", "https://github.com/jqlang/jq.git", "community", "S",
                      "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"),
-                     False, False)]
+                     False, False, None)]
 
 
 def test_project_rows_classifies_all_four_states(sandbox):
@@ -195,13 +200,65 @@ def test_project_rows_classifies_all_four_states(sandbox):
         "queued\thttps://q.git\tcommunity\t\\.[ch]$\tS")
     make_project(sandbox.out, "done", stamp="rows=7\nbytes=8\n", parquet=True)
     make_project(sandbox.out, "failed")
-    lockfile = make_project(sandbox.out, "running") / ".lock"
+    make_project(sandbox.out, "running")
+    # The lock lives in ctp.py's state directory, NOT in the work directory.
+    # This test used to create it inside the workdir, which made it agree with
+    # the bug it was supposed to catch: consolidate.py probed the same wrong
+    # path, so RUNNING never fired against a real run.
+    lockdir = consolidate.STATE / "running"
+    lockdir.mkdir(parents=True, exist_ok=True)
 
-    with held_lock(lockfile):
+    with held_lock(lockdir / ".lock"):
         states = {r[0]: r[4] for r in consolidate.project_rows()}
 
     assert states == dict(done="DONE", running="RUNNING",
                           failed="FAILED", queued="QUEUED")
+
+
+def test_the_liveness_probe_never_writes_to_the_lock_file(sandbox):
+    """A probe must not modify what it observes.
+
+    `lock_held` used to open the lock "w", which truncates. Rebuilding the index
+    therefore truncated the lock file of a RUNNING job. It was harmless only
+    because nothing writes content to that file — a latent bug, not a safe design.
+    """
+    lockdir = consolidate.STATE / "proj"
+    lockdir.mkdir(parents=True, exist_ok=True)
+    lockfile = lockdir / ".lock"
+    lockfile.write_text("sentinel content\n")
+
+    assert consolidate.lock_held(lockfile) is False, "nobody holds it"
+    assert lockfile.read_text() == "sentinel content\n", "the probe truncated it"
+
+
+def test_an_unreadable_lock_file_counts_as_held(sandbox):
+    """Refusing to guess is the safe answer to 'is a run in flight'."""
+    lockdir = consolidate.STATE / "proj"
+    lockdir.mkdir(parents=True, exist_ok=True)
+    lockfile = lockdir / ".lock"
+    lockfile.write_text("")
+    lockfile.chmod(0o000)
+    try:
+        assert consolidate.lock_held(lockfile) is True
+    finally:
+        lockfile.chmod(0o600)
+
+
+def test_project_rows_ignores_a_stale_lock_left_in_the_work_directory(sandbox):
+    """A lock inside the workdir must not be believed.
+
+    run_pipeline_process.sh deletes the work directory at FROM_STEP=1 and again
+    from its EXIT trap, so a lock kept there is unreliable by construction. ctp.py
+    therefore locks state/<name>/.lock. A workdir lock is either a leftover or a
+    different tool's file, and reading it as RUNNING hides a FAILED project.
+    """
+    write_manifest(sandbox.root, "proj\thttps://p.git\tcommunity\t\\.[ch]$\tS")
+    workdir = make_project(sandbox.out, "proj")
+
+    with held_lock(workdir / ".lock"):
+        states = {r[0]: r[4] for r in consolidate.project_rows()}
+
+    assert states == {"proj": "FAILED"}
 
 
 def test_project_rows_skips_comments_and_blank_lines(sandbox):
@@ -238,9 +295,9 @@ def test_project_rows_reports_no_parquet_path_when_the_file_is_absent(sandbox):
     write_manifest(sandbox.root, ROW)
     make_project(sandbox.out, "jq", stamp="rows=9\nbytes=9\n", parquet=False)
     (name, _url, _cat, _cls, state, n_rows, parquet,
-     rows_unreadable, parquet_missing) = consolidate.project_rows()[0]
+     rows_unreadable, parquet_missing, excluded) = consolidate.project_rows()[0]
     assert (name, state, n_rows, parquet) == ("jq", "DONE", 9, None)
-    assert (rows_unreadable, parquet_missing) == (False, True)
+    assert (rows_unreadable, parquet_missing, excluded) == (False, True, None)
 
 
 def test_project_rows_does_not_flag_a_queued_project_as_missing_data(sandbox):
@@ -318,11 +375,12 @@ def test_main_replaces_the_projects_table_and_inserts_every_row(sandbox, con, ca
     assert "token_rows bigint" in ddl
     assert "rows_unreadable boolean" in ddl
     assert "parquet_missing boolean" in ddl
+    assert "excluded_because text" in ddl
     sql, rows = con.batches[0]
-    assert sql == "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    assert sql == "insert into projects values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     assert rows == [("jq", "https://github.com/jqlang/jq.git", "community", "S",
                      "DONE", 1234, str(sandbox.out / "jq" / "jq-dataset.parquet"),
-                     False, False)]
+                     False, False, None)]
 
 
 def test_main_loads_the_metrics_ledger_as_a_tsv_with_a_header(sandbox, con):
@@ -456,6 +514,81 @@ def test_main_counts_and_names_a_done_project_whose_parquet_is_gone(
     assert "here-dataset.parquet" in view
 
 
+# --------------------------------------------------------------------------- #
+# publication exclusions
+# --------------------------------------------------------------------------- #
+
+def test_project_rows_carries_the_reason_for_an_excluded_project(
+        sandbox, monkeypatch):
+    """The reason must reach the projects table. A bare boolean would record
+    that a project was dropped without recording why, which is the thing the
+    sampling record exists to prevent."""
+    monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
+                        {"twin": "near-duplicate of other"})
+    write_manifest(sandbox.root,
+                   "twin\thttps://t.git\tcompany-owned\t\\.[ch]$\tM",
+                   "other\thttps://o.git\tcompany-owned\t\\.[ch]$\tM")
+    make_project(sandbox.out, "twin", stamp="rows=5\nbytes=6\n", parquet=True)
+    make_project(sandbox.out, "other", stamp="rows=7\nbytes=8\n", parquet=True)
+
+    reasons = {r[0]: r[9] for r in consolidate.project_rows()}
+    assert reasons == {"twin": "near-duplicate of other", "other": None}
+
+
+def test_main_keeps_an_excluded_project_in_projects_but_out_of_the_tokens_view(
+        sandbox, con, monkeypatch, capsys):
+    """This is the whole point of the mechanism. Deleting the manifest row would
+    drop the project from the sampling record; publishing it would count the
+    same authorship twice. The row stays, the tokens do not."""
+    monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
+                        {"twin": "near-duplicate of other"})
+    write_manifest(sandbox.root,
+                   "twin\thttps://t.git\tcompany-owned\t\\.[ch]$\tM",
+                   "other\thttps://o.git\tcompany-owned\t\\.[ch]$\tM")
+    make_project(sandbox.out, "twin", stamp="rows=5\nbytes=6\n", parquet=True)
+    make_project(sandbox.out, "other", stamp="rows=7\nbytes=8\n", parquet=True)
+
+    consolidate.main()
+
+    _sql, rows = con.batches[0]
+    assert {r[0] for r in rows} == {"twin", "other"}, "the row must survive"
+    assert {r[0]: r[4] for r in rows} == {"twin": "DONE", "other": "DONE"}
+    view = con.find("create or replace view tokens")
+    assert "twin-dataset.parquet" not in view
+    assert "other-dataset.parquet" in view
+
+
+def test_main_names_and_counts_a_publication_exclusion(
+        sandbox, con, monkeypatch, capsys):
+    """A silent exclusion is worse than the crash it replaces, so the summary
+    prints the name and the reason."""
+    monkeypatch.setattr(consolidate, "PUBLICATION_EXCLUSIONS",
+                        {"twin": "near-duplicate of other"})
+    write_manifest(sandbox.root,
+                   "twin\thttps://t.git\tcompany-owned\t\\.[ch]$\tM",
+                   "other\thttps://o.git\tcompany-owned\t\\.[ch]$\tM")
+    make_project(sandbox.out, "twin", stamp="rows=5\nbytes=6\n", parquet=True)
+    make_project(sandbox.out, "other", stamp="rows=7\nbytes=8\n", parquet=True)
+
+    consolidate.main()
+
+    out = capsys.readouterr().out
+    assert "publication exclusions: 1" in out
+    assert "- twin: near-duplicate of other" in out
+    assert "tokens view: 1,234,567 rows across 1 projects" in out
+
+
+def test_the_shipped_exclusion_list_drops_tendb_and_keeps_tdbctl(sandbox):
+    """The fork pair decision, pinned. tendb has 4.3x the files but every extra
+    path is upstream Oracle, Facebook or Percona code; tdbctl holds 4.9x more
+    first-party authorship. Swapping these two silently would publish the wrong
+    half of a near-duplicate pair."""
+    assert "tencent__tendbcluster-tendb" in consolidate.PUBLICATION_EXCLUSIONS
+    assert "tencent__tendbcluster-tdbctl" not in consolidate.PUBLICATION_EXCLUSIONS
+    why = consolidate.PUBLICATION_EXCLUSIONS["tencent__tendbcluster-tendb"]
+    assert "tencent__tendbcluster-tdbctl" in why, "the reason must name the twin"
+
+
 def test_main_says_nothing_about_flags_when_every_project_is_healthy(
         sandbox, con, capsys):
     """The summary must stay quiet on a clean corpus, or the operator learns to
@@ -468,6 +601,7 @@ def test_main_says_nothing_about_flags_when_every_project_is_healthy(
     out = capsys.readouterr().out
     assert "parquet missing" not in out
     assert "unreadable" not in out
+    assert "publication exclusions" not in out
 
 
 def test_main_doubles_a_quote_in_a_project_path_in_the_tokens_view(sandbox, con):

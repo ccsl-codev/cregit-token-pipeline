@@ -54,6 +54,14 @@ of the 200. The other 12 L-class projects are held back on disk grounds (one
 L-class working directory measured 435 GB). Run them from
 `manifest.sample.tsv` once retention has a Parquet-only level.
 
+**The published set is smaller than the run set: 185 of the 188.** Two projects are
+excluded on purpose and one is still running. `tencent__tencentkona-21` cannot be
+parsed completely and `tencent__tendbcluster-tendb` is a near-duplicate of
+`tencent__tendbcluster-tdbctl`; both keep their manifest row and their `projects`
+row, and `consolidate.py` records the reason in `excluded_because`. Read published
+membership from that column, never from the presence of a Parquet file.
+`docs/LIMITATIONS.md` holds the measurements.
+
 How a project gets its `stratum` is `docs/CODEBOOK.md`. It is a claim about who
 *controls* a project and never about who contributes to it.
 
@@ -220,13 +228,13 @@ per-project constant: it comes from a per-row join on `person_domain`.
 | 40 | `original_commit_sha` | VARCHAR | `commitmap` | `coalesce(m.originalcid, t.commit_sha)` |
 | 41 | `author_name` | VARCHAR | `commits.autname` | raw git string, not resolved |
 | 42 | `author_email` | VARCHAR | `commits.autemail` | |
-| 43 | `author_date` | VARCHAR | `commits.autdate` | **string, not a timestamp** |
+| 43 | `author_date` | VARCHAR | `commits.autdate` | **string, not a timestamp**: `yyyy-MM-dd HH:mm:ss` in the JVM time zone (UTC on the run machines), no UTC offset |
 | 44 | `committer_name` | VARCHAR | `commits.comname` | |
 | 45 | `committer_email` | VARCHAR | `commits.comemail` | |
-| 46 | `committer_date` | VARCHAR | `commits.comdate` | **string, not a timestamp** |
+| 46 | `committer_date` | VARCHAR | `commits.comdate` | **string, not a timestamp**: as `author_date` |
 | 47 | `commit_summary` | VARCHAR | `commits.summary` | subject line only |
 | 48 | `personid` | VARCHAR | `emails.personid` | the identity-merged person. LEFT join — may be NULL |
-| 49 | `person_name` | VARCHAR | `coalesce(persons.personname, emails.personid)` | |
+| 49 | `person_name` | VARCHAR | `coalesce(persons.personname, emails.personid)` | always equal to `personid`: `personname` is never filled, so there is no display name |
 | 50 | `person_email` | VARCHAR | `emails.emailaddr` | **a real address unless the file is anonymized** |
 | 51 | `person_domain` | VARCHAR | `emails.domain` | the key the firm join uses |
 | 52 | `firm_raw` | VARCHAR | `affiliation.merged.csv.company` | the map's string, unaltered. `''` = domain not in the map |
@@ -249,14 +257,20 @@ per-project constant: it comes from a per-row join on `person_domain`.
 | 69 | `footer_personids` | VARCHAR[] | `footers` → `emails` | resolved **set**: DISTINCT and sorted |
 | 70 | `footer_person_names` | VARCHAR[] | `footers` → `emails` → `persons` | resolved **set**: DISTINCT and sorted |
 
-Columns 41–46 are the raw git strings on the commit; 48–51 are the same person
-after cregit's identity merge across addresses. Use `personid` to count people
+Columns 41, 42, 44, 45 and 47 come from the commit log; 43 and 46 are not git strings but
+dates that slickgitlog formats in the JVM time zone with no UTC offset (set `TZ=UTC` for a
+rebuild; [`LIMITATIONS.md`](LIMITATIONS.md)). 48–51 are the same person after cregit's
+identity merge across addresses (the merge rule and its limits: `LIMITATIONS.md`). Use `personid` to count people
 and `author_name` only to see what the commit actually said.
 
 Trailer keys are matched case-insensitively and each typed list (56–68) is
 ordered by the trailer's own index, so element *i* of one list does not
 correspond to element *i* of another. Columns 69 and 70 are DISTINCT and sorted,
 so they are sets and are **not** positionally aligned with the 13 typed lists.
+The trailers follow JGit 4.6 `getFooterLines`, not `git interpret-trailers` (no 25% rule,
+no blank line necessary, continuation lines dropped). In dataset v1 (cregit `1f17663` and
+later, and the rewrite of the `95cdc88` files) each typed list keeps one entry for each
+person ([`LIMITATIONS.md`](LIMITATIONS.md)).
 
 ### 3.3 How the blocks are joined
 
@@ -424,6 +438,8 @@ analysing the data. The ones most likely to change a result:
 | every `.h` file was parsed with the C grammar | every header |
 | runs are not pinned to a commit | byte-for-byte reproduction |
 | 2 of the 188 run-set projects have no Parquet | corpus totals |
+| 185 of the 188 are published; read `excluded_because`, not file presence | corpus totals, per-org aggregates |
+| a vendored dependency credits its whole library to the importing author | any per-org or per-author aggregate |
 
 ---
 
