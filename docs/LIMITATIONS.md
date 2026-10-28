@@ -11,7 +11,7 @@ magnitude says so rather than guessing.
 
 ---
 
-**One drawn project is excluded from the dataset: `tencent__tencentkona-21`.** It was
+**Pilot run only (stock srcML): one drawn project is excluded: `tencent__tencentkona-21`.** It was
 selected by the sampling procedure and it is not published. Two independent reasons,
 both measured:
 
@@ -28,6 +28,11 @@ both measured:
 
 The project is excluded rather than published with gaps it cannot report. The row stays
 in the manifest with its reason so the sampling record remains complete.
+
+This exclusion is only for the pilot run, which used stock srcML. Dataset v1 used srcML
+with the patch of the authors against non-termination, and the release has a file for
+`Tencent__TencentKona-21` (5,000+ layer, cregit `57551d7`; it is in the plain-blame list
+below).
 
 **A second project is excluded as a near-duplicate: `tencent__tendbcluster-tendb`.**
 The sampling frame drew both halves of one fork pair. The two repos share **505,056
@@ -148,6 +153,14 @@ them. The effect on these files is not measured. Three mechanisms caused it:
    ran for hours, the operator made a plain blame apart, stopped the slow git, and put
    the plain `.blame` file in its place. **No log line marks these files.** The table
    at the end of this entry lists them.
+
+The time limit is wall time. Whether a file falls back depends on the machine: its load,
+the number of parallel jobs and the restarts of the run. The only record is the
+`PLAIN-BLAME` line of the pipeline log, and the release does not hold the logs. No option
+of the tools makes plain blame for a given list of files. Thus a rebuild on another
+machine can give `-C100` blame where the release has plain blame, or the reverse (tool
+review of 2026-10-28). The counts of this entry and of the entry of the 1,000-4,999 commit
+layer (201 + 367 files) are lower bounds.
 
 Count on 2026-10-14 17:45 UTC, from the pipeline logs on the analysis machine. It has
 3,532 finished projects, and 3,517 of them have their logs there:
@@ -278,7 +291,8 @@ template copies `/data/cregit-ec2` kept the old file. On spot a, the batch 3 par
 * **Effect.** The new code changes the output in two cases only. (1) `-C100` runs for
   more than 3600 s: plain blame follows, with a `PLAIN-BLAME` line (previous entry).
   (2) git fails: the new code writes no `.blame` file and step 7 fails, so the project
-  fails and runs again. The old code wrote an empty `.blame` file and exited 0. In all
+  fails and runs again. The old code wrote an empty or a partial `.blame` file and exited
+  0. In all
   other cases, the old and the new script give the same `.blame` bytes (measured on 116
   real files).
 * **Detect.** In these runs, a file differs from the output of the ledger commit only if
@@ -290,9 +304,10 @@ template copies `/data/cregit-ec2` kept the old file. On spot a, the batch 3 par
   `Pzqqt__android_kernel_xiaomi_marble` 1 (the L7-20 run, copy `/bL7` at `1f17663`).
   The logs of the L7-20b run (copy `/bL7b`) are not on the analysis machine yet.
 
-**Dataset v1: five cregit commits wrote the Parquets, and one equality is not
-measured.** Source: `tools.lock` of the dataset paper repository (checked 2026-10-14).
-All five commits start from `95cdc88`. Each machine made the libexpat gate Parquet
+**Both commit layers: seven cregit commits wrote the Parquets, and one equality is not
+measured.** Source: `tools.lock` of the dataset paper repository (checked 2026-10-14; the
+rows of `365a47a` and `14b8db4` and the branches: tool review of 2026-10-28).
+All seven commits start from `95cdc88`. Each machine made the libexpat gate Parquet
 (libexpat at `a76b1174`, fixed flags) and compared it before its runs started.
 
 | cregit | what it is | runs | libexpat gate |
@@ -302,6 +317,16 @@ All five commits start from `95cdc88`. Each machine made the libexpat gate Parqu
 | `1f17663` | `95cdc88` plus the trailer fix: the `footer_*` columns come from the original log DB, one entry for each person | batch7-batch10, part of batch11-batch18, L7-20, L7-20b, L22, local-a | `14eb5d72…`, 2,196,248 B |
 | `57551d7` | `1f17663` plus the 3600 s `-C100` limit | part of batch11-batch18, batch19-batch26, L23, L1r, local-b, local-c | `14eb5d72…`, 2,196,248 B |
 | `23e4ccb` | `57551d7` plus plain blame after a `-C100` git exit 128 | local-d (`gitlab.inria.fr__cedar__connectionlens` only) | `14eb5d72…`, 2,196,248 B |
+| `365a47a` | `57551d7` plus a lock for each output file and a skip of a finished `.blame` | the blame step of 4 running copies, changed in place on 2026-10-15: batch11a1 (`googleapis__google-cloud-java`) and batch19b1 (`leanprover__lean4`) from 12:08 UTC, batch13a1 (`RMerl__asuswrt-merlin.ng`) from 12:25 UTC, bL7b (`liferay__liferay-portal`) from 14:03 UTC. The ledgers name `57551d7` (`liferay__liferay-portal`: `1f17663`) | `14eb5d72…`, 2,196,248 B |
+| `14b8db4` | `57551d7` plus the fix of the path defects of step 7 (entry below) | the path-fix rerun (35 projects of both layers) and `BRL-CAD__brlcad` | `14eb5d72…`, 2,196,248 B |
+
+Public branches of `github.com/ccsl-codev/cregit`: `95cdc88` the branch of the batch 2
+cloud run (its head);
+`9ccead6` `fix/blame-time-limit-95cdc88`; `1f17663` and `57551d7`
+`fix/trailers-original-db` (`57551d7` is the head); `23e4ccb` `fix/blame-exit128-fallback`;
+`365a47a` `fix/blame-skip-lock`; `14b8db4` `fix/path-quoting`. `95cdc88` is the merge of
+the branches of pull request #110 (`perf/step2-serial-path`, open) and pull request #109
+(`fix/srcml-nontermination`, merged as one squash commit).
 
 A sixth commit, `157cf8b`, wrote the first batch 1 outputs on the local machine. The
 local-c run (49 projects) and the L1r run (`torvalds__linux`, `SAP__project-foxhound`)
@@ -324,11 +349,14 @@ the analysis machine has no L1r output for `SAP__project-foxhound` yet.
   spot-run projects, the rewrite also built the persons DB again from a pinned clone.
   This was measured equal on 1 project (`Activiti__Activiti`), except the
   `emails.dateadded` time.
-* **Open defect: `mongodb__mongo` has the old `footer_*` values.** Its ledger names
-  `9ccead6`, and the rewrite (`s7-run/footer_fix_batches.py`) takes only Parquets
-  whose ledger names `95cdc88`. So the rewrite skipped it (`census-cloud-fixed/pending.txt`: "1 projects not settled"). But
-  `9ccead6` has the trailer code of `95cdc88`. Until the rewrite runs on it, do not use
-  the `footer_*` columns of `mongodb__mongo`.
+* **Fixed on 2026-10-16: `mongodb__mongo`.** Its ledger names `9ccead6`, which has the
+  trailer code of `95cdc88`. The first rewrite (`s7-run/footer_fix_batches.py`) took only
+  Parquets whose ledger names `95cdc88`, so it skipped this file. On 2026-10-16 at 19:44
+  UTC the rewrite ran on it (study commit `206f134`; status ok in the `manifest.tsv` of
+  the previous item, output sha256 `3fdd5ff4…`). The merge of the 5,000+
+  layer took this output (`merge_input_sha256` in `data/REBUILD-TARGETS.tsv` of the paper
+  repository, merge input `post-fix`). The `pending.txt` of the same folder still names
+  the project: that file is stale.
 
 **Dataset v1: Python and TypeScript are not tokenized, so the dataset is incomplete in two
 ways.** The tokenizers read C, C++, Java and Rust only (srcML and the Rust lexer). This is a
@@ -534,6 +562,12 @@ of all earlier commits of the fork has these defects:
 3. Only in cregit `95cdc88` and `1f17663` (and the commits before them): `formatBlame.pl`
    ran git through a shell string. A `'` in the path breaks the command. The script then
    wrote an empty `.blame` file and exited 0, so the file has no rows and no error.
+   The old script does not check the exit status of git at all. So any git failure
+   (not only a `'`) gives an empty or a partial `.blame` file and exit 0, and the file
+   then has no rows or only a part of its rows (test of the tool review of 2026-10-28:
+   a git that stops after 1 of 2 records). This applies to all runs of `95cdc88` and
+   `1f17663` code (batch1rest to batch 10, part of batches 11-18, L7-20, L7-20b, L22,
+   local-a). Only the `'` class and the check of 61 Parquets below are measured.
    cregit `57551d7`, `9ccead6` and `23e4ccb` run git with an argument list and do not have
    this defect.
 
@@ -676,15 +710,73 @@ whole frame, exact):
 Sources: `~/Projects/cregit-workspace/agent-runs-20261023/loc-tools/SUMMARY.md`;
 `RELEASE_PLAN.md`, decision "Code-size rule" (2026-10-23).
 
-**Both commit layers: identities get pseudonyms, but `commit_summary` is published as git
-has it.**
+**Both commit layers: the tokens differ from stock srcML `d382719`.** The C, C++ and
+Java tokens come from srcML `d382719` with the patch `nix/srcml-nontermination.patch` of
+cregit (commits `50a63193` and `543fed6a`, public branch `fix/cregit-nontermination` of
+`github.com/EllianCarlos/srcML`). The patch changes the tokens of some files: two
+adjacent string literals (`"a""b"`) are two tokens (stock srcML can run a quote swap to the
+end of the file); files on which stock srcML does not finish are present, with the
+recovery markup of the patched parser; some runs of quotes in code that the preprocessor
+removes (for example in `#if 0`) give other tokens. The number of such files is small and
+not measured (fuzz and hand cases of the tool review of 2026-10-28). Exception: the
+superseded batch 1 run of `157cf8b`, which used stock srcML and is not in the release.
 
-* `commit_summary` is the subject line exactly as git has it. A name or an address that a
-  person wrote into a message stays (user decision 2026-10-25; it replaces the choice of
-  2026-10-24).
-* The trailer columns (`footer_*`) get pseudonyms. The release uses `pseudonymize.py` of
-  ctp-anon `f3fdd7a` (scheme 2, nested sha256), not `anonymize_parquet.py` of the entries
-  below. The registry (real identity to pseudonym) stays private. It is never published.
+**Both commit layers: an older srcML defect stays.** A string on a preprocessor line ends
+at a backslash-newline. In `sqlite3.c` an `#error` line has such a string, and the
+tokens after it go wrong in both builds (stock and patched). The number of such files is
+not measured.
+
+**Both commit layers: `person_name` is always equal to `personid`, and the merge rule of
+the person ids has limits.** `persons.personname` is never filled, so
+`coalesce(personname, personid)` gives the person id (a scan of 199 files and a test with
+the persons jar of the dataset). There is no display name. `unifyPersons.scala`
+(`157cf8b`) makes the key from the name in lower case with no accents; a name of one word
+gets `at` and its address added. Two persons with the same full name get one id. An address
+that two names share joins them into one id, and such joins chain. When two keys tie, the
+order of a hash set decides. The lower-case step (`toLowerCase` with no locale) uses the
+default locale of the JVM. False merges are not counted. In the release, `person_name` and
+`personid` differ only in the first letter of the pseudonym (`Author`, `author`).
+
+**Both commit layers: the trailer columns follow JGit 4.6, not git.** The `footer_*`
+lists come from `getFooterLines` of JGit 4.6.0 (slickgitlog) on the original message:
+every `Key: value` line of the last paragraph is a trailer, with no 25% rule and no blank
+line necessary, and a continuation line is dropped. So a `Reported-by:` line in a last
+paragraph of prose gives 1 trailer, and git 2.56 gives 0 (a probe repository of the tool
+review of 2026-10-28). Each of the 13 typed lists holds one entry for each person (the
+entry with the lowest trailer index); two values are one person when their addresses
+give the same `personid` or the same address in lower case. The rewrite of the `95cdc88`
+Parquets uses the same SQL, so the rule holds for all files.
+
+**Both commit layers: some run-time inputs are not pinned.** (1) Step 10
+(`generate_dataset.py`) runs `INSTALL sqlite_scanner`, so DuckDB downloads the extension
+from the network. The build of the extension on the run machines is not recorded; the
+local machine has build `f79b1db` for DuckDB 1.5.5 (2026-10-28). (2) Rule E of
+`pseudonymize.py` (`find_psl`) takes the newest Public Suffix List in `/nix/store`. The
+release used the list with sha256 prefix `65365c4c9a4a`; another list stops the write.
+(3) formatBlame, the runner and ctp do not set `GIT_CONFIG_NOSYSTEM` or
+`GIT_CONFIG_GLOBAL`, so the git configuration of the machine can change the blame. (4)
+The time zone (the dates entry below).
+
+**Both commit layers: a torn ledger line loses the next row too.** `ledger.py`
+(`ca113e3`) appends one JSON line for each step. If a crash cuts a line, the next append
+joins it, and `read()` drops both rows. The docstring ("a crash loses at most the row
+being written") is wrong. Count on 2026-10-28: in the raw ledgers of the release work
+(`release-work/ledgers-20261028/`: 12,291 ledger files, 870,561 lines that are not
+empty), **0** lines fail `json.loads`. So this defect lost no row of the release ledgers.
+
+**Both commit layers: identities get pseudonyms, but the pseudonymizer does not change
+`commit_summary`.**
+
+* `commit_summary` is the subject line of the commit log of the cregit run, and the
+  pseudonymizer does not change it. A name or an address that a person wrote into a
+  message stays (user decision 2026-10-25; it replaces the choice of 2026-10-24). A check
+  of this column against the original commit messages is in progress.
+* The trailer columns (`footer_*`) get pseudonyms. The release used `pseudonymize.py` of
+  ctp-anon `4be3800`, then the hotfix `a4b511b` (public branch
+  `feat/pseudonymise-identity-columns`; scheme 2, a nested sha256 with keys from a salt),
+  not `anonymize_parquet.py` of the entries below and not `f3fdd7a`. The salt was deleted
+  after the write, by design, so nobody can compute these pseudonyms again. The registry
+  (real identity to pseudonym) stays private. It is never published.
 * An e-mail value is published as a pseudonym, an at sign and a domain. Some values have
   two or more at signs. In the 5,000+ layer: 680 distinct values in 178 files, on
   15,282,753 token rows (0.0645% of the tokens of the layer). 96% of these token rows hold
@@ -1093,8 +1185,9 @@ mojibake there (22 in `fastled__fastled` files with a BOM, 7 in Rust files).
   `ellians-master/.../sep-25-presentation/mojibake-census/`.
 
 **Publishing the Parquet as it stands publishes contributors' e-mail addresses.**
-`person_email` (column 50) is a real address. `anonymize_parquet.py` is the
-release path: it rewrites the e-mail local part to `author_NNNN` and names to
+`person_email` (column 50) is a real address. `anonymize_parquet.py` was the
+release path of the pilot run (the release of both commit layers used `pseudonymize.py`
+with a salt; see the `commit_summary` entry above): it rewrites the e-mail local part to `author_NNNN` and names to
 `Author N`, running every identity string — including each element of the 15
 trailer arrays — through one registry, so a person carries one pseudonym
 everywhere. It classifies **every** input column into pass-through, transform or
@@ -1105,7 +1198,7 @@ unchanged, and `count(distinct person_email)` and `count(distinct person_name)`
 must not drop — two real people collapsing onto one pseudonym would lower a
 distinct-contributor count for free.
 
-Two properties to plan a release around. There is **no salt and no key**: ids are
+Two properties of `anonymize_parquet.py` (not of the release tool). There is **no salt and no key**: ids are
 assigned by sorting the distinct lowercased values, so two runs over the same
 inputs are byte-identical and two releases diff cleanly, but the only thing
 protecting the mapping is not publishing the registry. And the registry spans
@@ -1160,7 +1253,9 @@ different languages — and the measured effect is confined to C against C++.**
 derives the extension afterwards and uses it only to pick `--language` and to name
 the temporary input file, and it validates nothing when it reads a cached entry
 back. So whichever of two identical-content files is tokenized first decides the
-grammar for both.
+grammar for both. With parallel workers, which file is first depends on the schedule, so
+the grammar of such a file can change from one run to the next, and a rerun is not
+byte-identical for it (test of the tool review of 2026-10-28). Dataset v1 is not measured.
 
 Measured over all 188 projects, from `blob_map`, whose key is `(orig_blob, path)`:
 identical content means an identical blob sha, so an affected blob is exactly one
@@ -1195,7 +1290,7 @@ so it yields no blame line and therefore no dataset row:
 | --- | --- |
 | blob denylist, keyed by **git blob sha** — a shipped data file in the cregit repo, so an exclusion can be cited | no |
 | blob over JGit's 50 MiB stream-file threshold | no |
-| tokenizer timeout (the parser fails to terminate on a construct) | **yes** — the project cannot complete and gets no Parquet |
+| tokenizer timeout (the parser fails to terminate on a construct) | in the pilot run, **yes** — the project could not complete and got no Parquet. In the cregit commits of dataset v1 (`157cf8b` and later): no, blobExec excludes the blob after 600 s of wall time |
 
 Only the third is visible from outside, as a missing project. The counters count
 `(sha, path)` pairs rather than files, so a count of 4 can be one file at two
@@ -1204,6 +1299,26 @@ paths across two revisions. Separately, a mask-selected file can tokenize to an
 that mechanism accounts for **0 files**: all 36 HEAD files absent from the 186
 published Parquets are parser crashes, measured 2026-09-20. Its count over
 historical revisions is still unmeasured.
+
+**An excluded blob also moves the credit of the history.** The text above is true only
+for the head. blobExec (`Walker.scala`, `assemble`) drops an excluded blob from its
+commit in the tokenized history. The next commit that has the file adds the whole file
+again, so `git blame -C100` gives every line of that revision to that commit. A test of
+the tool review of 2026-10-28 (one revision of a file with 31 lines times out) gave all
+31 lines to the next commit. The causes are the denylist, a blob over 50 MiB, a parser
+crash, a tokenizer error and the tokenizer time limit. Only `pipeline.log` records an
+exclusion (the `EXCLUDED` lines and the counters); the release has no list. The counters
+are 0 in 71 local logs; the logs of the cloud machines were not read. The time limit is
+600 s of wall time with one worker for each processor, so an exclusion can depend on the
+load of the machine.
+
+**The denylist excludes 12 blobs that the patched srcML can tokenize.**
+`BlobDenylistEntries.scala` (the same file from `157cf8b` to `14b8db4`) lists 8 OpenJDK
+langtools test files (Java, srcML issue 2361) and 4 `.h` files with C++ code (one is
+`eden/fs/utils/StatTimes.h`). They do not terminate with srcML 1.1.0. The patched srcML
+of dataset v1 finishes on all 12 (test of the tool review of 2026-10-28), but blobExec
+still excludes them, with the effect of the previous entry. Projects of the JDK family
+(about 35, not counted) and probably `facebook__sapling` hold these blobs.
 
 **A fourth mechanism removes a path with no row, and it is not a defect.** A
 symlink or a submodule gitlink whose name matches the mask is not source and is
@@ -1354,8 +1469,13 @@ gate the run invokes, and it checks size and row count only ([`DATASET-SCHEMA.md
 project is flagged `parquet_missing` and stays out of the `tokens` view, so
 `select name from projects where parquet_missing` finds it.
 
-**Dates are strings.** `author_date` and `committer_date` (43, 46) are raw git
-strings, so a consumer must cast before any temporal query.
+**Dates are strings in UTC with no offset.** `author_date` and `committer_date` (43,
+46) are not git strings. slickgitlog (`gitLogToDb.scala`, line 159 at `57551d7`) formats
+them with `SimpleDateFormat("yyyy-MM-dd HH:mm:ss")` and no time zone: the wall time in the
+default time zone of the JVM, with the UTC offset lost. Neither devenv nor the runner sets
+`TZ`. The run machines used UTC, so the values are UTC. A rebuild on a machine in another
+time zone gives other values: set `TZ=UTC`. A consumer must cast before any temporal
+query.
 
 **Corpus-level firm and org rollups do not exist.** The firm columns are per
 token; there is no aggregated firm table, no package step and no dataset card
