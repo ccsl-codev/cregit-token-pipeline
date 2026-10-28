@@ -501,7 +501,7 @@ def content_row(index: int, line: int, col: int, kind: str, value: str,
         "repo_name": "cloudflare__wildcard", "file_path": "src/lib.rs",
         "token_index": index,
         "token_type": f"{line}:{col}{TAB}{kind}", "token_value": value,
-        # Desynchronised: the walked cursor ran ahead of the true position.
+        # Desynchronized: the walked cursor ran ahead of the true position.
         "source_line": line + 2, "source_col": col + 20,
         "source_text": text, "is_structural": 0,
     }

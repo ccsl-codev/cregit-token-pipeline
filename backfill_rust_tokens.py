@@ -63,7 +63,7 @@ REPAIRED
 
 NOT REPAIRED, AND NOT FAKED
 ---------------------------
-`source_text` on content rows. It desynchronised from the first row onward,
+`source_text` on content rows. It desynchronized from the first row onward,
 because the tokenizer misread `begin_unit` as an ordinary token and the reader
 consumed source past it. It is not derivable from the Parquet. No sentinel is
 written: the column keeps its wrong value, because a column that is wrong

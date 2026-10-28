@@ -40,7 +40,7 @@ We reproduce their split where we read it. This checks the plumbing, not the cod
 
 1,322 rows in their file pass our own strong-tier rule (a registry flag, a named company, last commit in 2018 or later, at least 20,000 lines and 200 commits). `parse_spinellis` admitted 400 of them, because `SP_MAX_PER_COMPANY = 12` caps each company.
 
-The cap is a sampling control. It stops one firm dominating the draw. But a capped-out project does not leave the pipeline: it re-enters through a weaker source and takes that source's stratum. So a cap on *sampling* silently becomes an error in *labelling*.
+The cap is a sampling control. It stops one firm dominating the draw. But a capped-out project does not leave the pipeline: it re-enters through a weaker source and takes that source's stratum. So a cap on *sampling* silently becomes an error in *labeling*.
 
 88 such rows reached our eligible frame. 81 label `company-owned`. 7 do not, and are listed here.
 

@@ -186,7 +186,7 @@ def test_apply_deletes_the_disposable_subtrees_and_keeps_every_keeper(out):
 
 
 def test_apply_only_touches_the_named_project(out):
-    """One project's prune must not reach into its neighbour."""
+    """One project's prune must not reach into its neighbor."""
     make_project(out, "jq")
     other = make_project(out, "libuv")
     before = snapshot(other)
@@ -487,7 +487,7 @@ def test_a_traversal_project_name_is_refused(out, tmp_path, capsys):
     before anything is read, and the log says so. Before the fix the only thing
     that stopped this was check_target's resolved-path comparison, one comparison
     between a typo and a delete outside output_dir. check_target still holds the
-    line as well — the second half of this test proves it — because defence in
+    line as well — the second half of this test proves it — because defense in
     depth is right here.
     """
     outside = tmp_path / "evil"
@@ -506,7 +506,7 @@ def test_a_traversal_project_name_is_refused(out, tmp_path, capsys):
     assert snapshot(outside) == before
     assert "is not one plain project name" in capsys.readouterr().out
 
-    # Defence in depth: check_target refuses the same path on its own.
+    # Defense in depth: check_target refuses the same path on its own.
     with pytest.raises(ValueError, match="is outside output_dir"):
         retain.check_target(out / "../evil", "memo")
     assert snapshot(outside) == before
@@ -1025,7 +1025,7 @@ def test_an_apply_run_with_memo_blocked_deletes_nothing_for_that_project(
         out, monkeypatch, capsys):
     """DATA SAFETY. Fail closed. A refusal means the walk did not
     understand this project, so no subtree of it is safe to remove — not even
-    html/, which passed. The neighbour project is still pruned."""
+    html/, which passed. The neighbor project is still pruned."""
     jq = make_project(out, "jq")
     zstd = make_project(out, "zstd")
     (jq / "memo" / "runs.log").write_text("a protected name inside memo/")
@@ -1083,7 +1083,7 @@ def test_a_file_named_memo_is_reported_and_html_is_still_pruned(out, capsys):
 
 def test_a_file_named_html_is_reported_in_a_dry_run_too(out, capsys):
     """The same case in the default mode, and on the second subtree, so the
-    skip is not an artefact of ordering."""
+    skip is not an artifact of ordering."""
     workdir = make_project(out, "jq", html=False)
     (workdir / "html").write_text("not a directory")
     before = snapshot(out)

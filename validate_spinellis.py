@@ -204,7 +204,7 @@ def build(ent: dict[str, dict], coh: set[str], rows: list[dict]) -> list[str]:
             "The cap is a sampling control. It stops one firm dominating the draw. But a "
             "capped-out project does not leave the pipeline: it re-enters through a weaker "
             "source and takes that source's stratum. So a cap on *sampling* silently becomes "
-            "an error in *labelling*.", ""]
+            "an error in *labeling*.", ""]
     audit = []
     for r in eligible:
         k = key(r)

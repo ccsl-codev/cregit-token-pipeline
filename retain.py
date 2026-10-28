@@ -240,7 +240,7 @@ def check_name(name: str) -> None:
     resolves outside OUT. finished() does not object, because the parquet and
     stamp lookups follow the traversal too, so without this check the only thing
     standing between a typo and a delete outside output_dir is check_target's
-    resolved-path comparison. check_target stays — defence in depth — but the
+    resolved-path comparison. check_target stays — defense in depth — but the
     refusal belongs here, before anything is read.
 
     The four rejects are deliberately one statement. On POSIX an absolute path

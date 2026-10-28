@@ -10,7 +10,7 @@ rather than an opinion.
 > * **Question 1 — answered: Option B, the salted stable hash.** Implemented in
 >   `anonymize_parquet.py`. The salt is held privately outside the repository and
 >   the reverse map is never published. The 98.0% renumbering below is now the
->   measured behaviour of the **superseded** design; re-run after the change, the
+>   measured behavior of the **superseded** design; re-run after the change, the
 >   same experiment renumbers **0 of 153 — 0.0%**. The "correction to the brief"
 >   section and the greps in it describe the state of the checkout *before* that
 >   change: `docs/DESIGN.md` and `docs/LIMITATIONS.md` no longer say "no salt and

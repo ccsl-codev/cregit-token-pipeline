@@ -388,7 +388,7 @@ def test_every_name_email_trailer_element_is_well_formed(corpus):
 
 @requires_duckdb
 def test_footer_columns_are_not_nulled(corpus):
-    """The partner's decision: pseudonymise, do not drop and do not NULL."""
+    """The partner's decision: pseudonymize, do not drop and do not NULL."""
     tmp, paths = corpus
     _, outdir = anonymize(tmp, paths)
     a = outdir / "acme__widget-dataset.parquet"
@@ -510,7 +510,7 @@ def test_identity_text_in_commit_summary_fails_the_run(corpus):
 
 @requires_duckdb
 def test_null_commit_summary_is_the_documented_escape(corpus):
-    """The reference implementation's behaviour, still available on request."""
+    """The reference implementation's behavior, still available on request."""
     tmp, _ = corpus
     src = tmp / "leak2"
     src.mkdir()

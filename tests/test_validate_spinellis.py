@@ -3,7 +3,7 @@
 This script audits the corpus labels, so a bug in it is worse than a crash: it
 reports "all clear" about a corpus it failed to join. Two rules carry the weight.
 
-  1. norm() is the join key for both datasets. If it normalises one side
+  1. norm() is the join key for both datasets. If it normalizes one side
      differently from the other, every lookup misses, every project looks
      `absent`, and section 4 reports zero defects. A silent pass.
   2. strong_tier_eligible() must mirror select_corpus.parse_spinellis. Section 4
