@@ -74,7 +74,7 @@ REAL_RUNNER_USAGE = """\
 class FakeRunner:
     """Recording stand-in for subprocess.run. Starts no process.
 
-    Recognises the two phases ctp drives, returns a scripted return code for
+    Recognizes the two phases ctp drives, returns a scripted return code for
     each, and writes the completion stamp when the validate phase succeeds —
     which is what the real validate.py does.
     """
@@ -169,7 +169,7 @@ def write_manifest(tmp_path: Path, *lines: str, name: str = "manifest.tsv") -> P
 def sandbox(tmp_path, monkeypatch):
     """Redirect every path and side effect of ctp into tmp_path.
 
-    Locks in nothing about behaviour; it exists so a failing test can never
+    Locks in nothing about behavior; it exists so a failing test can never
     write to the live corpus or launch run_pipeline_process.sh.
     """
     out = tmp_path / "corpus-files"
@@ -284,7 +284,7 @@ def test_manifest_error_names_the_offending_line(tmp_path):
 
 
 def test_manifest_accepts_an_unknown_size_class_today(tmp_path):
-    """Documents current behaviour: size_class is copied through unchecked."""
+    """Documents current behavior: size_class is copied through unchecked."""
     row = "jq\thttps://x.git\tcommunity\t\\.[ch]$\tXL"
     assert ctp.read_manifest(write_manifest(tmp_path, row), None)[0]["size_class"] == "XL"
 
@@ -395,7 +395,7 @@ def test_skip_html_is_forwarded_to_the_runner(runner, jq):
 
 
 def test_skip_html_is_absent_when_the_flag_is_off(runner, jq):
-    """The default run must not change the runner's behaviour."""
+    """The default run must not change the runner's behavior."""
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
     assert "--skip-html" not in runner.argv("pipeline")
@@ -644,7 +644,7 @@ def test_memo_dir_is_forwarded_as_one_subdirectory_per_project(sandbox, runner, 
 
 
 def test_no_memo_dir_sends_no_flag_so_the_default_is_untouched(sandbox, runner, jq):
-    """Nothing existing may change behaviour: without the flag the runner keeps
+    """Nothing existing may change behavior: without the flag the runner keeps
     putting the memo in <work>/memo exactly as before."""
     ctp._OPTS.update(skip_html=False, drop_memo=False, memo_dir="")
     ctp.run_project(jq)
@@ -1449,7 +1449,7 @@ def test_sharding_is_off_unless_asked_for(runner, jq):
 
 def test_one_shard_is_not_sharding(runner, jq):
     """--shards 1 would pay the sharded-mode overhead for no parallelism, so it
-    is treated as off rather than honoured literally."""
+    is treated as off rather than honored literally."""
     ctp._OPTS.update(skip_html=False, drop_memo=False, shards=1, shard_classes=("S",))
     ctp.run_project(jq)
     assert "--mode" not in runner.argv("pipeline")
@@ -1935,7 +1935,7 @@ def test_a_relative_sidecar_path_is_made_absolute(
 # The argument for an exit rather than a louder note: omitting --project-meta, the
 # 29-column half, printed NOTHING at any layer. Only the 3 firm columns had a
 # note, and a note is line 1 of a log whose other 105 lines are 30-second
-# heartbeats. The tests below therefore pin the refusal, the itemised warning the
+# heartbeats. The tests below therefore pin the refusal, the itemized warning the
 # escape hatch prints, and the fact that the hatch cannot arrive by default.
 # --------------------------------------------------------------------------- #
 
@@ -1994,7 +1994,7 @@ def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
 @pytest.mark.parametrize("absent, expected", [
     pytest.param({"project_meta": ""}, "--project-meta", id="no-sidecar"),
     # --firm-canonical goes with it: without a map there is no firm_raw to
-    # canonicalise, and cmd_run already refuses that pair on its own grounds, so
+    # canonicalize, and cmd_run already refuses that pair on its own grounds, so
     # keeping it here would test the older check instead of this one.
     pytest.param({"firm_map": "", "firm_canonical": ""}, "--firm-map",
                  id="no-firm-map"),
@@ -2466,7 +2466,7 @@ def test_no_mask_widened_sends_no_flag_so_the_refusal_stays_the_default(runner, 
 
 def test_a_missing_mask_widened_option_sends_no_flag(runner, jq):
     """run_project reads _OPTS directly, so a caller that never set the key must
-    get the safe behaviour rather than a crash."""
+    get the safe behavior rather than a crash."""
     ctp._OPTS.clear()
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)
@@ -2579,7 +2579,7 @@ def test_no_retokenize_sends_no_flag_so_nothing_is_discarded_by_accident(runner,
 
 def test_a_missing_retokenize_option_sends_no_flag(runner, jq):
     """run_project reads _OPTS directly, so a caller that never set the key gets
-    the safe behaviour rather than a crash."""
+    the safe behavior rather than a crash."""
     ctp._OPTS.clear()
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(jq)

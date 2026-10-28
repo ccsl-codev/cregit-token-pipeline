@@ -1,7 +1,7 @@
 # Design
 
 Why the pipeline is built the way it is. For what it produces, read
-[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md); for how a project is labelled, read
+[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md); for how a project is labeled, read
 [`CODEBOOK.md`](CODEBOOK.md).
 
 **Goal.** Run cregit end-to-end over a stratified corpus of FLOSS projects and
@@ -17,7 +17,7 @@ for forwarded flags (§4).
 1. **Per-project layer** — cregit's `run_pipeline_process.sh`, one work directory
    per project, embarrassingly parallel across projects.
 2. **Corpus layer** — selection, provenance, validation, retention and
-   anonymization. Pure functions over committed inputs or finished artefacts, so
+   anonymization. Pure functions over committed inputs or finished artifacts, so
    each is cheap and re-runnable at any time.
 
 What already existed and is reused rather than rebuilt:
@@ -119,7 +119,7 @@ project work directory, which a from-scratch run deletes.
 `memo/` alone was 45–88%. Keeping both across a large corpus does not fit on the
 disk; dropping both is what makes the corpus feasible.
 
-| Artefact | Keep? | Why |
+| Artifact | Keep? | Why |
 | --- | --- | --- |
 | `<name>-dataset.parquet` | yes, forever | the product |
 | `<name>-original.db`, `-cregit.db`, `-persons.db` | yes | cheap, needed for audits and re-derivation |

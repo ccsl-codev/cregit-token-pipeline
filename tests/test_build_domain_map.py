@@ -1,6 +1,6 @@
 """Unit tests for build_domain_map.
 
-The module turns person-grain grey literature (cncf/gitdm) plus a published
+The module turns person-grain gray literature (cncf/gitdm) plus a published
 CC-BY dataset (Spinellis et al., MSR 2020) into one row per e-mail domain. Every
 test here locks in either a research-correctness rule (who may attribute a
 domain to a firm, and with what provenance) or a data-safety rule (no network,
@@ -244,7 +244,7 @@ def test_domain_root_is_gone():
     """`domain_root` had no caller: its docstring claimed it spotted
     self-references, but R4 uses a regex on the company string instead. Dead
     code in a research pipeline reads as a rule that is in force when it is not,
-    so the function and its eight parametrised tests were deleted rather than
+    so the function and its eight parametrized tests were deleted rather than
     wired in. R4 now tags any domain-shaped company name, which needs no
     per-label comparison, so there is nothing left for it to do."""
     assert not hasattr(bdm, "domain_root")
@@ -950,7 +950,7 @@ def test_spinellis_counts_a_cross_bucket_name_conflict(env, capsys):
 
 def test_spinellis_does_not_count_agreement_across_buckets(env, capsys):
     """The counter must measure disagreement only. A domain both buckets call the
-    same firm, after normalisation, is corroboration, not a conflict: counting it
+    same firm, after normalization, is corroboration, not a conflict: counting it
     would drown the real conflicts in noise."""
     env.spinellis_rows([sp_row("agree.example", "Axis Communications"),
                         sp_row("agree.example", "Axis Communications AB",
@@ -986,7 +986,7 @@ def test_load_curated_missing_file_warns_and_returns_empty(env, capsys):
 
 
 def test_load_curated_reads_kind_and_source(env):
-    """Curated provenance is carried through, not re-labelled."""
+    """Curated provenance is carried through, not re-labeled."""
     env.curated_rows([
         {"domain": "gmail.com", "company": "(Independent)",
          "kind": "free_provider", "source": "gitdm"},

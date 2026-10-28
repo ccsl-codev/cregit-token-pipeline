@@ -5,7 +5,7 @@
     ./build_domain_map.py build          # emit data/affiliation.merged.csv
     ./build_domain_map.py build --min-persons 3 --report
 
-Source: cncf/gitdm developers_affiliations{1..10}.txt (grey literature; the CNCF
+Source: cncf/gitdm developers_affiliations{1..10}.txt (gray literature; the CNCF
 DevStats affiliation list). We read it for one thing only: which e-mail DOMAIN
 belongs to which company. No person, name or e-mail address is carried into the
 output, so the upstream per-person opt-out does not reach this artifact.
@@ -285,7 +285,7 @@ def parse_spinellis_domains() -> dict[str, tuple[str, str]]:
     company is an SEC filer or Fortune Global 500 member the pairing is
     externally verifiable, which is the best provenance in this map.
 
-    Our own filters still apply: the company name is normalised and a free
+    Our own filters still apply: the company name is normalized and a free
     provider never becomes a firm. A value that only repeats its own domain is
     TAGGED with a `-self-reference` source suffix, not dropped. See
     self_reference() for why the shape of the string alone is not enough.

@@ -164,7 +164,7 @@ def test_meta_fields_ends_with_the_two_manifest_fields():
 
 
 def test_the_committed_sidecar_covers_the_corpus_and_the_fixtures():
-    """The generated artefact is committed, so it is under test too."""
+    """The generated artifact is committed, so it is under test too."""
     root = Path(__file__).resolve().parent.parent
     meta = json.loads((root / "project_meta.json").read_text())
 
@@ -178,7 +178,7 @@ def test_the_committed_sidecar_covers_the_corpus_and_the_fixtures():
 
 
 def test_the_committed_sidecar_records_the_universal_mask_for_every_project():
-    """The sidecar is a generated artefact, and it goes stale silently.
+    """The sidecar is a generated artifact, and it goes stale silently.
 
     file_mask is copied out of the manifest when the sidecar is built, and it is
     injected into all 185 Parquets as a column claiming to say how those tokens

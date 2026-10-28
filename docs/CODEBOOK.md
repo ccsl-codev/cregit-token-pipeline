@@ -17,7 +17,7 @@ that decided it are in `candidates.csv`.
 *contributes* to it.**
 
 The pipeline measures contribution composition, per firm, per token. If a
-project were labelled "enterprise" because the pipeline measured a high firm
+project were labeled "enterprise" because the pipeline measured a high firm
 share, the finding would be true by construction. So the label must come from
 governance evidence that exists independently of any commit.
 
@@ -26,7 +26,7 @@ kernel is the most corporate-funded system in the corpus and labels **community*
 by control, because no company owns its trademark, its namespace, or its
 maintainer appointments. That off-diagonal is a **result**, not an error.
 
-## 2. Unit of labelling
+## 2. Unit of labeling
 
 One **repository**, identified by `owner/repo` on GitHub. Not an organization,
 not a product, not a foundation.
@@ -39,7 +39,7 @@ organization label would hide that.
 | Stratum | Operational definition |
 | --- | --- |
 | **`foundation`** | A non-profit foundation or trust holds the project's trademark or assets, and appoints or ratifies its maintainers. |
-| **`company-owned`** | A single for-profit company owns the namespace, the trademark, or the copyright, and can change the licence or the roadmap without asking anyone. |
+| **`company-owned`** | A single for-profit company owns the namespace, the trademark, or the copyright, and can change the license or the roadmap without asking anyone. |
 | **`community`** | Neither of the above. No single legal entity controls the project. Maintainership is earned inside the project. |
 
 `community` is a **residual**: it is defined by the absence of evidence, not by
@@ -67,11 +67,11 @@ The project appears on the roster of an organization that holds its mark.
 | mailing-list culture | a hand-listed anchor, see `COMMUNITY_SEED` | `F1_roster:seed` |
 
 **What does NOT count.** An entry in the CNCF landscape *without* a `project:`
-key. The landscape catalogues the whole cloud-native ecosystem: 988 repository
+key. The landscape catalogs the whole cloud-native ecosystem: 988 repository
 URLs, of which only 256 are CNCF-hosted. Reading all 988 as a roster put
 `postgres/postgres` and `redis/redis` in the foundation stratum. PostgreSQL is
 the canonical mailing-list community project. Redis Ltd relicensed Redis in
-2024. Catalogue membership is a fine **candidate pool** and no control fact at
+2024. Catalog membership is a fine **candidate pool** and no control fact at
 all.
 
 ### F2 — namespace owner *(automated)*
@@ -89,7 +89,7 @@ see the gap in section 9.
 
 ### F3 — CLA or DCO *(NOT IMPLEMENTED)*
 
-A Contributor Licence Agreement assigning copyright to one named company is the
+A Contributor License Agreement assigning copyright to one named company is the
 strongest evidence of single-vendor control, because it makes relicensing
 unilateral. A DCO is the opposite signal: it keeps copyright with the author.
 
@@ -130,7 +130,7 @@ Apply in order. Stop at the first fact that decides.
 6. **Nothing decided** → `community` by residual. Record `F1_residual:none`.
 7. A human rater then applies **F3**, then **F4**, then **F5** as a tie-breaker.
 
-Every row records the fact that decided it, and the date. Re-labelling later is
+Every row records the fact that decided it, and the date. Re-labeling later is
 allowed; overwriting the date is not.
 
 ### Pool facts are not control facts
@@ -139,7 +139,7 @@ allowed; overwriting the date is not.
 | --- | --- | --- |
 | `F1_pool:spinellis-fg500`, `-sec10k`, `-sec20f` | a published heuristic matched the project to an SEC filer or Fortune Global 500 firm | **none.** Candidate only |
 | `F1_pool:spinellis-cohort` | the same authors' heuristics found **no** enterprise signal | **none.** An absence of evidence |
-| `F1_pool:cncf-landscape` | catalogued in the CNCF landscape, not CNCF-hosted | **none** |
+| `F1_pool:cncf-landscape` | cataloged in the CNCF landscape, not CNCF-hosted | **none** |
 
 Rows carrying a pool fact are marked `weak=True`, which means F2 may relabel
 them freely.
@@ -167,7 +167,7 @@ landscape stopped counting as a roster, the conflict dissolved and F2 decided:
 
 ## 7. Relicense time-boxing
 
-A project that changed licence changed its control regime. Terraform in 2023,
+A project that changed license changed its control regime. Terraform in 2023,
 Redis in 2024, MongoDB earlier.
 
 **Rule.** Label the regime that held during the window under analysis, and record
@@ -175,7 +175,7 @@ the relicense date. Do not label a project `company-owned` for its whole history
 because of a change in its last year.
 
 **Not implemented.** No time-boxing exists in the pipeline. A rater must apply it
-by hand, and any analysis must state the gap: a project that changed licence or
+by hand, and any analysis must state the gap: a project that changed license or
 owner mid-history carries one label for all of it. `label_date` records when the
 label was assigned.
 
@@ -186,7 +186,7 @@ Real rows from `candidates.csv`.
 | Project | Stratum | Fact | Why |
 | --- | --- | --- | --- |
 | `kubernetes/kubernetes` | foundation | `F1_roster:cncf-graduated` | CNCF holds the mark. Excluded from the corpus for language: Go |
-| `postgres/postgres` | community | `F1_pool:cncf-landscape` | catalogued, not hosted. No entity controls it |
+| `postgres/postgres` | community | `F1_pool:cncf-landscape` | cataloged, not hosted. No entity controls it |
 | `redis/redis` | company-owned | `F2_org:redis` | Redis Ltd owns the namespace and relicensed in 2024 |
 | `alibaba/nacos` | company-owned | `F2_org:alibaba` | company namespace, no roster fact |
 | `curl/curl` | community | `F1_roster:seed` | mailing-list culture anchor |
@@ -205,7 +205,7 @@ Every one of these is a limitation an analysis using the strata must state.
 | G5 | **`COMPANY_ORGS` is hand-seeded** | Coverage of company namespaces is not systematic, so F2 recall is unknown. |
 | G6 | **No relicense time-boxing** | Section 7. |
 | G7 | **Unverified organizations are invisible to F2** | GitHub verification is opt-in, so a real company that never verified its namespace is missed. |
-| G8 | **`SP_MAX_PER_COMPANY` leaks from sampling into labelling** | The cap stops one firm dominating the draw, which is correct for sampling. But a capped-out project does not leave the pipeline. It re-enters through a weaker source and takes that source's stratum, so a project our own strong-tier rule attests to a company can label `community`. Seven such rows sit in the eligible frame. `validate_spinellis.py` measures them and `docs/SPINELLIS-VALIDATION.md` section 4 lists them. The cap must bound how many rows *enter*; the registry fact must still attach wherever a row enters. One constant now serves both concerns. **Open.** |
+| G8 | **`SP_MAX_PER_COMPANY` leaks from sampling into labeling** | The cap stops one firm dominating the draw, which is correct for sampling. But a capped-out project does not leave the pipeline. It re-enters through a weaker source and takes that source's stratum, so a project our own strong-tier rule attests to a company can label `community`. Seven such rows sit in the eligible frame. `validate_spinellis.py` measures them and `docs/SPINELLIS-VALIDATION.md` section 4 lists them. The cap must bound how many rows *enter*; the registry fact must still attach wherever a row enters. One constant now serves both concerns. **Open.** |
 
 ## 10. Procedure for the second rater
 

@@ -16,7 +16,7 @@ kind of test — as tests/test_meta_field_drift.py.
 A divergence does not crash. The mask in this repo selects a file, the tokenizer
 in the other repo has no parser for it, and the run dies part-way through with
 "Unknown parser for extension" after step 1 has already done its work. Or worse:
-srcML exits 0 and emits nothing for an extension it does not recognise, so the
+srcML exits 0 and emits nothing for an extension it does not recognize, so the
 blob is tokenized to an empty file and the run reports success.
 
 That second failure mode is why the parser checks below exist at all. "The parser

@@ -1,9 +1,9 @@
 # The cregit token dataset
 
-Reference for the published artefact. Four questions, in order: what the dataset
+Reference for the published artifact. Four questions, in order: what the dataset
 is (§1), how to regenerate it (§2), what every column means (§3), and what is
 known to be wrong with it — [`LIMITATIONS.md`](LIMITATIONS.md), which you should
-read before analysing the data.
+read before analyzing the data.
 
 **`validate_schema.py` is the authority on the schema, not this document.**
 `EXPECTED_COLUMNS` there is the contract that every file is gated against; §3.2
@@ -23,7 +23,7 @@ token_index)` is unique within a project and each row carries exactly one
 last-touching commit. The dataset holds no history of an individual token.
 
 Each row also carries 29 per-project provenance columns (how the project was
-found, how it was labelled, which mask tokenized it) repeated verbatim on every
+found, how it was labeled, which mask tokenized it) repeated verbatim on every
 row, so a consumer can filter a corpus without a second join. A column is cheap
 to drop at publish time and expensive to add later.
 
@@ -330,7 +330,7 @@ more carry `Independent` — the same category under two spellings, so any
 `GROUP BY firm` that does not fold them invents a category. `(Independent)` is
 what the free-provider rule emits, and it covers `gmail.com`,
 `users.noreply.github.com` and the rest: a contributor using a forge no-reply
-address, a contributor using consumer webmail, and a bot are all labelled
+address, a contributor using consumer webmail, and a bot are all labeled
 `(Independent)`, which conflates *unknowable* affiliation with *absent*
 affiliation. Counting `firm <> ''` therefore over-counts real firm attribution.
 Use `kind` from the map (`free_provider`, 52 domains) to separate them, and treat
@@ -378,14 +378,14 @@ reading `candidates.csv` must apply it. `project_meta.py` does.
 
 ---
 
-## 4. Intermediate artefacts
+## 4. Intermediate artifacts
 
 Per project the pipeline writes four SQLite databases, two bare repositories, two
 working clones, a `blame/` tree and one Parquet. **Only the Parquet is
 published.** A project is re-derivable from `clone_url` plus the recorded
 `file_mask`, which is why `file_mask` is a column.
 
-| Artefact | Read to build the Parquet? | Kept because |
+| Artifact | Read to build the Parquet? | Kept because |
 | --- | --- | --- |
 | `<name>-dataset.parquet` | — | **it is the product** |
 | `<name>-cregit.db` | yes — commits, commitmap, footers | audits, re-derivation |
@@ -427,7 +427,7 @@ therefore not available in the published data.
 ## 5. Known limitations
 
 They are their own document: **[`LIMITATIONS.md`](LIMITATIONS.md)**. Read it before
-analysing the data. The ones most likely to change a result:
+analyzing the data. The ones most likely to change a result:
 
 | Limitation | Affects |
 | --- | --- |

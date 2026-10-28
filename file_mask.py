@@ -5,7 +5,7 @@ out — a mask and an extension list maintained separately drift, and both
 directions are silent. An extension the mask names but the tokenizer cannot
 parse either kills the run part-way through (no parser: "Unknown parser for
 extension") or, worse, produces an empty token file and exits 0 (srcML does this
-for an extension it does not recognise). An extension the tokenizer knows but no
+for an extension it does not recognize). An extension the tokenizer knows but no
 mask names is source left untokenized with nothing in the output to show it.
 
 The mask used to be per-language, from GitHub's primary-language field:

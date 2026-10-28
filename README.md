@@ -8,7 +8,7 @@ corpus-level selection, provenance, validation and anonymization around it.
 Each project yields one Parquet file with the same 70 columns and **one row per
 token occurrence per file**, carrying the commit and the person that last touched
 that token, the person's employer where it can be resolved, and 29 columns
-recording how the project entered the corpus and how it was labelled.
+recording how the project entered the corpus and how it was labeled.
 
 Stdlib Python only; DuckDB, srcML, ctags, Java and Perl come from the cregit
 checkout's `devenv shell`.
@@ -18,12 +18,12 @@ checkout's `devenv shell`.
 | If you want to | Read |
 | --- | --- |
 | understand the dataset, its grain and all 70 columns | **[`docs/DATASET-SCHEMA.md`](docs/DATASET-SCHEMA.md)** |
-| know what is wrong with the data before you analyse it | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
+| know what is wrong with the data before you analyze it | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
 | know why attribution changed in September 2026, and by how much | **[`docs/REBLAME-C100.md`](docs/REBLAME-C100.md)** |
 | know how a project got its `stratum`, or label one yourself | [`docs/CODEBOOK.md`](docs/CODEBOOK.md) |
 | know why the pipeline is built this way | [`docs/DESIGN.md`](docs/DESIGN.md) |
 | see the sampling frame, exclusions and the per-cell draw | [`docs/CORPUS-REVIEW.md`](docs/CORPUS-REVIEW.md), [`docs/CORPUS-SAMPLE.md`](docs/CORPUS-SAMPLE.md) |
-| see the strata checked against an independent published labelling | [`docs/SPINELLIS-VALIDATION.md`](docs/SPINELLIS-VALIDATION.md) |
+| see the strata checked against an independent published labeling | [`docs/SPINELLIS-VALIDATION.md`](docs/SPINELLIS-VALIDATION.md) |
 
 The three corpus reports are **generated** — by `select_corpus.py review`,
 `select_corpus.py sample` and `validate_spinellis.py`. Do not edit them by hand.

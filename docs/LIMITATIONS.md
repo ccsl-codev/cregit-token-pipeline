@@ -1,7 +1,7 @@
 # Known limitations
 
 What is wrong with the dataset, ordered by how likely it is to change a result.
-Read this before analysing the data. [`DATASET-SCHEMA.md`](DATASET-SCHEMA.md) is
+Read this before analyzing the data. [`DATASET-SCHEMA.md`](DATASET-SCHEMA.md) is
 the column reference; [`CODEBOOK.md`](CODEBOOK.md) §9 holds the gaps specific to
 the stratum labels.
 
@@ -892,7 +892,7 @@ Andreas Buchen.
 **A corporate address can win an author ranking.** `dpdk__dpdk`'s top-1 author is
 **`intel at intel.com`** before and after the re-blame (494k, then 691k tokens). It is
 not a person. The re-blame did not cause this; the defect was already in the data. Any
-per-author result needs an identity-hygiene pass first. Related: the vendoring artefact above.
+per-author result needs an identity-hygiene pass first. Related: the vendoring artifact above.
 
 **Earlier line-level exposure figures in this file were wrong and are withdrawn.**
 They were measured with `git blame -C -C`, not the `-C100` the pipeline runs. Under
@@ -919,7 +919,7 @@ interface to private header".
 * **Consequence, for the 47 projects not yet re-blamed**: every per-author,
   per-organization and truck-factor result over them **systematically over-credits
   refactorers, file-movers and header-splitters** and under-credits original authors.
-  This is a separate mechanism from the vendoring artefact above, and it moves
+  This is a separate mechanism from the vendoring artifact above, and it moves
   attribution in the same direction.
 * **Detect**: compare the project's Parquet against `parquet-backups/pre-reblame/`.
   If the two are identical, the project still carries plain blame.
@@ -967,7 +967,7 @@ source. `powerdns__pdns` alone carries **331** masked symlinks in
 `pdns/dnsdistdist/`; counting them makes its Parquet look 29% incomplete when it
 is complete, because the Parquet holds exactly its 806 regular files.
 `nvidia__opensma` (10) and `facebookincubator__qemu-wearables` (4) are the same
-artefact. Over `manifest.phase1-sm.tsv` the naive count is 390 and the true count is
+artifact. Over `manifest.phase1-sm.tsv` the naive count is 390 and the true count is
 36; over the published set it is **417 naive and 35 true**, because Linux adds 28
 more masked symlinks and gitlinks and one real gap.
 
@@ -981,7 +981,7 @@ more masked symlinks and gitlinks and one real gap.
   HEAD by at least that much. No corpus-wide historical count exists.
 * **A silently empty tokenization contributes nothing at HEAD.** The separate
   mechanism below — a mask-selected file that tokenizes to an empty result with a
-  zero exit status — accounts for **0** of the 35. Linux's one gap is a signalled crash, not this mechanism. It is unmeasured for historical
+  zero exit status — accounts for **0** of the 35. Linux's one gap is a signaled crash, not this mechanism. It is unmeasured for historical
   revisions.
 * **Work around**: none from the data. The file's tokens do not exist in the dataset.
 
@@ -1191,7 +1191,7 @@ with a salt; see the `commit_summary` entry above): it rewrites the e-mail local
 `Author N`, running every identity string — including each element of the 15
 trailer arrays — through one registry, so a person carries one pseudonym
 everywhere. It classifies **every** input column into pass-through, transform or
-drop and raises on a column it does not recognise, so a schema change stops it
+drop and raises on a column it does not recognize, so a schema change stops it
 loudly instead of silently shrinking the release. It also checks its own output:
 row count, `firm`/`repo_name` group counts and every `person_domain` must be
 unchanged, and `count(distinct person_email)` and `count(distinct person_name)`
@@ -1205,17 +1205,17 @@ protecting the mapping is not publishing the registry. And the registry spans
 **one invocation**, so pseudonyms are not stable across runs with different input
 sets — pass every file that will be published together in a single command.
 
-**Nothing runs the anonymiser automatically, and the Parquets on disk are not
-anonymised.** `anonymize_parquet.py` has **no caller anywhere in the pipeline**:
+**Nothing runs the anonymizer automatically, and the Parquets on disk are not
+anonymized.** `anonymize_parquet.py` has **no caller anywhere in the pipeline**:
 it appears in no step of `run_pipeline_process.sh`, and neither `ctp.py` nor
 `consolidate.py` invokes it. Step 10 writes
 `<work>/<repo>-dataset.parquet` through `generate_dataset.py` and stops there. So
 every per-project Parquet in the corpus holds real addresses and real names, and
 the release is a separate manual command. Two consequences. A step-10 re-run
-**cannot** undo pseudonymisation, because the two never touch the same file — a
-re-tokenization wave needs no anonymiser precaution. And `OUTDIR` is a mandatory
+**cannot** undo pseudonymization, because the two never touch the same file — a
+re-tokenization wave needs no anonymizer precaution. And `OUTDIR` is a mandatory
 positional with **no same-file guard**, so naming a project's own work directory
-as the destination would overwrite the raw Parquet with the pseudonymised one and
+as the destination would overwrite the raw Parquet with the pseudonymized one and
 destroy the only copy of the identities. Always write to a fresh directory.
 
 Run `verify_anon.py` over the output directory as an independent check: it tests
@@ -1409,7 +1409,7 @@ split otherwise-identical values in a `GROUP BY`.
 
 **Some tokenizable source is deliberately excluded, and nothing in the output
 says so.** `.ixx`, `.inl`, `.cppm`, `.cxxm` and `.ipp` are left out of the mask
-because srcML 1.1.0 does not recognise them, ignores `-l C++`, and then writes an
+because srcML 1.1.0 does not recognize them, ignores `-l C++`, and then writes an
 **empty token file and exits 0** — a silent success. Autotools input (`.am`,
 `.ac`, 1.4 MB across 22 projects) is left out because the m4 tokenizer's lexer
 uses a backtick as its closing quote, so an apostrophe swallows text to the next
@@ -1424,7 +1424,7 @@ three parsers plus four tests assert their positions, so the planned
 clone time, so the dataset is reproducible in method but not byte-for-byte, and a
 published Parquet cannot cite the revision it was built from.
 
-**`data/affiliation.merged.csv` is a build artefact.** Never hand-edit it: put a
+**`data/affiliation.merged.csv` is a build artifact.** Never hand-edit it: put a
 fix in `data/affiliation.corrections.csv`, which `build_domain_map.py` applies
 last, and rerun `./build_domain_map.py build`. A hand edit is lost on the next
 rebuild; a correction survives it.
@@ -1452,7 +1452,7 @@ repository can disagree: of the 196 duplicate `clone_url` groups in
 `candidates.csv`, **28 disagree on `stratum`** — **5** of them within the 106
 groups that fall inside the eligible frame. `label_date` (column 8) records when
 the label was assigned, and there is no relicensing time-boxing anywhere in the
-pipeline (`docs/CODEBOOK.md` §7), so a project that changed licence or owner
+pipeline (`docs/CODEBOOK.md` §7), so a project that changed license or owner
 mid-history carries one label for all of it.
 
 **`manifest_category` (column 29) has a fourth value outside the stratum

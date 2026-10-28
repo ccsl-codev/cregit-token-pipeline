@@ -81,7 +81,7 @@ RUNS_LOG = CORPUS / "runs.log"
 #   * .lock — the open handle survived, so THIS process kept its flock, but a
 #     second ctp.py created a new file and took its own lock. The
 #     single-instance guard passed while guarding nothing.
-# STATE sits beside metrics.tsv and runs.log, the other orchestrator artefacts.
+# STATE sits beside metrics.tsv and runs.log, the other orchestrator artifacts.
 # Keeping it out of OUT also preserves retain.py's invariant that every child of
 # OUT is a project workdir (retain.check_target relies on that depth).
 STATE = CORPUS / "state"
@@ -635,7 +635,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Fail before the run, not 1,900 times during it. Every project passes these
     # flags, so a name the runner does not know costs one rc=2 per project and
-    # produces no artefact. This is a defect, caught by a check instead of by a
+    # produces no artifact. This is a defect, caught by a check instead of by a
     # wasted run.
     missing = [f for f in REQUIRED_RUNNER_FLAGS if not script_supports(f)]
     if missing:
@@ -760,7 +760,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             firm_canonical = str(Path(args.firm_canonical).resolve())
     elif getattr(args, "firm_canonical", ""):
         sys.exit("--firm-canonical without --firm-map has no firm_raw to "
-                 "canonicalise. Pass data/affiliation.merged.csv too.")
+                 "canonicalize. Pass data/affiliation.merged.csv too.")
     # Refuse a bad size now. Step 10 is the last step, so the alternative is
     # finding the typo after every earlier step has already run.
     if args.memory_limit:
@@ -930,7 +930,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                  "would be blank. Drop the flag — left in a wrapper it would "
                  "silence the guard on the next run that does omit one.")
     if allow_empty and gaps and reaches_dataset:
-        # Loud, and itemised, because the operator has just opted out of the only
+        # Loud, and itemized, because the operator has just opted out of the only
         # check standing between this run and a quietly wrong dataset. A reader of
         # the log must be able to see which columns were given up without
         # inferring it from the absence of a refusal.
@@ -1347,7 +1347,7 @@ def main() -> int:
                             "columns of a 6h48m run. Legitimate uses "
                             "are a test fixture, a one-project smoke run, and a "
                             "corpus whose sidecar does not exist yet. Taking it "
-                            "prints, itemised, which columns were given up. Do "
+                            "prints, itemized, which columns were given up. Do "
                             "not leave it in a launcher script: ctp refuses it "
                             "when nothing would actually be blank, so it cannot "
                             "sit there silencing a later run")

@@ -16,7 +16,7 @@ Three things are under test here and they fail for different reasons.
 3. `data/firm_canonical.csv` — the reviewed table that fills the `firm` column.
    It is data, not code, so what can be checked is its shape: unique keys, no
    chains, no dead rows, and rejections recorded rather than dropped. The
-   judgement in each row is a human's and no test can confirm it; that is the
+   judgment in each row is a human's and no test can confirm it; that is the
    price of not merging names automatically.
 
 These read the LIVE data files on purpose. They are committed artifacts that a
@@ -284,7 +284,7 @@ def test_the_two_splits_the_measurement_named_are_both_merged():
 def test_case_only_spellings_resolve_to_one_name():
     """The gap that let these through: norm_company does not case-fold, and the
     all-caps spellings come from the Spinellis SEC/Fortune source, whose filing
-    names are upper case. An automatic rule would have canonicalised to the
+    names are upper case. An automatic rule would have canonicalized to the
     SHOUTING form, because that is the higher-confidence source."""
     canon = {r["firm_raw"]: r["firm"] for r in canonical_rows()}
     for shouted, proper in [("NETFLIX", "Netflix"), ("TWITTER", "Twitter"),
@@ -304,7 +304,7 @@ def test_the_table_collapses_forty_seven_firms_out_of_ninety_eight_strings():
     when collibra.com was corrected. `Medidata` occurred on exactly one domain in
     the map, collibra.com, and that row was the defect; with it gone the merge row
     is a dead row, which the test below forbids. The rejection count is
-    unchanged — no judgement was revisited.
+    unchanged — no judgment was revisited.
     """
     merges = [r for r in canonical_rows() if r["decision"] == "merge"]
     targets = {r["firm"] for r in merges}
@@ -369,7 +369,7 @@ def test_a_firm_map_that_is_not_a_file_stops_the_run(sandbox):
 
 
 def test_a_canonical_table_without_a_map_stops_the_run(sandbox):
-    """There is no firm_raw to canonicalise without a map to read it from, and
+    """There is no firm_raw to canonicalize without a map to read it from, and
     accepting the pair silently would write `firm` from nothing."""
     with pytest.raises(SystemExit, match="no firm_raw"):
         ctp.cmd_run(run_args(firm_canonical=str(CANONICAL)))
@@ -406,7 +406,7 @@ def test_both_paths_are_resolved_absolute_for_the_runner(sandbox, monkeypatch):
 
 def test_a_map_without_a_canonical_table_is_accepted(sandbox):
     """Not every caller has a reviewed table. Without one `firm` repeats
-    `firm_raw`, which is the unnormalised truth rather than a guess."""
+    `firm_raw`, which is the unnormalized truth rather than a guess."""
     (sandbox / "map.csv").write_text("domain,company,kind,source\n")
     assert ctp.cmd_run(run_args(firm_map=str(sandbox / "map.csv"))) == 0
     assert ctp._OPTS["firm_canonical"] == ""

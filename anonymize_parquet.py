@@ -53,7 +53,7 @@ separate columns and commit_summary holds the subject line only. Measured over
 shape, 0 contain an angle-bracketed address and 0 contain any identity name of
 five characters or more. Publishing it costs nothing and a subject line is
 useful. The check is not assumed: any residue makes the run FAIL, and
---null-commit-summary restores the original behaviour.
+--null-commit-summary restores the original behavior.
 
 RESIDUAL RISK, to be disclosed in any paper using this output:
 
@@ -882,7 +882,7 @@ def summary_residue(con, path: str, reg: Registry) -> dict:
     """Identity text surviving in commit_summary. Non-empty means FAIL.
 
     Separate from leak_scan because commit_summary is the one column whose
-    publication is a judgement call: the evidence for keeping it has to be
+    publication is a judgment call: the evidence for keeping it has to be
     visible in the report, not buried in a pass/fail.
     """
     scan = Scanner(reg)

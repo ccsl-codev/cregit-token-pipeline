@@ -1,6 +1,6 @@
 """Unit tests for select_corpus.py.
 
-The corpus is a research instrument. A silent labelling or filtering regression
+The corpus is a research instrument. A silent labeling or filtering regression
 does not crash anything — it changes the population under study, and the paper
 reports a finding about a corpus nobody can reconstruct. So the tests below are
 weighted toward the rules that decide membership and stratum, not toward
@@ -289,7 +289,7 @@ def test_a_quota_pause_does_not_spend_the_error_retry_budget(monkeypatch, sandbo
 
     With retries=1 a shared budget would give up after a single API call. The
     quota budget is larger on purpose, because waiting out a limit is the correct
-    behaviour and abandoning the pass is not.
+    behavior and abandoning the pass is not.
     """
     run = runner(1, err="API rate limit exceeded for user ID 1.")
     monkeypatch.setattr(sc.subprocess, "run", run)
@@ -458,7 +458,7 @@ def test_save_json_leaves_the_old_file_intact_when_serialising_fails(tmp_path):
     dest = tmp_path / "repo-meta.json"
     dest.write_text('{"kept": 1}')
     with pytest.raises(TypeError):
-        sc.save_json(dest, {"bad": {1, 2}})  # a set is not JSON serialisable
+        sc.save_json(dest, {"bad": {1, 2}})  # a set is not JSON serializable
     assert json.loads(dest.read_text()) == {"kept": 1}
 
 
@@ -781,7 +781,7 @@ def test_judge_weak_foundation_row_is_not_contested():
 
 
 def test_judge_records_the_label_date():
-    """Every row states when it was labelled, so a rerun is comparable."""
+    """Every row states when it was labeled, so a rerun is comparable."""
     assert sc.judge(cand(), good_meta())["label_date"] == sc.today()
 
 
@@ -794,7 +794,7 @@ def test_judge_includes_a_clean_row():
 
 @pytest.mark.parametrize("patch, expected", [
     # judge() reports WHICH error, because the three mean different things: gone,
-    # not yet fetched, and a state gh() does not recognise. Collapsing them into
+    # not yet fetched, and a state gh() does not recognize. Collapsing them into
     # one word made 20,457 pending rows read as dead repositories in the review.
     ({"error": "unreachable"}, "unreachable"),
     ({"error": "not-enriched"}, "not-enriched"),
@@ -1000,7 +1000,7 @@ def test_lang_tokens_splits_on_every_separator():
 def test_lang_tokens_does_not_match_a_language_by_substring(text):
     """Exact tokens only: "Scala" must not be read as "C".
 
-    Research correctness: substring matching would pull hundreds of untokenised
+    Research correctness: substring matching would pull hundreds of untokenized
     projects into a pool cregit cannot process.
     """
     assert not (sc.lang_tokens(text) & set(sc.LANG_FILTER))
@@ -1152,7 +1152,7 @@ def test_cohort_missing_file_returns_empty(sandbox, capsys):
 
 
 def test_spinellis_considers_only_fortune500_or_sec_filers(sandbox):
-    """The strong tier rests on published filings, not on our judgement."""
+    """The strong tier rests on published filings, not on our judgment."""
     write(sc.SPINELLIS_TSV, "\n".join([
         sp_ok("https://github.com/a/fortune", company="A", tier="fg500"),
         sp_ok("https://github.com/b/tenk", company="B", tier="sec10k"),
@@ -1446,9 +1446,9 @@ def test_parse_cncf_pairs_project_and_repo_url_in_either_order(sandbox):
 def test_parse_cncf_does_not_call_a_catalogued_project_a_foundation(sandbox):
     """**The CNCF landscape is not the CNCF.**
 
-    The file catalogues the whole cloud-native ecosystem. Only an entry with a
+    The file catalogs the whole cloud-native ecosystem. Only an entry with a
     `project:` key donated its trademark, which is what makes F1 a control fact.
-    Before this fix, 734 catalogued entries were labelled `foundation`, which put
+    Before this fix, 734 cataloged entries were labeled `foundation`, which put
     postgres/postgres and redis/redis in the foundation stratum. PostgreSQL is
     the canonical mailing-list community project, and Redis Ltd relicensed Redis
     in 2024. Neither error was visible in the counts.
@@ -1485,7 +1485,7 @@ def test_parse_cncf_treats_an_archived_project_as_hosted(sandbox):
 
 
 def test_parse_cncf_ignores_an_unknown_hosting_level(sandbox):
-    """An unrecognised `project:` value is not evidence of hosting."""
+    """An unrecognized `project:` value is not evidence of hosting."""
     write(sc.CACHE / "roster-cncf.raw", "\n".join([
         "      - item:",
         "        name: Odd",
@@ -1558,7 +1558,7 @@ def test_parse_company_orgs_skips_an_org_that_does_not_answer(sandbox, monkeypat
 def test_parse_ghsearch_emits_an_unlabelled_residual_pool(sandbox, monkeypatch):
     """ghsearch carries no control fact; judge() assigns the stratum.
 
-    Research correctness: labelling the volume source would let a search
+    Research correctness: labeling the volume source would let a search
     ranking decide a stratum.
     """
     monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: cp(
@@ -1640,7 +1640,7 @@ def test_collect_runs_a_roster_parser_when_its_cache_exists(no_api_sources):
     """A cached roster is parsed; the stratum comes from the roster.
 
     The entry needs `project:` to be a CNCF-hosted project. Without it the
-    landscape only catalogues it, and the label stays open for F2.
+    landscape only catalogs it, and the label stays open for F2.
     """
     write(sc.CACHE / "roster-cncf.raw",
           "      - name: etcd\n        project: graduated\n"
@@ -1801,7 +1801,7 @@ def test_emit_manifest_name_is_lowercased_with_dots_replaced(sandbox, monkeypatc
 
 
 def test_emit_manifest_names_are_unique_across_every_row(sandbox, monkeypatch):
-    """The property that matters, asserted on the artefact rather than on the
+    """The property that matters, asserted on the artifact rather than on the
     helper: two repositories sharing a name would share a workdir, a lock and a
     completion stamp in ctp.py."""
     owners = ["apolloconfig", "ClassicOldSong", "ApolloAuto"]
@@ -2039,7 +2039,7 @@ def test_fetch_subpages_returns_the_cached_file(sandbox, monkeypatch):
 
 
 def test_cmd_rosters_reports_every_source(sandbox, monkeypatch, capsys):
-    """`rosters` is the entry point for the whole cache; it must summarise."""
+    """`rosters` is the entry point for the whole cache; it must summarize."""
     def fake_fetch(url, dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text("x" * 10)
@@ -2804,7 +2804,7 @@ def test_draw_nests_where_random_sample_would_not():
     assert set(order[:5]) <= set(order[:11])
 
 
-# ---- the written artefacts
+# ---- the written artifacts
 
 
 def test_sample_manifest_carries_the_language_file_filter(sandbox):

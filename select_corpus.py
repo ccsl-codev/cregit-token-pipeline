@@ -7,7 +7,7 @@
     ./select_corpus.py all --per-stratum 170
 
 Stratum labels come from control facts (who controls the project), never from
-contribution composition — labelling a project "enterprise" because this
+contribution composition — labeling a project "enterprise" because this
 pipeline measured high firm concentration would make the finding true by
 construction. See CORPUS-HEURISTICS-PLAN.md "Locked decisions".
 
@@ -177,7 +177,7 @@ GH_SEARCH_PER_LANG = 260
 # GitHub orgs held by a company, i.e. F2 namespace ownership. Hand-seeded, so it
 # is a supplement only: the citable pool is the Spinellis strong tier below,
 # whose membership rests on SEC filings and the Fortune Global 500 rather than on
-# anyone's judgement. `enrich` also reads org metadata to catch orgs missing here.
+# anyone's judgment. `enrich` also reads org metadata to catch orgs missing here.
 COMPANY_ORGS = {
     "google", "googleapis", "GoogleCloudPlatform", "microsoft", "Azure", "dotnet",
     "facebook", "facebookincubator", "meta-llama", "apple", "aws", "awslabs",
@@ -535,7 +535,7 @@ def parse_company_orgs() -> list[dict]:
     Needed because the starred-search pool skews community and foundation: it
     produced only 59 company-owned candidates against 687 community. A company
     org's repository list is the F2 control fact stated at its strongest — the
-    company owns the namespace — so this source is labelled company-owned and
+    company owns the namespace — so this source is labeled company-owned and
     the language filter does the rest.
     """
     out = []
@@ -591,7 +591,7 @@ def parse_cncf() -> list[dict]:
     """landscape.yml without a yaml dep: buffer each item, then judge it.
 
     The distinction this function exists to make: **the CNCF landscape is not
-    the CNCF.** The file catalogues the whole cloud-native ecosystem, and only an
+    the CNCF.** The file catalogs the whole cloud-native ecosystem, and only an
     entry with a `project:` key is actually CNCF-hosted. 256 of them are, against
     988 repository URLs in the file.
 
@@ -602,7 +602,7 @@ def parse_cncf() -> list[dict]:
 
     So an item splits two ways:
       hosted     -> foundation, fact F1_roster:cncf-<level>. A real control fact.
-      catalogued -> an OPEN label. Good candidate pool, no control fact, so F2
+      cataloged -> an OPEN label. Good candidate pool, no control fact, so F2
                     decides and community is the residual.
 
     Buffering matters because `project:` and `repo_url:` sit in the same item in
@@ -643,7 +643,7 @@ def parse_cncf() -> list[dict]:
 
     hosted = sum(1 for r in out if r["stratum"] == "foundation")
     say(f"  cncf: {hosted} hosted (F1 control fact), "
-        f"{len(out) - hosted} catalogued only (pool, label stays open)")
+        f"{len(out) - hosted} cataloged only (pool, label stays open)")
     return out
 
 
@@ -716,7 +716,7 @@ def collect_candidates() -> list[dict]:
         say(f"{label:9s}{len(got):>5} candidates")
 
     # The JSON caches were written before a stratum was renamed, and they are
-    # replayed verbatim, so a stale cache can reintroduce a dead label. Normalise
+    # replayed verbatim, so a stale cache can reintroduce a dead label. Normalize
     # here rather than deleting the caches, which cost thousands of gh calls.
     for r in rows:
         r["stratum"] = LEGACY_STRATUM.get(r["stratum"], r["stratum"])
@@ -742,7 +742,7 @@ class RateLimited(Exception):
 
 
 class GhFailed(Exception):
-    """A gh call failed for a reason this code does not recognise.
+    """A gh call failed for a reason this code does not recognize.
 
     One strange repository must not stop a 22,000 repository pass, so the caller
     records the detail and carries on. `--retry-errors` picks these up again, and
@@ -755,7 +755,7 @@ class GhFailed(Exception):
 #   could not resolve          how GraphQL reports a missing repository
 #   451 / access blocked       DMCA takedown, for example compozed/deployadactyl
 #   410 / gone                 removed
-#   repository is empty        no commits, so nothing to tokenise. GitHub words
+#   repository is empty        no commits, so nothing to tokenize. GitHub words
 #                              this "Git Repository is empty." with HTTP 409, so
 #                              the substring is NOT "empty repository".
 GONE_PATTERNS = ("404", "not found", "could not resolve", "does not exist",
@@ -1542,7 +1542,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     24,405 rows are not reviewable by reading. This picks out the parts where a
     human can actually catch an error: the exclusion histogram, which is the
     PRISMA flow in table form; every contested case; the largest projects per
-    stratum with the fact that labelled each one; and a sample of the rows whose
+    stratum with the fact that labeled each one; and a sample of the rows whose
     label rests on the weakest fact. Reads candidates.csv, so it does not race a
     running `enrich`.
     """
@@ -1636,7 +1636,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         g = sorted((r for r in kept if r["stratum"] == s),
                    key=lambda r: -int(r["stars"] or 0))[:REVIEW_SAMPLE]
         out += [f"### {s}", "",
-                "| Project | Stars | Lang | Commits | Labelled by |",
+                "| Project | Stars | Lang | Commits | Labeled by |",
                 "| --- | --- | --- | --- | --- |"]
         for r in g:
             out.append(f"| `{r['owner']}/{r['repo']}` | {int(r['stars'] or 0):,} | "
@@ -1647,10 +1647,10 @@ def cmd_review(args: argparse.Namespace) -> int:
                   key=lambda r: -int(r["stars"] or 0))[:REVIEW_SAMPLE]
     out += [f"## 6. Weakest evidence — {REVIEW_SAMPLE} of "
             f"{sum(1 for r in kept if r['source'] == 'cohort')} cohort rows", "",
-            "These are labelled `community` because a published heuristic found",
+            "These are labeled `community` because a published heuristic found",
             "**no enterprise signal**. That is an absence of evidence. If any of",
             "these looks company-run to you, the stratum needs a positive fact.", "",
-            "| Project | Stars | Lang | Labelled by |", "| --- | --- | --- | --- |"]
+            "| Project | Stars | Lang | Labeled by |", "| --- | --- | --- | --- |"]
     for r in weak:
         out.append(f"| `{r['owner']}/{r['repo']}` | {int(r['stars'] or 0):,} | "
                    f"{r['language']} | `{r['fact']}` |")
