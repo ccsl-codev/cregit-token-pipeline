@@ -24,6 +24,10 @@ htmlcov/
 *.egg-info/
 junit-*.xml
 
+# Local devenv state. devenv rebuilds it for each shell, and it holds links into
+# this machine's Nix store, so it is not source.
+.devenv/
+
 # Caches. Rebuilt by `select_corpus.py rosters|enrich` and
 # `build_domain_map.py fetch`. Large, machine-specific and derived from public
 # APIs, so they are reproducible rather than source.
