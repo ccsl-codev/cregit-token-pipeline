@@ -1,12 +1,11 @@
 # Design
 
 Why the pipeline is built the way it is. For what it produces, read
-[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md); for how a project is labeled, read
-[`CODEBOOK.md`](CODEBOOK.md).
+[`DATASET-SCHEMA.md`](DATASET-SCHEMA.md).
 
-**Goal.** Run cregit end-to-end over a stratified corpus of FLOSS projects and
-produce per-project token-authorship datasets that share one schema, on a single
-workstation (16 cores, 30 GB RAM, one NVMe).
+**Goal.** Run cregit end-to-end over a manifest of FLOSS projects and produce
+per-project token-authorship datasets that share one schema, on a single
+workstation.
 
 ## 1. Two layers
 
@@ -16,7 +15,7 @@ for forwarded flags (§4).
 
 1. **Per-project layer** — cregit's `run_pipeline_process.sh`, one work directory
    per project, embarrassingly parallel across projects.
-2. **Corpus layer** — selection, provenance, validation, retention and
+2. **Dataset layer** — provenance, validation, retention and
    anonymization. Pure functions over committed inputs or finished artifacts, so
    each is cheap and re-runnable at any time.
 
@@ -48,8 +47,8 @@ Three parsers unpack exactly those five positions and four tests assert them.
 That rigidity has two consequences:
 
 - The 29 per-project provenance fields could not be added as manifest columns.
-  They live in `project_meta.json`, a **sidecar keyed by manifest name and joined
-  on `clone_url`**, passed to the generator with `--project-meta`.
+  They live in a JSON **sidecar keyed by manifest name and joined on
+  `clone_url`**, passed to the generator with `--project-meta`.
 - A sixth `pinned_commit` field cannot be added either, so runs are not pinned to
   a revision. This is a known limitation, not a decision; see
   `DATASET-SCHEMA.md` §5.
@@ -59,13 +58,10 @@ extension the tokenizer can parse, derived in `file_mask.py` from one extension
 list rather than typed out, because a mask and an extension list maintained
 separately drift in both directions and both directions are silent. It used to
 come from a per-language matrix keyed on GitHub's primary language, which dropped
-a polyglot project's other languages; `data/mask-impact.csv` measures what that
-cost. The column stays because it records which mask a Parquet was built with.
-Projects whose primary language has no tokenizer are still excluded at selection
-time.
+a polyglot project's other languages. The column stays because it records which
+mask a Parquet was built with.
 
-Selection heuristics are a separate concern: `select_corpus.py` emits candidate
-rows for curation, and the runner only consumes a curated manifest.
+Project selection is a separate concern: the runner only consumes a manifest.
 
 ## 3. Per-project pipeline: the delta
 
@@ -115,9 +111,9 @@ project work directory, which a from-scratch run deletes.
 
 ## 5. Disk lifecycle
 
-`memo/` plus `html/` is 68–96% of a work directory. Measured on four pilots,
-`memo/` alone was 45–88%. Keeping both across a large corpus does not fit on the
-disk; dropping both is what makes the corpus feasible.
+`memo/` plus `html/` is 68–96% of a work directory. Measured on the four
+projects of `manifest.tsv`, `memo/` alone was 45–88%. A large run that keeps both
+does not fit on the disk; dropping both makes it fit.
 
 | Artifact | Keep? | Why |
 | --- | --- | --- |
@@ -144,11 +140,11 @@ Two gates, deliberately separate:
   It writes the `.validated` stamp, and it does **not** check columns.
 - `validate_schema.py` asks *do all projects agree* — every column name, type and
   position against `EXPECTED_COLUMNS`, reporting every drift rather than the
-  first. A corpus is unusable if one project has 38 columns and another 70, or if
+  first. A dataset is unusable if one project has 38 columns and another 70, or if
   `token_index` is BIGINT in one file and VARCHAR in another: a consumer would
   union them and get silent nulls.
 
-The run invokes only the first, so the schema gate has to be run over the corpus
+The run invokes only the first, so the schema gate has to be run over the dataset
 explicitly. Both keep the parquet path as a bound query parameter rather than
 pasting it into SQL, because project names come from a manifest.
 
@@ -156,24 +152,23 @@ The checks are plain `if` statements rather than `assert`, because `assert`
 vanishes under `python -O` and a gate an interpreter flag can delete is not a
 gate.
 
-## 7. Corpus-level stages
+## 7. Dataset-level stages
+
+The sidecar is an input of the run. It is a JSON object keyed by manifest name,
+and each value holds the 29 fields of `validate_schema.META_FIELDS`. This
+repository does not build it.
 
 Built:
 
-1. **`select_corpus.py`** — rosters and searches → control facts → `candidates.csv`
-   → a stratified `manifest.sample.tsv`. See `CODEBOOK.md`.
-2. **`shared_history.py`** — finds projects that carry another project's history,
-   which GitHub's fork flag does not. They are flagged, not excluded.
-3. **`project_meta.py`** — the 29-field provenance sidecar.
-4. **`build_domain_map.py`** — the domain→firm map, from public affiliation data
+1. **`build_domain_map.py`** — the domain→firm map, from public affiliation data
    plus a curated overlay applied last, so a rebuild keeps the corrections.
-5. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
+2. **`consolidate.py`** — `ctp.duckdb`: a `projects` state table, `phase_metrics`,
    and a `tokens` view over every Parquet whose schema matches the contract. The
-   manifests indexed are selectable and default to the corpus run set; a
+   manifests indexed are selectable and default to `manifest.tsv`; a
    non-conforming file is excluded **by name, counted in the summary**, because a
    silent exclusion is worse than the crash it replaces — the row count then
    looks plausible.
-6. **`anonymize_parquet.py`** / **`verify_anon.py`** — the release path. The
+3. **`anonymize_parquet.py`** / **`verify_anon.py`** — the release path. The
    e-mail local part becomes `author_<token>` and names become `Author <token>`,
    through a single registry so one person has one pseudonym everywhere,
    including inside the trailer arrays. **The e-mail domain is preserved on
@@ -203,47 +198,41 @@ Built:
      before it. Rotate only on a suspected salt leak or a pseudonym collision.
      Losing the salt has the same effect as rotating it, without the choice, so
      back it up wherever the release itself is backed up.
-   - **A collision fails the run.** 14 hex characters is 56 bits. At the measured
-     28,339 distinct addresses over 186 conforming files there are
-     n(n−1)/2 = 401,535,291 pairs against 2^56 = 72,057,594,037,927,936, so the
-     chance that any two share a pseudonym is about **5.6 × 10⁻⁹** — one release
-     in 180 million, and 5.6 × 10⁻⁷ even at ten times the corpus. 48 bits would
-     be 1.4 × 10⁻⁶, too coarse for something that blocks a release; 64 bits costs
-     two characters per id and buys nothing usable. If it ever happens,
-     `build_registry` raises `CollisionError` and the release stops rather than
-     merging two contributors and quietly lowering the distinct-person count.
-   - **The hash is fast on purpose.** Keyed blake2b costs 26 ms for 28,339
-     values, and the whole six-file release path moved from 76 s to 79 s. A
-     deliberately slow password KDF (bcrypt, scrypt, argon2, high-iteration
-     PBKDF2) would raise the cost of a brute-force guess of the inputs *by an
-     adversary who already has the salt* — a threat addressed here by keeping the
-     salt out of the release, not by burning wall-clock time. If that trade is
-     ever revisited, this is the paragraph to argue with.
+   - **A collision fails the run.** 14 hex characters is 56 bits. For n distinct
+     values the chance that any two share a pseudonym is about n(n−1)/2 ÷ 2^56.
+     At 30,000 values that is about **6 × 10⁻⁹**, and at 300,000 values about
+     6 × 10⁻⁷. 48 bits gives about 1.6 × 10⁻⁶ at 30,000 values, too coarse for
+     something that blocks a release; 64 bits costs two characters per id and
+     buys nothing usable. If a collision occurs, `build_registry` raises
+     `CollisionError` and the release stops rather than merging two
+     contributors and quietly lowering the distinct-person count.
+   - **The hash is fast on purpose.** Keyed blake2b costs less than one
+     microsecond per value. A deliberately slow password KDF (bcrypt, scrypt,
+     argon2, high-iteration PBKDF2) would raise the cost of a brute-force guess
+     of the inputs *by an adversary who already has the salt* — a threat
+     addressed here by keeping the salt out of the release, not by burning
+     wall-clock time. If that trade is ever revisited, this is the paragraph to
+     argue with.
 
-   **Why this replaced sequential ids, measured.** Until this change an id was
-   the ordinal position of a value in the sorted distinct set of one invocation.
-   That is deterministic but not stable: inserting one value shifts every value
-   after it. Over six corpus Parquets, dropping one file from the invocation
-   renumbered **150 of the 153** addresses present in both runs — **98.0%**. The
-   same experiment after the change renumbers **0 of 153 — 0.0%**, and the five
-   shared output Parquets are byte-identical between a five-file and a six-file
-   release. That 98.0% describes the **superseded** design; it is kept here as
-   the reason the change was made. `tests/test_anonymize_parquet_e2e.py`
-   requirement 7 pins the 0.0%.
+   **Why this replaced sequential ids.** An earlier design used the ordinal
+   position of a value in the sorted distinct set of one invocation as the id.
+   That is deterministic but not stable: one new value shifts every value after
+   it, so a release that adds or drops one file renumbers almost every
+   pseudonym. With the hash, adding or dropping a file renumbers nobody.
+   `tests/test_anonymize_parquet_e2e.py` requirement 7 pins this.
 
    `verify_anon.py` checks the published files alone, **needs no salt and no
    secret**, and is therefore still the check worth putting in a release script.
    Moving to a hash cost it one widening: `author_\d+` became
-   `author_[0-9a-f]+`. See `LIMITATIONS.md` and `ANON-OPEN-QUESTIONS.md`
-   question 1, whose Option B is what is now implemented.
+   `author_[0-9a-f]+`. See `LIMITATIONS.md`.
 
 Not built. Each is a gap, not a plan:
 
-- **A corpus-level firm or organization rollup.** Attribution is per token only.
+- **A dataset-level firm or organization rollup.** Attribution is per token only.
 - **A per-project metadata table / dataset card** — name, category, URL, pinned
   sha, commit count, token rows, file count, languages, run duration, and the
   cregit and tokenizer versions.
-- **A packaging step** emitting per-stratum trees with checksums and a schema
+- **A packaging step** emitting release trees with checksums and a schema
   document.
 - **Provenance pinning.** No `provenance.json` per run, so a published Parquet
   cannot cite the cregit revision, tool versions and pinned commit it was built
@@ -255,8 +244,8 @@ Not built. Each is a gap, not a plan:
 | --- | --- |
 | Crash mid-tokenize | blob-map frontier resume; the runner relaunches with the same canonical command |
 | Disk full | disk-floor guard defers launches; `memo/` and `html/` dropped |
-| One project poisons the run | that project fails and is retried; the corpus continues |
-| Tokenizer fix lands mid-corpus | the tokenized repo and blob map are retained, so only affected blobs are re-tokenized and the Parquet is regenerated |
+| One project poisons the run | that project fails and is retried; the run continues |
+| Tokenizer fix lands mid-run | the tokenized repo and blob map are retained, so only affected blobs are re-tokenized and the Parquet is regenerated |
 | Resume refused on a meta mismatch | canonical paths enforced at the runner boundary; `--mask-widened` for a deliberate mask change |
 | Machine reboot | idempotent tick loop plus flock; the runner is restartable |
 | A malformed stamp or a missing Parquet | indexed anyway, flagged (`rows_unreadable`, `parquet_missing`), named in the summary, and the exit status goes non-zero |

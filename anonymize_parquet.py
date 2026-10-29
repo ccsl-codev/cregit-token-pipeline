@@ -109,12 +109,9 @@ RESIDUAL RISK, to be disclosed in any paper using this output:
     identifiable. Anyone who knows that exactly one person ever committed from
     smallfirm.example can re-identify author_3f9c1a7b2e5d40@smallfirm.example
     without breaking anything, and no salt helps: the domain is in the clear.
-    Measured over all 186 conforming corpus files and 28,339 distinct addresses:
-    5,276 of 6,228 person_domain groups have exactly ONE distinct address --
-    84.7%. An earlier three-file sample gave 33 of 38 and hedged that the ratio
-    was "inflated by the small sample". It was not. The ratio did not fall with
-    scale, because the corpus is mostly small samples and a small sample is
-    itself composed of single-contributor projects.
+    In a dataset of many small projects, most person_domain groups hold exactly
+    ONE distinct address, and the share does not become smaller when the
+    dataset grows, because most of those projects have one contributor.
     This is a deliberate trade of privacy for the firm signal the dataset exists
     to carry, not a defect, and it cannot be fixed while the domain is published.
     k-anonymity over the domain is the mitigation if a release needs one; it is
@@ -172,7 +169,7 @@ from dataclasses import dataclass, field
 # anonymization does to each column rather than by what type it is.
 # --------------------------------------------------------------------------
 
-# Per-project provenance, injected from project_meta.json. Constant within a
+# Per-project provenance, injected from the sidecar. Constant within a
 # project, carries no personal data (audited by audit_passthrough()). These are
 # the point of the dataset: a reader filters on them without a second join.
 PROVENANCE_COLUMNS: tuple[str, ...] = (

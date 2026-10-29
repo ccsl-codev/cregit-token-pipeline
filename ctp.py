@@ -2,11 +2,11 @@
 """ctp — cregit-token-pipeline runner. Runs cregit over every project in manifest.tsv.
 
     ./ctp.py run [--jobs 2] [--retries 1] [--only jq,zstd]
-    ./ctp.py run --skip-html --drop-memo        # disk-frugal corpus run
+    ./ctp.py run --skip-html --drop-memo        # disk-frugal dataset run
     ./ctp.py status
     ./ctp.py db
 
-Disk flags (the corpus does not fit otherwise — see retain.py and DESIGN.md §6):
+Disk flags (the dataset does not fit otherwise — see retain.py and DESIGN.md §6):
   --skip-html  prevention. Forwarded to run_pipeline_process.sh, which skips the
                HTML step outright. 94-255 MB per project never written.
   --drop-memo  cleanup, NOT prevention. memo/ is 45-88% of a workdir but the
@@ -54,8 +54,9 @@ import configparser
 import retain  # shared prune code path for --drop-memo
 from file_mask import UNIVERSAL_MASK
 
-# .resolve() canonicalizes to /local/home form — blobExec's meta table refuses
-# resume if the command path string drifts (/home vs /local/home symlink alias).
+# .resolve() gives the canonical path with symlinks resolved. blobExec's meta
+# table refuses resume if the command path string drifts, for example when one
+# directory is reached through two symlink aliases.
 CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
 _cfg.read(CORPUS / "pipeline.cfg")
@@ -66,8 +67,8 @@ def _cfg_path(key: str, default: str) -> Path:
     return (CORPUS / Path(raw).expanduser()).resolve()
 
 
-CREGIT = _cfg_path("cregit_dir", "../cregit-workspace/cregit")
-OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
+CREGIT = _cfg_path("cregit_dir", "../cregit")
+OUT = _cfg_path("output_dir", "../ctp-output")
 OUT.mkdir(parents=True, exist_ok=True)
 METRICS = CORPUS / "metrics.tsv"
 RUNS_LOG = CORPUS / "runs.log"
@@ -528,7 +529,7 @@ def run_project(project: dict) -> str:
         if _OPTS.get("retokenize"):
             pipeline_args += ["--retokenize", _OPTS["retokenize"]]
         # Put the memo outside the work directory, which a FROM_STEP=1 run
-        # deletes. It matters now because the mask changed corpus-wide and
+        # deletes. It matters now because the mask changed dataset-wide and
         # blobExec refuses to resume against a different one (Mapping.open), so
         # every re-run starts from step 1 — and a memo hit returns without
         # invoking srcml at all. torvalds__linux holds ~2.6 million memo entries
@@ -546,7 +547,7 @@ def run_project(project: dict) -> str:
             if memo_dir == resolved_work or resolved_work in memo_dir.parents:
                 say(f"{name} — refusing to run: --memo-dir puts the memo at "
                     f"{memo_dir}, inside the work directory the runner deletes. "
-                    "Point --memo-dir outside the corpus output directory.")
+                    "Point --memo-dir outside the output directory.")
                 return "failed"
             pipeline_args += ["--memo-dir", str(memo_dir)]
         # Sharding is for the L class only. Measured on Linux: --mode pipeline
@@ -681,7 +682,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                      "run deletes, so the flag would be silently dropped. Patch it first.")
         if not Path(args.memo_dir).is_dir():
             sys.exit(f"--memo-dir {args.memo_dir} is not an existing directory. Create it "
-                     "first: a typo here would quietly start a second corpus of memos "
+                     "first: a typo here would quietly start a second set of memos "
                      "instead of reusing the one you meant.")
     # Same rule as --skip-html: refuse before the run rather than discover per
     # project that the configured checkout cannot shard.
@@ -719,13 +720,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.duckdb_threads < 0:
         sys.exit(f"--duckdb-threads cannot be negative (got {args.duckdb_threads}).")
     # Same rule again, and the stakes are higher: without the check the run would
-    # produce a corpus of Parquets carrying blank provenance, which no consumer
+    # produce a dataset of Parquets carrying blank provenance, which no consumer
     # could tell from provenance that is genuinely unknown.
     project_meta = ""
     if args.project_meta:
         if not Path(args.project_meta).exists():
             sys.exit(f"--project-meta {args.project_meta} does not exist. "
-                     "Generate it with project_meta.py.")
+                     "It must be a JSON object keyed by manifest name, with "
+                     "the fields of validate_schema.META_FIELDS.")
         missing = [f for f in ("--project-meta", "--project-key")
                    if not script_supports(f)]
         if missing:
@@ -737,7 +739,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         project_meta = str(Path(args.project_meta).resolve())
     # The firm map, under the same rules and for a sharper reason: a map that
     # never arrives does not fail the run, it publishes blank firm columns across
-    # the whole corpus, and firm attribution is the measurement this corpus
+    # the whole dataset, and firm attribution is the measurement this dataset
     # exists for. getattr, because callers build this Namespace directly.
     firm_map = firm_canonical = ""
     if getattr(args, "firm_map", ""):
@@ -773,7 +775,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # --mask-widened, under the same rule as every other forwarded flag, and with
     # the sharpest stakes of any of them: an unimplemented flag would be dropped
     # and blobExec would refuse every project on the recorded mask (exit 3), which
-    # reads as a failed corpus rather than as a missing feature.
+    # reads as a failed dataset rather than as a missing feature.
     mask_widened = bool(getattr(args, "mask_widened", False))
     if mask_widened:
         if not script_supports("--mask-widened"):
@@ -830,13 +832,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     #    existed was the `say("note: no --firm-map ...")` this block replaces, and
     #    it covered 3 columns.
     #
-    # 2. A note cannot carry this weight in this log. The 2026-09-21
-    #    torvalds__linux resume ran 6 h 48 m and wrote 113 lines, 105 of them
+    # 2. A note cannot carry this weight in this log. A long run writes mostly
     #    30-second heartbeats. A note is line 1, scrolled past inside the first
     #    minute of an overnight run, and the operator who reads the log next reads
-    #    the tail. (That run's log holds no `note:` line, so it did pass
-    #    --firm-map; what it cannot tell us either way is --project-meta, because
-    #    omitting that printed nothing at all. Which is the point of reason 1.)
+    #    the tail.
     #
     # 3. Nothing downstream catches the result. The file still has all 70 columns
     #    in the right order and the right types, so validate.py and
@@ -844,10 +843,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     #    cannot distinguish a project whose stratum was never supplied from one
     #    that genuinely has none. A quietly wrong dataset is worse than a failed
     #    run: the cost of a false refusal is one re-typed command, the cost of a
-    #    miss is hours of compute and a corpus whose members disagree with each
-    #    other. torvalds__linux is the largest of 186; its re-run with the flags
-    #    filled stratum on 100% of rows, firm on 83.6% and history_cluster on
-    #    100%, so those columns were never "unknown", only never asked for.
+    #    miss is hours of compute and a dataset whose members disagree with each
+    #    other.
     #
     # Refusing is also the house idiom in cmd_run. Every other flag combination
     # that would run to completion while doing the wrong thing exits here with a
@@ -857,7 +854,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     #
     # The escape hatch is --allow-empty-provenance, because a blanket refusal
     # would break three legitimate uses: a test fixture, a one-project smoke run,
-    # and a corpus whose sidecar does not exist yet. It is store_true with no
+    # and a dataset whose sidecar does not exist yet. It is store_true with no
     # default, so it cannot arrive except by being typed, and taking it prints
     # what it gave up.
     #
@@ -890,7 +887,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         gaps.append(("--firm-map",
                      "3 firm columns empty on every row: firm_raw, firm, "
                      "firm_source — and firm attribution is the measurement this "
-                     "corpus exists for"))
+                     "dataset exists for"))
     elif not firm_canonical:
         # Not an empty column, a wrong one, which is why it is listed separately:
         # `firm` gets firm_raw's value verbatim, so the 48 split spellings stay
@@ -909,17 +906,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             + "This does not fail anything. The file keeps all 70 columns in the "
               "right order, so validate.py passes it and no consumer can tell a "
               "blank column from provenance that is genuinely unknown.\n"
-              "This is why it matters: a torvalds__linux run on 2026-09-21 spent "
-              "6h48m and died in step 10 for an unrelated reason. Had it "
-              "succeeded it would have published the largest project in the "
-              "corpus silently inconsistent with the other 185.\n"
-              "Pass the flags — this is what tmp/wave.sh does, and its comment says "
-              "they cannot be defaulted on:\n"
-              "  --project-meta project_meta.json \\\n"
+              "This is why it matters: one such project makes the whole dataset "
+              "silently inconsistent.\n"
+              "Pass the flags. They have no defaults, because each names a file "
+              "of your run:\n"
+              "  --project-meta <sidecar.json> \\\n"
               "  --firm-map data/affiliation.merged.csv \\\n"
               "  --firm-canonical data/firm_canonical.csv\n"
               "If blank columns are genuinely what you want — a fixture, a "
-              "one-project smoke run, a corpus whose sidecar does not exist yet — "
+              "one-project smoke run, a run whose sidecar does not exist yet — "
               "say so with --allow-empty-provenance.")
     if allow_empty and not gaps:
         # Refused rather than ignored, so the hatch cannot settle into a launcher
@@ -938,7 +933,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "with blank provenance, on purpose.")
         for flag, cost in gaps:
             say(f"         {flag} absent — {cost}")
-        say("         Do not mix these rows into the corpus: they are "
+        say("         Do not mix these rows into the dataset: they are "
             "schema-valid and indistinguishable from rows whose provenance is "
             "genuinely unknown.")
     shard_classes = tuple(c.strip() for c in args.shard_classes.split(",") if c.strip())
@@ -963,7 +958,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         # mask a lie unless the operator updates the manifest too.
         say(f"WARNING: --mask overrides the manifest for every project in this "
             f"run: {_OPTS['mask']}")
-        say("         project_meta.json records the MANIFEST's mask, so the "
+        say("         the sidecar records the MANIFEST's mask, so the "
             "Parquet's file_mask column will not match this run.")
     if args.memory_limit:
         warning = memory_budget_warning(args.memory_limit, args.jobs)
@@ -1090,16 +1085,15 @@ def bar(done: int, total: int, width: int = BAR_WIDTH) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def commit_counts(projects: list[dict]) -> dict:
-    """Commits per project name, read from candidates.csv.
+def commit_counts(projects: list[dict], path: Path | None = None) -> dict:
+    """Commits per project name, read from the CSV given with --commits.
 
-    Joins on `clone_url`, NOT on name: the manifest name is a slug that
-    lowercases and maps `_` and `.` to `-`, so four of the 200 drawn projects do
-    not match by name. Returns {} when the file is absent, so progress still
-    prints without an ETA.
+    The CSV needs two columns, `clone_url` and `commits`. Joins on `clone_url`,
+    NOT on name: the manifest name is a slug that lowercases and maps `_` and
+    `.` to `-`, so some projects do not match by name. Returns {} when no file
+    is given or the file is absent, so progress still prints without an ETA.
     """
-    path = CORPUS / "candidates.csv"
-    if not path.exists():
+    if path is None or not path.exists():
         return {}
     by_url = {}
     with path.open(newline="") as fh:
@@ -1148,7 +1142,7 @@ def cmd_progress(args: argparse.Namespace) -> int:
     total = len(projects)
     pct = 100 * len(done) / total if total else 0.0
 
-    print(f"corpus  [{bar(len(done), total)}]  {len(done)}/{total}  {pct:.1f}%")
+    print(f"total   [{bar(len(done), total)}]  {len(done)}/{total}  {pct:.1f}%")
     per_class = []
     for cls in ("S", "M", "L"):
         members = [p for p in projects if p["size_class"] == cls]
@@ -1158,7 +1152,8 @@ def cmd_progress(args: argparse.Namespace) -> int:
     print(f"        {'  '.join(per_class)}"
           f"{'  |  FAILED ' + str(len(failed)) if failed else ''}")
 
-    commits = commit_counts(projects)
+    commits = commit_counts(projects,
+                            Path(args.commits) if args.commits else None)
     rate = measured_rate(commits)
     if rate and commits:
         median, samples = rate
@@ -1172,7 +1167,7 @@ def cmd_progress(args: argparse.Namespace) -> int:
               f"  ({left:,} commits left)")
     else:
         print(f"rate    not enough finished projects yet "
-              f"(need {MIN_RATE_SAMPLES}, and candidates.csv for commit counts)")
+              f"(need {MIN_RATE_SAMPLES}, and --commits for commit counts)")
 
     if running:
         print("\nrunning")
@@ -1197,7 +1192,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    run_p = sub.add_parser("run", help="run the corpus")
+    run_p = sub.add_parser("run", help="run the pipeline over a manifest")
     run_p.add_argument("--jobs", type=int, default=2, help="concurrent projects")
     run_p.add_argument("--retries", type=int, default=1, help="extra passes over failed projects")
     run_p.add_argument("--only", help="comma-separated project names to restrict to")
@@ -1288,17 +1283,17 @@ def main() -> int:
                             "default. Measured 2026-09-15: the limit bounds "
                             "DuckDB's buffers, not the process, which settles at "
                             "about 1.4x the limit. Two projects at 8GB therefore "
-                            "need ~22 GB, and the corpus run died on this 30 GB "
-                            "box. Budget 1.4 x --jobs x SIZE. Takes an absolute "
+                            "need ~22 GB, and a run died on a 30 GB "
+                            "machine. Budget 1.4 x --jobs x SIZE. Takes an absolute "
                             "size such as 3GB, never a percentage")
     run_p.add_argument("--duckdb-threads", type=int, default=0, metavar="N",
                        help="forward --duckdb-threads to step 10. Each sorting "
                             "thread holds its own buffers, so fewer threads lower "
                             "the peak. Omit to accept the generator's default")
     run_p.add_argument("--project-meta", default="", metavar="PATH",
-                       help="JSON sidecar from project_meta.py, carrying each "
-                            "project's provenance (which roster found it, which "
-                            "stratum it was assigned, its shared-history cluster "
+                       help="JSON sidecar keyed by manifest name, carrying each "
+                            "project's provenance (which roster found it, its "
+                            "labels, its shared-history cluster "
                             "and the mask it was tokenized with) into the "
                             "Parquet. OMITTING THIS SILENTLY EMPTIES 29 COLUMNS "
                             "on every row of the project: clone_url, "
@@ -1324,7 +1319,7 @@ def main() -> int:
                             "join, so the map stays an external auditable file. "
                             "OMITTING THIS SILENTLY EMPTIES 3 COLUMNS on every "
                             "row — firm_raw, firm and firm_source — and firm "
-                            "attribution is the measurement this corpus exists "
+                            "attribution is the measurement this dataset exists "
                             "for. The run still succeeds and still validates, so "
                             "ctp REFUSES a run that reaches step 10 without it, "
                             "unless you pass --allow-empty-provenance")
@@ -1346,7 +1341,7 @@ def main() -> int:
                             "nothing at all, at any layer, while emptying 29 "
                             "columns of a 6h48m run. Legitimate uses "
                             "are a test fixture, a one-project smoke run, and a "
-                            "corpus whose sidecar does not exist yet. Taking it "
+                            "dataset whose sidecar does not exist yet. Taking it "
                             "prints, itemized, which columns were given up. Do "
                             "not leave it in a launcher script: ctp refuses it "
                             "when nothing would actually be blank, so it cannot "
@@ -1380,6 +1375,9 @@ def main() -> int:
     pr_p.add_argument("--jobs", type=int, default=2,
                       help="concurrency to assume for the ETA (default 2). Set it "
                            "to the --jobs the run actually uses")
+    pr_p.add_argument("--commits", default=None, metavar="CSV",
+                      help="CSV with clone_url and commits columns. The ETA "
+                           "needs it; without it progress prints no ETA")
     pr_p.set_defaults(fn=cmd_progress)
 
     db_p = sub.add_parser("db", help="rebuild ctp.duckdb (tracking table + unified tokens view)")

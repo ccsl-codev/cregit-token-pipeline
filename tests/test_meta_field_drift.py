@@ -1,9 +1,9 @@
 """The per-project metadata field list exists in three places. Keep them equal.
 
-  1. project_meta.META_FIELDS            — writes project_meta.json (this repo)
+  1. validate_schema.META_FIELDS          — the sidecar fields (this repo)
   2. generate_dataset.PROJECT_META_FIELDS — lays out the Parquet columns
                                             (cregit-issue61, a different repo)
-  3. validate_schema.EXPECTED_COLUMNS    — gates the corpus (this repo)
+  3. validate_schema.EXPECTED_COLUMNS    — gates the dataset (this repo)
 
 Nothing else keeps them in step, and the two repositories are versioned
 separately. A divergence does not crash: it produces a Parquet whose columns are
@@ -23,7 +23,6 @@ from pathlib import Path
 import pytest
 
 import ctp                                  # only for the configured CREGIT path
-import project_meta
 import validate_schema as vs
 
 GENERATE_DATASET = ctp.CREGIT / "generate_dataset" / "generate_dataset.py"
@@ -56,13 +55,13 @@ def test_the_generator_and_the_sidecar_agree_on_every_field_and_its_position():
     if not GENERATE_DATASET.exists():
         pytest.skip(f"{GENERATE_DATASET} is not checked out on this machine; "
                     "the drift check needs both repositories")
-    assert cregit_field_list() == tuple(project_meta.META_FIELDS)
+    assert cregit_field_list() == tuple(vs.META_FIELDS)
 
 
 def test_the_contract_carries_the_same_metadata_columns_in_the_same_order():
     """validate_schema.py is the third copy. It gates every project, so a
-    disagreement here fails the whole corpus rather than one file."""
-    assert [n for n, _ in contract_meta_columns()] == list(project_meta.META_FIELDS)
+    disagreement here fails the whole dataset rather than one file."""
+    assert [n for n, _ in contract_meta_columns()] == list(vs.META_FIELDS)
 
 
 def test_every_metadata_column_is_a_varchar():
@@ -75,13 +74,16 @@ def test_every_metadata_column_is_a_varchar():
 def test_the_metadata_block_sits_between_repo_name_and_file_path():
     names = [n for n, _ in vs.EXPECTED_COLUMNS]
     assert names[0] == "repo_name"
-    assert names[1:1 + len(project_meta.META_FIELDS)] == list(project_meta.META_FIELDS)
-    assert names[1 + len(project_meta.META_FIELDS)] == FIRST_AFTER_META
+    assert names[1:1 + len(vs.META_FIELDS)] == list(vs.META_FIELDS)
+    assert names[1 + len(vs.META_FIELDS)] == FIRST_AFTER_META
 
 
 def test_the_configured_cregit_checkout_is_the_one_the_pipeline_runs():
     """If pipeline.cfg pointed somewhere else, the drift test above would be
-    checking a file no run uses. Cheap assertion, and it names the failure."""
+    checking a file no run uses. Cheap assertion, and it names the failure. With
+    no checkout at all there is nothing to compare, so the test skips."""
     assert isinstance(ctp.CREGIT, Path)
+    if not ctp.CREGIT.exists():
+        pytest.skip(f"{ctp.CREGIT} is not checked out on this machine")
     assert (ctp.CREGIT / "run_pipeline_process.sh").exists(), (
         f"{ctp.CREGIT} does not look like a cregit checkout; pipeline.cfg is stale")

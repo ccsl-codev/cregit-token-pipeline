@@ -1,10 +1,10 @@
-"""Unit tests for ctp.py, the corpus orchestrator.
+"""Unit tests for ctp.py, the dataset orchestrator.
 
 No test starts a real process. The autouse `sandbox` fixture replaces
 subprocess.run and subprocess.Popen with a guard that raises, and moves every
 path constant (CORPUS, OUT, CREGIT, STATE, METRICS, RUNS_LOG) into tmp_path. A test
 that needs a subprocess installs its own recording fake. Nothing here touches
-the real corpus-files tree, metrics.tsv, runs.log or ctp.duckdb.
+the real output tree, metrics.tsv, runs.log or ctp.duckdb.
 
 Several tests carry `xfail(strict=True)`. Each one states a contract the module
 docstring promises but the code does not keep. They are documentation, not
@@ -170,9 +170,9 @@ def sandbox(tmp_path, monkeypatch):
     """Redirect every path and side effect of ctp into tmp_path.
 
     Locks in nothing about behavior; it exists so a failing test can never
-    write to the live corpus or launch run_pipeline_process.sh.
+    write to the live dataset or launch run_pipeline_process.sh.
     """
-    out = tmp_path / "corpus-files"
+    out = tmp_path / "ctp-output"
     out.mkdir()
     cregit = tmp_path / "cregit"
     cregit.mkdir()
@@ -266,7 +266,7 @@ def test_manifest_skips_blank_and_whitespace_only_lines(tmp_path):
 ])
 def test_manifest_rejects_a_row_without_exactly_five_fields(tmp_path, row, fields):
     """Five tab-separated fields are the contract. A short or long row is a
-    corrupt manifest, and running the corpus off it would mislabel projects."""
+    corrupt manifest, and running the dataset off it would mislabel projects."""
     with pytest.raises(ValueError):
         ctp.read_manifest(write_manifest(tmp_path, row), None)
 
@@ -306,7 +306,7 @@ def test_manifest_empty_returns_no_projects(tmp_path):
 
 
 def test_manifest_only_filter_keeps_just_the_named_projects(tmp_path):
-    """--only must not silently widen to the whole corpus."""
+    """--only must not silently widen to the whole dataset."""
     path = write_manifest(
         tmp_path, VALID_ROW,
         "zstd\thttps://github.com/facebook/zstd.git\tenterprise\t\\.[ch]$\tS",
@@ -429,7 +429,7 @@ def test_a_missing_from_step_option_behaves_as_step_one(runner, jq):
 
 
 def test_gc_mode_is_forwarded_to_the_runner(runner, jq):
-    """The repack default costs hours per project at corpus scale, so the
+    """The repack default costs hours per project at dataset scale, so the
     choice has to reach the runner argv to mean anything."""
     ctp._OPTS.update(skip_html=False, drop_memo=False, gc="none")
     ctp.run_project(jq)
@@ -618,7 +618,7 @@ def test_drop_memo_reports_when_retain_refuses(monkeypatch, capsys, runner, jq):
 #
 # run_pipeline_process.sh deletes the whole work directory at FROM_STEP=1, and
 # the memo used to live inside it. That was affordable while a re-run could
-# resume; it is not any more. The mask changed corpus-wide on 2026-09-19 and
+# resume; it is not any more. The mask changed dataset-wide on 2026-09-19 and
 # Mapping.open refuses to resume against a different stored mask, so all 64
 # re-run projects rebuild from step 1. torvalds__linux holds ~2.6 million memo
 # entries against 3,228,137 blobs, and tokenizeByBlobId/tokenBySha.pl serves a
@@ -677,7 +677,7 @@ def test_run_refuses_memo_dir_together_with_drop_memo(
 
 def test_run_refuses_a_memo_dir_that_does_not_exist(
         sandbox, monkeypatch, runner_script):
-    """A typo would quietly start a second corpus of memos instead of reusing the
+    """A typo would quietly start a second set of memos instead of reusing the
     2.6 million entries the flag exists to reuse."""
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
@@ -1006,7 +1006,7 @@ def test_a_done_project_writes_the_stamp_that_makes_the_next_run_skip(sandbox, r
 @pytest.mark.xfail(strict=True, reason=(
     "Defect: an exception from subprocess (for example the runner script being "
     "absent, OSError) is not caught. It escapes run_project, propagates through "
-    "ThreadPoolExecutor.map in cmd_run and aborts the whole corpus run instead "
+    "ThreadPoolExecutor.map in cmd_run and aborts the whole dataset run instead "
     "of marking one project failed."))
 def test_run_project_reports_failed_when_the_subprocess_raises(monkeypatch, jq):
     """One unusable project must not end the run."""
@@ -1101,7 +1101,7 @@ def test_cmd_run_returns_one_when_a_project_fails(sandbox, monkeypatch):
 
 def test_cmd_run_retries_only_the_projects_that_are_not_done(
         sandbox, monkeypatch, capsys):
-    """A retry pass must skip the finished projects, or a long corpus run
+    """A retry pass must skip the finished projects, or a long dataset run
     repeats work it already paid for."""
     write_manifest(sandbox.root, VALID_ROW,
                    "zstd\thttps://github.com/facebook/zstd.git\tenterprise\t\\.[ch]$\tS")
@@ -1543,7 +1543,7 @@ def test_blame_jobs_is_sent_to_the_runner_as_jobs(runner, jq):
 
     cregit-issue61 7a70a92 renamed the runner's --blame-jobs to --jobs on
     2026-09-18. ctp.py kept sending the old name, so its preflight refused every
-    project and the corpus run could not be restarted. ctp.py's own CLI name is
+    project and the dataset run could not be restarted. ctp.py's own CLI name is
     still --blame-jobs, because ctp.py's --jobs means concurrent projects.
     """
     ctp._OPTS.update(skip_html=False, drop_memo=False, blame_jobs=8)
@@ -1597,7 +1597,7 @@ def test_run_accepts_blame_jobs_on_a_patched_runner(
 
 
 # --------------------------------------------------------------------------- #
-# Step 10 memory budget. Added after the 2026-09-15 corpus run was killed for
+# Step 10 memory budget. Added after the 2026-09-15 dataset run was killed for
 # low memory: the generator's own 8GB default, times two concurrent projects,
 # needed ~22 GB on a 30 GB box that already gave ~17 GB to other software.
 # --------------------------------------------------------------------------- #
@@ -1840,16 +1840,16 @@ def test_the_sidecar_is_forwarded_with_this_project_as_the_key(runner, jq):
     already told through --repo-name, so the key is not the operator's to get
     wrong."""
     ctp._OPTS.update(skip_html=False, drop_memo=False,
-                     project_meta="/somewhere/project_meta.json")
+                     project_meta="/somewhere/sidecar.json")
     ctp.run_project(jq)
     argv = runner.argv("pipeline")
-    assert argv[argv.index("--project-meta") + 1] == "/somewhere/project_meta.json"
+    assert argv[argv.index("--project-meta") + 1] == "/somewhere/sidecar.json"
     assert argv[argv.index("--project-key") + 1] == jq["name"]
 
 
 def test_no_sidecar_sends_neither_flag(runner, jq):
     """Absent means absent: the generator then writes the metadata columns empty
-    and the file still matches the corpus contract."""
+    and the file still matches the dataset contract."""
     ctp._OPTS.update(skip_html=False, drop_memo=False, project_meta="")
     ctp.run_project(jq)
     argv = runner.argv("pipeline")
@@ -1859,7 +1859,7 @@ def test_no_sidecar_sends_neither_flag(runner, jq):
 
 def test_run_refuses_a_sidecar_path_that_does_not_exist(
         sandbox, monkeypatch, runner_script):
-    """Without this the whole corpus would be regenerated with blank provenance,
+    """Without this the whole dataset would be regenerated with blank provenance,
     which a consumer cannot tell from provenance that is genuinely unknown."""
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
@@ -1868,7 +1868,7 @@ def test_run_refuses_a_sidecar_path_that_does_not_exist(
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(project_meta=str(sandbox.root / "absent.json")))
     assert "does not exist" in str(exc.value)
-    assert "project_meta.py" in str(exc.value)
+    assert "META_FIELDS" in str(exc.value)
 
 
 def test_run_refuses_a_sidecar_on_a_runner_that_cannot_forward_it(
@@ -1877,7 +1877,7 @@ def test_run_refuses_a_sidecar_on_a_runner_that_cannot_forward_it(
     the columns would be blank anyway."""
     runner_script(REAL_RUNNER_USAGE.replace("--project-key NAME", "--no-such-flag"))
     write_manifest(sandbox.root, VALID_ROW)
-    meta = sandbox.root / "project_meta.json"
+    meta = sandbox.root / "sidecar.json"
     meta.write_text("{}")
     monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)
 
@@ -1890,7 +1890,7 @@ def test_run_accepts_a_sidecar_on_a_patched_runner(
         sandbox, monkeypatch, runner_script):
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
-    meta = sandbox.root / "project_meta.json"
+    meta = sandbox.root / "sidecar.json"
     meta.write_text("{}")
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: "done")
@@ -1906,13 +1906,13 @@ def test_a_relative_sidecar_path_is_made_absolute(
     which is exactly what happened on the first real run."""
     runner_script()
     write_manifest(sandbox.root, VALID_ROW)
-    meta = sandbox.root / "project_meta.json"
+    meta = sandbox.root / "sidecar.json"
     meta.write_text("{}")
     monkeypatch.chdir(sandbox.root)
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: "done")
 
-    assert ctp.cmd_run(run_args(project_meta="project_meta.json")) == 0
+    assert ctp.cmd_run(run_args(project_meta="sidecar.json")) == 0
     assert Path(ctp._OPTS["project_meta"]).is_absolute()
     assert Path(ctp._OPTS["project_meta"]) == meta.resolve()
 
@@ -1928,10 +1928,6 @@ def test_a_relative_sidecar_path_is_made_absolute(
 # 3 firm columns were empty strings. validate.py passed it, because the schema was
 # right.
 #
-# It is not hypothetical. On 2026-09-21 a torvalds__linux run ran 6h48m and died
-# inside step 10 for an unrelated reason; had it finished it would have published
-# the largest project in the corpus silently inconsistent with the other 185.
-#
 # The argument for an exit rather than a louder note: omitting --project-meta, the
 # 29-column half, printed NOTHING at any layer. Only the 3 firm columns had a
 # note, and a note is line 1 of a log whose other 105 lines are 30-second
@@ -1946,7 +1942,7 @@ def provenance_kwargs(root: Path, **override) -> dict:
     is not a file, and that is a DIFFERENT refusal from the guard's. Pass
     e.g. project_meta="" to leave one flag out.
     """
-    meta = root / "project_meta.json"
+    meta = root / "sidecar.json"
     meta.write_text('{"jq": {}}')
     firm = root / "affiliation.merged.csv"
     firm.write_text("domain,company,source\nredhat.com,Red Hat,gitdm\n")
@@ -1981,12 +1977,12 @@ def must_not_start(sandbox, monkeypatch, runner_script):
 
 
 def test_all_three_provenance_flags_present_needs_no_escape_hatch(ready):
-    """The canonical corpus invocation — what tmp/wave.sh sends — must pass the
-    guard with allow_empty_provenance at its real CLI default of False."""
+    """The full invocation, with all three flags, must pass the guard with
+    allow_empty_provenance at its real CLI default of False."""
     args = run_args(allow_empty_provenance=False,
                     **provenance_kwargs(ready.root))
     assert ctp.cmd_run(args) == 0
-    assert ctp._OPTS["project_meta"].endswith("project_meta.json")
+    assert ctp._OPTS["project_meta"].endswith("sidecar.json")
     assert ctp._OPTS["firm_map"].endswith("affiliation.merged.csv")
     assert ctp._OPTS["firm_canonical"].endswith("firm_canonical.csv")
 
@@ -2005,7 +2001,7 @@ def test_each_provenance_flag_missing_on_its_own_is_refused(
         must_not_start, absent, expected):
     """One flag left out is enough. Each one owns a different slice of the
     columns, so any single omission publishes a project that disagrees with the
-    rest of the corpus."""
+    rest of the dataset."""
     kwargs = provenance_kwargs(must_not_start.root, **absent)
     with pytest.raises(SystemExit) as exc:
         ctp.cmd_run(run_args(allow_empty_provenance=False, **kwargs))
@@ -2039,7 +2035,7 @@ def test_the_refusal_names_every_missing_flag_and_the_columns_at_stake(
 
 def test_the_escape_hatch_lets_a_deliberate_blank_run_proceed(ready):
     """A blanket refusal would break a fixture, a one-project smoke run, and a
-    corpus whose sidecar does not exist yet."""
+    dataset whose sidecar does not exist yet."""
     assert ctp.cmd_run(run_args(allow_empty_provenance=True)) == 0
     assert ctp._OPTS["project_meta"] == ""
     assert ctp._OPTS["firm_map"] == ""
@@ -2151,14 +2147,14 @@ def test_project_key_is_not_an_operator_flag(monkeypatch, capsys):
 
 def progress_args(**over):
     """A complete `ctp progress` Namespace."""
-    base = dict(manifest="manifest.tsv", last=5, jobs=2)
+    base = dict(manifest="manifest.tsv", last=5, jobs=2, commits=None)
     base.update(over)
     return argparse.Namespace(**base)
 
 
-def write_candidates(tmp_path: Path, *rows: tuple) -> Path:
-    """candidates.csv with only the columns commit_counts reads."""
-    path = tmp_path / "candidates.csv"
+def write_commits(tmp_path: Path, *rows: tuple) -> Path:
+    """A --commits CSV with only the columns commit_counts reads."""
+    path = tmp_path / "commits.csv"
     lines = ["clone_url,commits"]
     lines += [f"{url},{commits}" for url, commits in rows]
     path.write_text("\n".join(lines) + "\n")
@@ -2195,25 +2191,27 @@ def test_bar_does_not_divide_by_zero_on_an_empty_manifest():
 def test_commit_counts_joins_on_clone_url_not_name(sandbox):
     """The manifest name is a SLUG: it lowercases and maps `_` and `.` to `-`.
     Joining on name silently drops those projects."""
-    write_candidates(sandbox.root,
-                     ("https://github.com/amd/esmi_oob_library.git", 4321))
+    path = write_commits(sandbox.root,
+                         ("https://github.com/amd/esmi_oob_library.git", 4321))
     projects = [dict(name="amd__esmi-oob-library",
                      url="https://github.com/amd/esmi_oob_library.git",
                      size_class="S")]
-    assert ctp.commit_counts(projects) == {"amd__esmi-oob-library": 4321}
+    assert ctp.commit_counts(projects, path) == {"amd__esmi-oob-library": 4321}
 
 
 def test_commit_counts_skips_a_row_with_no_commit_count(sandbox):
-    """An un-enriched candidate row has an empty commits field."""
-    write_candidates(sandbox.root, ("https://x/a.git", ""))
+    """A row can have an empty commits field."""
+    path = write_commits(sandbox.root, ("https://x/a.git", ""))
     projects = [dict(name="a", url="https://x/a.git", size_class="S")]
-    assert ctp.commit_counts(projects) == {}
+    assert ctp.commit_counts(projects, path) == {}
 
 
-def test_commit_counts_returns_empty_without_candidates_csv(sandbox):
-    """Progress must still print. Only the ETA depends on this file."""
+def test_commit_counts_returns_empty_without_a_commits_file(sandbox):
+    """Progress must still print. Only the ETA depends on this file. There is
+    no default file, and a named file that is absent counts as none."""
     projects = [dict(name="a", url="https://x/a.git", size_class="S")]
     assert ctp.commit_counts(projects) == {}
+    assert ctp.commit_counts(projects, sandbox.root / "absent.csv") == {}
 
 
 def test_finished_runs_returns_empty_without_metrics(sandbox):
@@ -2233,9 +2231,9 @@ def test_finished_runs_keeps_only_successful_pipeline_rows(sandbox):
 def test_measured_rate_is_none_below_the_sample_floor(sandbox):
     """One project is an anecdote, not a rate."""
     write_metrics(sandbox.root, ("a", "S", "pipeline", 100, 0))
-    write_candidates(sandbox.root, ("https://x/a.git", 1000))
+    path = write_commits(sandbox.root, ("https://x/a.git", 1000))
     projects = [dict(name="a", url="https://x/a.git", size_class="S")]
-    assert ctp.measured_rate(ctp.commit_counts(projects)) is None
+    assert ctp.measured_rate(ctp.commit_counts(projects, path)) is None
 
 
 def test_measured_rate_takes_the_median_of_an_odd_sample(sandbox):
@@ -2339,9 +2337,9 @@ def test_progress_estimates_an_eta_from_the_measured_rate(sandbox, capsys):
                    "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
                    "b\thttps://x/b.git\tcommunity\t\\.c$\tS",
                    "c\thttps://x/c.git\tcommunity\t\\.c$\tS")
-    write_candidates(sandbox.root,
-                     ("https://x/a.git", 1000), ("https://x/b.git", 1000),
-                     ("https://x/c.git", 1000))
+    commits = write_commits(sandbox.root,
+                            ("https://x/a.git", 1000), ("https://x/b.git", 1000),
+                            ("https://x/c.git", 1000))
     write_metrics(sandbox.root,
                   ("a", "S", "pipeline", 100, 0),
                   ("b", "S", "pipeline", 100, 0))
@@ -2349,7 +2347,7 @@ def test_progress_estimates_an_eta_from_the_measured_rate(sandbox, capsys):
         (sandbox.out / name).mkdir()
         (sandbox.out / name / f"{name}.validated").write_text("rows=1\n")
 
-    assert ctp.cmd_progress(progress_args(jobs=2)) == 0
+    assert ctp.cmd_progress(progress_args(jobs=2, commits=str(commits))) == 0
     out = capsys.readouterr().out
     assert "100.0 s per 1k commits" in out
     assert "1,000 commits left" in out, "the two done projects must not count"
@@ -2361,18 +2359,31 @@ def test_progress_eta_treats_zero_jobs_as_one(sandbox, capsys):
     write_manifest(sandbox.root,
                    "a\thttps://x/a.git\tcommunity\t\\.c$\tS",
                    "b\thttps://x/b.git\tcommunity\t\\.c$\tS")
-    write_candidates(sandbox.root,
-                     ("https://x/a.git", 1000), ("https://x/b.git", 1000))
+    commits = write_commits(sandbox.root,
+                            ("https://x/a.git", 1000), ("https://x/b.git", 1000))
     write_metrics(sandbox.root,
                   ("a", "S", "pipeline", 100, 0),
                   ("b", "S", "pipeline", 100, 0))
 
-    assert ctp.cmd_progress(progress_args(jobs=0)) == 0
+    assert ctp.cmd_progress(progress_args(jobs=0, commits=str(commits))) == 0
     assert "at --jobs 0" in capsys.readouterr().out
 
 
+def test_progress_takes_the_commits_file_from_the_command_line(monkeypatch):
+    """--commits has no default: the ETA reads only a file the user names."""
+    seen = []
+    monkeypatch.setattr(ctp, "cmd_progress",
+                        lambda args: seen.append(args.commits) or 0)
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "progress"])
+    assert ctp.main() == 0
+    monkeypatch.setattr(ctp.sys, "argv",
+                        ["ctp.py", "progress", "--commits", "c.csv"])
+    assert ctp.main() == 0
+    assert seen == [None, "c.csv"]
+
+
 def test_progress_says_so_when_it_cannot_estimate(sandbox, capsys):
-    """No candidates.csv means no commit counts, so no ETA. Say why."""
+    """No --commits file means no commit counts, so no ETA. Say why."""
     write_manifest(sandbox.root, "a\thttps://x/a.git\tcommunity\t\\.c$\tS")
 
     assert ctp.cmd_progress(progress_args()) == 0
@@ -2418,9 +2429,9 @@ def test_a_blank_file_filter_column_falls_back_to_the_universal_mask(tmp_path):
 
 
 def test_the_manifests_mask_is_what_reaches_the_runner(sandbox, runner, jq):
-    """No override: the manifest column is the mask, because project_meta.py reads
-    that same column for the Parquet's file_mask, and the two must describe the
-    same run."""
+    """No override: the manifest column is the mask, because the Parquet's
+    file_mask column records that same manifest column, and the two must
+    describe the same run."""
     ctp._OPTS.update(skip_html=False, drop_memo=False)
     ctp.run_project(dict(jq, file_filter=UNIVERSAL_MASK))
     argv = runner.argv("pipeline")
@@ -2438,9 +2449,9 @@ def test_mask_overrides_the_manifest_for_one_deliberate_run(sandbox, runner, jq)
 # --------------------------------------------------------------------------- #
 # --mask-widened: reuse the tokenizations across a mask change
 #
-# The corpus holds 198 blob maps and every one of them records an OLD per-language
-# mask, so without this flag the re-run tokenizes 13.6 million (blob, path) pairs
-# from cold to reach the 5.6% that are genuinely new. The flag is off by default
+# A run made before a mask change leaves blob maps that each record the OLD
+# per-language mask, so without this flag the re-run tokenizes every (blob, path)
+# pair from cold to reach the few that are genuinely new. The flag is off by default
 # and the refusal it steps around is correct for every other case, so the tests
 # here are as much about what it refuses as about what it forwards.
 # --------------------------------------------------------------------------- #
@@ -2488,7 +2499,7 @@ def test_mask_widened_at_step_one_is_refused_because_step_one_deletes_the_workdi
 def test_mask_widened_is_refused_on_a_runner_that_cannot_forward_it(
         sandbox, monkeypatch, runner_script, capsys):
     """Dropped silently, blobExec refuses every project on the recorded mask and
-    the corpus run reads as broken rather than as a missing feature."""
+    the dataset run reads as broken rather than as a missing feature."""
     runner_script(REAL_RUNNER_USAGE.replace("--mask-widened", "--nope-widened"))
     write_manifest(sandbox.root, VALID_ROW)
     monkeypatch.setattr(ctp, "capture_devenv_env", forbidden)

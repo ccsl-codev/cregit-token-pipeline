@@ -5,7 +5,7 @@
     ./validate_schema.py --emit-contract <dataset.parquet>   # print, do not check
 
 Why a separate gate from validate.py: that one asks "did this project produce a
-non-empty parquet". This one asks "do all projects agree". A corpus is unusable
+non-empty parquet". This one asks "do all projects agree". A dataset is unusable
 if one project has 38 columns and another 23, or if `token_index` is BIGINT in
 one and VARCHAR in another. A consumer would union them and get silent nulls.
 
@@ -36,21 +36,19 @@ EXIT_USAGE = 2
 # Reviewed-by and Co-authored-by carry attribution that authorship alone does
 # not).
 #
-# The 29 after repo_name are per-project provenance, injected from
-# project_meta.json: which roster or search found the project, which stratum it
-# was assigned and on what evidence, its shared-history cluster, and the regex
-# mask it was tokenized with. They repeat per row by design — a reader can filter
-# without a second join against candidates.csv, and a column is cheap to drop at
-# publish time but expensive to add later.
+# The 29 after repo_name are per-project provenance, injected from the sidecar
+# given with --project-meta: which roster or search found the project, its
+# labels and their evidence, its shared-history cluster, and the regex mask it
+# was tokenized with. They repeat per row by design: a reader
+# can filter without a second join, and a column is cheap to drop at publish
+# time but expensive to add later.
 #
 # clone_url is among them because repo_name is a lossy slug. provenance_status
-# separates the 200 corpus projects from the 10 development fixtures that share
-# the output directory: select the corpus with
-#   where provenance_status = 'candidates.csv'
-# file_mask is there because a mask widening is planned, and without it nobody
-# can tell which rows came from which mask.
+# lets a reader separate the selected projects from development fixtures that
+# share the output directory. file_mask is there because a mask can change
+# between runs, and without it nobody can tell which rows came from which mask.
 #
-# These 29 names and their order must match META_FIELDS in project_meta.py and
+# These 29 names and their order must match META_FIELDS below and
 # PROJECT_META_FIELDS in cregit-issue61/generate_dataset/generate_dataset.py.
 # tests/test_meta_field_drift.py checks all three against each other.
 #
@@ -145,6 +143,21 @@ EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("footer_thanks_to", "VARCHAR[]"),
     ("footer_personids", "VARCHAR[]"),
     ("footer_person_names", "VARCHAR[]"),
+)
+
+# The 29 per-project sidecar fields, in column order. The sidecar is a JSON
+# object keyed by manifest name, and each value carries these keys. The cregit
+# generator owns the same list (PROJECT_META_FIELDS), so a change here needs a
+# change there. Every value is a string, and '' means "not known".
+META_FIELDS: tuple[str, ...] = (
+    "clone_url", "provenance_status",
+    "source", "stratum", "fact", "contested", "label_date",
+    "owner", "repo", "roster_name", "roster_lang",
+    "language", "commits", "size_class", "size_kb", "stars", "pushed_at",
+    "license", "owner_type", "archived", "fork",
+    "history_cluster", "history_shared_with", "history_relation",
+    "history_includes", "history_first", "history_created",
+    "manifest_category", "file_mask",
 )
 
 

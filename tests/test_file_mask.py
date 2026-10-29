@@ -8,7 +8,7 @@ Every assertion here is about a failure that would not announce itself:
   * an extension the tokenizer knows that the mask forgets — that source is
     copied through untokenized and nothing in the output says so;
   * a start-anchored or unanchored mask — it would match `x.cpp.orig` or a path
-    component, and the corpus would gain files nobody chose;
+    component, and the dataset would gain files nobody chose;
   * a reordered alternation — the mask string is recorded in blobExec's meta
     table and compared character for character, so a reorder reads as a mask
     change and forces a full rebuild of every project.
@@ -114,9 +114,9 @@ def test_the_mask_covers_c_cpp_java_and_rust():
 
 
 def test_every_manifest_row_carries_the_universal_mask():
-    """The manifests are the pipeline's input, and project_meta.py reads the same
-    column for the Parquet's file_mask, so a stale row makes the recorded mask a
-    lie about how those tokens were produced."""
+    """The manifests are the pipeline's input, and the Parquet's file_mask
+    column records the same manifest column, so a stale row makes the recorded
+    mask a lie about how those tokens were produced."""
     manifests = sorted(CORPUS.glob("manifest*.tsv"))
     assert manifests, "no manifests found; the glob or the layout changed"
     for path in manifests:
