@@ -2,7 +2,7 @@
 
 retain.py DELETES FILES. It prunes a finished project workdir down to the
 artifacts the research needs. Every test here builds its own fixture tree under
-tmp_path and repoints `retain.OUT` at it, so no test can reach the real corpus.
+tmp_path and repoints `retain.OUT` at it, so no test can reach the real dataset.
 Two invariants are asserted over and over, because a mistake in either one
 destroys work that took days of compute:
 
@@ -47,17 +47,17 @@ def out(tmp_path, monkeypatch):
     STATE is patched here too, not only OUT. retain.STATE is derived from CORPUS
     at import time and holds the liveness locks, so a test that creates a lock
     with STATE unpatched would write into the REAL state/ directory of a possibly
-    running corpus — the same trap that was hit in consolidate.py, where the
+    running dataset — the same trap that was hit in consolidate.py, where the
     fixture patched CORPUS but not a constant derived from it. Both are asserted
     below to be inside tmp_path.
     """
-    d = (tmp_path / "corpus-files").resolve()
+    d = (tmp_path / "ctp-output").resolve()
     d.mkdir()
     monkeypatch.setattr(retain, "OUT", d)
     state = (tmp_path / "state").resolve()
     state.mkdir()
     monkeypatch.setattr(retain, "STATE", state)
-    # Data safety: if this ever equals the live corpus, --apply tests delete it.
+    # Data safety: if this ever equals the live dataset, --apply tests delete it.
     assert retain.OUT != REAL_OUT
     assert retain.OUT.is_relative_to(tmp_path.resolve())
     assert retain.STATE != REAL_STATE
@@ -281,7 +281,7 @@ def test_finished_reports_the_kept_parquet_size(out):
 # --------------------------------------------------------------------------
 
 def test_exit_status_is_zero_when_every_project_succeeds(out, monkeypatch):
-    """A clean corpus-wide run must be scriptable."""
+    """A clean dataset-wide run must be scriptable."""
     make_project(out, "jq")
     make_project(out, "zstd")
     assert run_main(monkeypatch, "--apply") == 0
@@ -306,7 +306,7 @@ def test_exit_status_is_non_zero_when_any_project_is_skipped(out, monkeypatch,
 
 
 def test_a_skip_does_not_stop_the_other_projects(out, monkeypatch):
-    """One bad project must not abandon the rest of the corpus."""
+    """One bad project must not abandon the rest of the dataset."""
     good = make_project(out, "jq")
     make_project(out, "half", parquet=None)
     assert run_main(monkeypatch, "half", "jq", "--apply") == 1
@@ -315,7 +315,7 @@ def test_a_skip_does_not_stop_the_other_projects(out, monkeypatch):
 
 
 def test_main_with_no_finished_projects_returns_zero(out, monkeypatch, capsys):
-    """An empty corpus is not an error."""
+    """An empty dataset is not an error."""
     make_project(out, "running", stamp=None)
     assert run_main(monkeypatch) == 0
     assert "no finished projects" in capsys.readouterr().out
@@ -359,7 +359,7 @@ def test_finished_projects_agrees_with_finished(out, stamp, listed):
     EXPECTATION CHANGED. This test used to assert the inconsistency instead of
     the fix: finished_projects() checked only that the stamp file existed, while
     finished() also required it to be non-empty. A zero-byte stamp was therefore
-    listed and then refused, so a whole-corpus dry run exited 1 naming a project
+    listed and then refused, so a whole-dataset dry run exited 1 naming a project
     the user never asked about. Before the fix, the b"" row below listed "jq".
     """
     make_project(out, "jq", stamp=stamp)
@@ -376,7 +376,7 @@ def test_finished_projects_agrees_with_finished_about_the_parquet(out):
     assert retain.finished_projects() == []
 
 
-def test_a_whole_corpus_dry_run_is_clean_when_a_stamp_is_empty(out, monkeypatch,
+def test_a_whole_dataset_dry_run_is_clean_when_a_stamp_is_empty(out, monkeypatch,
                                                               capsys):
     """The user-visible symptom. Before the fix, the zero-byte stamp put
     "half" in the default project list, prune() then reported it "not finished",
@@ -600,7 +600,7 @@ def test_prune_refuses_a_subtree_outside_the_allowlist_without_deleting(out):
 def test_a_symlink_inside_a_subtree_is_not_followed_out_of_the_tree(out,
                                                                     tmp_path):
     """DATA SAFETY. A symlink in memo/ must be removed as a link only. If the
-    walk followed it, a link to the corpus root would delete the corpus."""
+    walk followed it, a link to the dataset root would delete the dataset."""
     workdir = make_project(out, "jq")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -667,7 +667,7 @@ def test_the_reclaimed_total_is_the_real_size_of_what_was_removed(out):
     # The filesystem does not return the space at once. On this XFS the delete
     # freed 0 bytes synchronously, then 44 MB at 0.5 s. A writer elsewhere on the
     # same filesystem can also take more space than this test released, which made
-    # a bare `free >= free_before` fail during a corpus run. So poll for the
+    # a bare `free >= free_before` fail during a dataset run. So poll for the
     # recovery, then report an unattributable delta as inconclusive. The two
     # assertions above are the contract; this one only confirms the bytes were
     # real, and it must not fail because another process was busy.
@@ -680,7 +680,7 @@ def test_the_reclaimed_total_is_the_real_size_of_what_was_removed(out):
 
 
 def test_the_main_total_is_the_sum_over_the_projects(out, monkeypatch, capsys):
-    """The corpus-wide figure must add up, or the capacity plan is wrong."""
+    """The dataset-wide figure must add up, or the capacity plan is wrong."""
     make_project(out, "jq")
     make_project(out, "zstd")
     expected = sum(disk_bytes(out / n / s)
@@ -812,9 +812,9 @@ def load_retain_copy(tmp_path: Path, cfg_body: str):
 
 
 def test_output_dir_follows_an_absolute_path_in_pipeline_cfg(tmp_path):
-    """The corpus lives on a different disk on every machine, so the path must
+    """The dataset lives on a different disk on every machine, so the path must
     be configuration, never a constant in the source."""
-    target = tmp_path / "elsewhere" / "corpus-files"
+    target = tmp_path / "elsewhere" / "ctp-output"
     target.mkdir(parents=True)
     _, module = load_retain_copy(tmp_path,
                                  f"[paths]\noutput_dir = {target}\n")
@@ -831,13 +831,13 @@ def test_output_dir_follows_a_relative_path_in_pipeline_cfg(tmp_path):
 def test_output_dir_falls_back_only_when_the_config_is_silent(tmp_path):
     """The hardcoded string is a fallback, not the source of truth."""
     repo, module = load_retain_copy(tmp_path, "[paths]\ncregit_dir = /x\n")
-    assert module.OUT == (repo / "../cregit-workspace/corpus-files").resolve()
+    assert module.OUT == (repo / "../ctp-output").resolve()
 
 
 def test_a_configured_output_dir_is_the_one_pruned(tmp_path, monkeypatch):
     """End to end: point the config at a tmp_path tree and the script prunes
     that tree."""
-    target = tmp_path / "elsewhere" / "corpus-files"
+    target = tmp_path / "elsewhere" / "ctp-output"
     target.mkdir(parents=True)
     _, module = load_retain_copy(tmp_path, f"[paths]\noutput_dir = {target}\n")
     workdir = make_project(module.OUT, "jq")
@@ -847,7 +847,7 @@ def test_a_configured_output_dir_is_the_one_pruned(tmp_path, monkeypatch):
     assert (workdir / "jq-dataset.parquet").exists()
 
 
-@pytest.mark.parametrize("raw", ["~/corpus", "sub/dir", "/abs/corpus"])
+@pytest.mark.parametrize("raw", ["~/dataset", "sub/dir", "/abs/dataset"])
 def test_cfg_path_expands_and_resolves(tmp_path, monkeypatch, raw):
     """A ~ or a relative path in the config must become one canonical absolute
     path, because ctp.py and retain.py must agree on the string."""
@@ -877,7 +877,7 @@ def test_cfg_path_uses_the_default_for_an_unknown_key(tmp_path, monkeypatch):
     (Path("/"), True),                                # the filesystem root
     (Path.home(), True),                              # the home directory
     (Path("/tmp"), True),                             # fewer than three parts
-    (Path("/home/someone/cregit-workspace/files"), False),
+    (Path("/home/someone/work/ctp-output"), False),
 ])
 def test_output_dir_refusal_is_the_one_shared_predicate(monkeypatch, path,
                                                         refused):
@@ -894,7 +894,7 @@ def test_prune_refuses_a_dangerous_output_dir_on_the_ctp_call_path(monkeypatch,
 
     Before the fix this guard sat in main() alone. ctp.py:213 calls
     prune(name, ("memo",), apply=True) directly on the --drop-memo path, so on
-    the path that will run 1,423 times the refusal never executed: a misread
+    the path that runs once per project the refusal never executed: a misread
     output_dir of / or ~ would have been walked and offered for deletion. The
     call below is exactly ctp.py's call.
     """
@@ -933,8 +933,8 @@ def test_check_name_rejects_anything_but_one_directory_name(name):
     "dot.in.name", "x",
 ])
 def test_check_name_accepts_a_real_project_name(name):
-    """The check must not be so tight that the corpus cannot be pruned.
-    Corpus names carry dashes, underscores and single dots."""
+    """The check must not be so tight that the dataset cannot be pruned.
+    Project names carry dashes, underscores and single dots."""
     assert retain.check_name(name) is None
 
 
@@ -984,8 +984,8 @@ def test_prune_refuses_a_bad_name_before_reading_the_disk(out, monkeypatch,
 def test_a_dry_run_with_memo_blocked_still_reports_html_in_the_total(out,
                                                                     capsys):
     """Before the fix, a blocked memo/ hid html/ from the reclaimable total,
-    so the capacity plan read low. That plan decides whether a 1,423-project run
-    fits in the 1.2 TB free, so under-reporting is a real cost."""
+    so the capacity plan read low. That plan decides whether a run fits on
+    the disk, so under-reporting is a real cost."""
     workdir = make_project(out, "jq")
     (workdir / "memo" / ".git").mkdir()
     before = snapshot(out)
@@ -1002,9 +1002,9 @@ def test_a_dry_run_with_memo_blocked_still_reports_html_in_the_total(out,
     assert "1 refused (memo/)" in log
 
 
-def test_the_main_dry_run_total_spans_a_partly_blocked_corpus(out, monkeypatch,
+def test_the_main_dry_run_total_spans_a_partly_blocked_dataset(out, monkeypatch,
                                                              capsys):
-    """The corpus-wide figure is the one the capacity plan uses. A project
+    """The dataset-wide figure is the one the capacity plan uses. A project
     with one blocked subtree must still contribute the subtree that passed."""
     jq = make_project(out, "jq")
     zstd = make_project(out, "zstd")
@@ -1098,7 +1098,7 @@ def test_a_file_named_html_is_reported_in_a_dry_run_too(out, capsys):
 
 
 # --------------------------------------------------------------------------
-# One delete failure must not abandon the rest of the corpus
+# One delete failure must not abandon the rest of the dataset
 # --------------------------------------------------------------------------
 
 def rmtree_reporting_a_failure(match: str):
@@ -1126,7 +1126,7 @@ def test_a_delete_failure_skips_one_project_and_the_next_still_runs(
     """Before the fix shutil.rmtree was unwrapped, so a permission error
     part-way through a tree raised out of prune() and out of main(): every
     remaining project was abandoned with a traceback instead of a per-project
-    SKIP and a non-zero exit. Over 1,423 projects that is the whole run."""
+    SKIP and a non-zero exit. Over a large run that is the whole run."""
     locked = make_project(out, "locked")
     good = make_project(out, "zz-good")
     monkeypatch.setattr(retain.shutil, "rmtree",
@@ -1276,7 +1276,7 @@ def test_a_project_with_no_state_directory_at_all_is_pruned(out):
 
 def test_the_guard_fires_on_the_ctp_prune_path_not_only_via_main(out, capsys):
     """prune() is also `ctp.py run --drop-memo`'s entry point -- the call that
-    runs 1,423 times. This is that exact call signature, with no main()
+    runs once per project. This is that exact call signature, with no main()
     anywhere: ctp.py:595 prune(name, ("memo",), apply=True)."""
     workdir = make_project(out, "jq")
     before = snapshot(workdir)
@@ -1291,7 +1291,7 @@ def test_the_callers_own_lock_does_not_block_its_own_prune(out):
     project's lock: the call sits inside the try whose finally closes the
     lockfile. flock conflicts between two handles on the same file even within
     one process, so a guard that did not except the caller's own lock would
-    refuse every --drop-memo prune, keep memo/ for all 1,423 projects and fill
+    refuse every --drop-memo prune, keep memo/ for every project and fill
     the disk. Exactly what ctp.py does, in-process."""
     workdir = make_project(out, "jq")
     lockfile = retain.lock_path("jq")
@@ -1395,7 +1395,7 @@ def test_a_live_skip_is_distinguishable_from_an_unvalidated_skip(out, monkeypatc
     assert "half" not in live_line and "linux" not in skip_line
 
 
-def test_a_whole_corpus_sweep_skips_the_live_project_and_prunes_the_rest(
+def test_a_whole_dataset_sweep_skips_the_live_project_and_prunes_the_rest(
         out, monkeypatch, capsys):
     """No project names on the command line: the lister still offers a live
     project, because it is validated, and the guard in prune() is what stops

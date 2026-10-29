@@ -88,7 +88,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(bdm, "OUT", e.out)
     monkeypatch.setattr(bdm, "CURATED", e.curated)
     monkeypatch.setattr(bdm, "SPINELLIS_TSV", e.spinellis)
-    # Data safety: a mistake here would read or write the live corpus cache.
+    # Data safety: a mistake here would read or write the live dataset cache.
     for real, fake in ((REAL_CACHE, bdm.CACHE), (REAL_DATA, bdm.DATA),
                        (REAL_OUT, bdm.OUT), (REAL_CURATED, bdm.CURATED),
                        (REAL_SPINELLIS, bdm.SPINELLIS_TSV)):
@@ -680,8 +680,8 @@ def test_write_refusal_states_the_curated_map_is_the_floor():
 
 def test_the_artifact_is_written_through_a_temporary_file(env):
     """An interrupted write must not truncate a good artifact, so the rows
-    go to a sibling `.tmp` and are renamed into place, as select_corpus.save_json
-    does. Nothing may be left behind."""
+    go to a sibling `.tmp` and are renamed into place. Nothing may be left
+    behind."""
     env.gitdm(person("s1", ["s1!igalia.com"], ["Igalia"]))
     assert build() == 0
     assert env.out.exists()
@@ -983,6 +983,31 @@ def test_load_curated_missing_file_warns_and_returns_empty(env, capsys):
     assert bdm.load_curated() == {}
     out = capsys.readouterr().out
     assert "WARNING" in out and "curated map not found" in out
+
+
+def test_load_curated_with_no_path_warns_and_returns_empty(env, monkeypatch,
+                                                           capsys):
+    """No default path: a build without --curated says so in the log."""
+    monkeypatch.setattr(bdm, "CURATED", None)
+    assert bdm.load_curated() == {}
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "no curated map given" in out
+
+
+def test_build_reads_the_curated_map_named_by_the_flag(env, monkeypatch,
+                                                       tmp_path):
+    """--curated sets the path that load_curated() reads, and a curated row
+    wins over the imported source."""
+    env.gitdm("\n".join([person("s1", ["s1!igalia.com"], ["Igalia"]),
+                         person("s2", ["s2!igalia.com"], ["Igalia"])]))
+    other = tmp_path / "other-curated.csv"
+    other.write_text("domain,company,kind,source\n"
+                     "igalia.com,Igalia S.L.,company,patch\n")
+    monkeypatch.setattr(bdm, "CURATED", None)
+    assert bdm.cmd_build(argparse.Namespace(min_persons=2, report=False,
+                                            curated=str(other))) == 0
+    assert bdm.CURATED == other
+    assert rows_by_domain(env)["igalia.com"]["company"] == "Igalia S.L."
 
 
 def test_load_curated_reads_kind_and_source(env):

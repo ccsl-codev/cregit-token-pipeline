@@ -1,8 +1,8 @@
-"""Unit tests for validate_schema.py, the corpus schema gate.
+"""Unit tests for validate_schema.py, the dataset schema gate.
 
 The gate answers a different question from validate.py. That one asks whether one
 project produced a non-empty parquet. This one asks whether every project agrees,
-because a corpus where one file has 38 columns and another 23 is unusable: a
+because a dataset where one file has 38 columns and another 23 is unusable: a
 consumer unions them and gets silent nulls.
 
 No test needs duckdb. compare_schema is pure, and read_schema imports duckdb
@@ -15,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import project_meta
 import validate_schema as vs
 
 
@@ -54,7 +53,7 @@ def test_an_extra_column_is_reported():
 
 def test_a_changed_type_is_reported():
     """The quiet killer. token_index as VARCHAR in one file and BIGINT in another
-    makes any ordering or arithmetic across the corpus wrong."""
+    makes any ordering or arithmetic across the dataset wrong."""
     actual = [("token_index", "VARCHAR") if n == "token_index" else (n, t)
               for n, t in GOOD]
     drifts = vs.compare_schema(actual)
@@ -123,13 +122,13 @@ def test_the_contract_has_no_duplicate_columns():
 
 def test_the_contract_records_the_measured_column_count():
     """70: the 38 measured from the updated cregit on 2026-09-13, plus the 29
-    per-project provenance columns injected from project_meta.json on 2026-09-19,
+    per-project provenance columns injected from the sidecar on 2026-09-19,
     plus the 3 firm columns joined from data/affiliation.merged.csv on 2026-09-20.
     The earlier kernel snapshot had 23; 15 of the additions to that are
     commit-trailer footers."""
     assert len(CONTRACT) == 70
     assert sum(1 for n, _ in CONTRACT if n.startswith("footer_")) == 15
-    assert len(CONTRACT) - len(project_meta.META_FIELDS) == 41
+    assert len(CONTRACT) - len(vs.META_FIELDS) == 41
 
 
 def test_the_provenance_columns_match_the_sidecar_field_list():
@@ -138,8 +137,8 @@ def test_the_provenance_columns_match_the_sidecar_field_list():
     missing — see tests/test_meta_field_drift.py for the third copy."""
     names = [n for n, _ in CONTRACT]
     start = names.index("repo_name") + 1
-    assert names[start:start + len(project_meta.META_FIELDS)] == \
-        list(project_meta.META_FIELDS)
+    assert names[start:start + len(vs.META_FIELDS)] == \
+        list(vs.META_FIELDS)
 
 
 def test_the_firm_columns_sit_directly_after_the_key_they_are_resolved_from():
@@ -180,7 +179,7 @@ def test_check_returns_one_when_any_file_drifts(monkeypatch, capsys):
 
 
 def test_check_keeps_going_after_the_first_bad_file(monkeypatch, capsys):
-    """One unreadable file must not hide the state of the rest. A corpus run
+    """One unreadable file must not hide the state of the rest. A dataset run
     produces hundreds, and re-running the gate per file is wasteful."""
     def schema(path):
         if path == "boom.parquet":
@@ -195,7 +194,7 @@ def test_check_keeps_going_after_the_first_bad_file(monkeypatch, capsys):
 
 def test_an_unreadable_file_counts_as_drift(monkeypatch, capsys):
     """Silently passing a file the gate could not read would be worse than
-    failing: the corpus would look validated."""
+    failing: the dataset would look validated."""
     monkeypatch.setattr(vs, "read_schema",
                         lambda p: (_ for _ in ()).throw(ValueError("not parquet")))
     assert vs.check(["x.parquet"]) == vs.EXIT_DRIFT

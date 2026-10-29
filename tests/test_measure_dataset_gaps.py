@@ -150,7 +150,7 @@ def test_cfg_path_falls_back_when_the_key_is_absent(tmp_path: Path, monkeypatch)
 #
 # These write and read an actual Parquet, so they need the real duckdb from
 # `devenv shell` and skip without it -- the same gate tests/test_consolidate.py
-# and tests/test_backfill_rust_tokens.py use.
+# uses.
 # --------------------------------------------------------------------------- #
 
 try:                                          # pragma: no cover - import plumbing
@@ -168,14 +168,14 @@ requires_duckdb = pytest.mark.skipif(
     reason="needs real duckdb (devenv shell) to write parquet")
 
 
-def _corpus(tmp_path: Path, present: list[str]) -> tuple[Path, Path]:
+def _dataset(tmp_path: Path, present: list[str]) -> tuple[Path, Path]:
     """Build one project: a bare original repo and a Parquet holding `present`.
 
     The work tree carries `keep.c`, `gone.c`, `link.c` (a symlink) and
     `skip.txt`. Only the paths in `present` get a Parquet row, so the caller
     decides what counts as missing.
     """
-    out = tmp_path / "corpus-files"
+    out = tmp_path / "ctp-output"
     slug = "acme__widget"
     proj = out / slug
     proj.mkdir(parents=True)
@@ -211,7 +211,7 @@ def _corpus(tmp_path: Path, present: list[str]) -> tuple[Path, Path]:
 
 @requires_duckdb
 def test_main_counts_one_missing_file(tmp_path: Path, capsys) -> None:
-    manifest, out = _corpus(tmp_path, ["keep.c"])
+    manifest, out = _dataset(tmp_path, ["keep.c"])
     rc = mdg.main(["--manifest", str(manifest), "--out-dir", str(out)])
     text = capsys.readouterr().out
     assert rc == 0
@@ -224,7 +224,7 @@ def test_main_counts_one_missing_file(tmp_path: Path, capsys) -> None:
 @requires_duckdb
 def test_main_reports_no_gap_when_the_parquet_is_complete(tmp_path: Path, capsys) -> None:
     """The symlink must not be reported as missing. This is the whole defect."""
-    manifest, out = _corpus(tmp_path, ["keep.c", "gone.c"])
+    manifest, out = _dataset(tmp_path, ["keep.c", "gone.c"])
     rc = mdg.main(["--manifest", str(manifest), "--out-dir", str(out)])
     text = capsys.readouterr().out
     assert rc == 0
@@ -236,7 +236,7 @@ def test_main_reports_no_gap_when_the_parquet_is_complete(tmp_path: Path, capsys
 def test_main_writes_the_missing_paths_to_json(tmp_path: Path) -> None:
     import json
 
-    manifest, out = _corpus(tmp_path, ["keep.c"])
+    manifest, out = _dataset(tmp_path, ["keep.c"])
     detail = tmp_path / "gaps.json"
     assert mdg.main(
         ["--manifest", str(manifest), "--out-dir", str(out), "--json", str(detail)]
@@ -250,7 +250,7 @@ def test_main_writes_the_missing_paths_to_json(tmp_path: Path) -> None:
 @requires_duckdb
 def test_main_records_a_project_with_no_parquet(tmp_path: Path, capsys) -> None:
     """A missing Parquet must be named, never counted as zero gaps."""
-    manifest, out = _corpus(tmp_path, ["keep.c"])
+    manifest, out = _dataset(tmp_path, ["keep.c"])
     (out / "acme__widget" / "acme__widget-dataset.parquet").unlink()
     rc = mdg.main(["--manifest", str(manifest), "--out-dir", str(out)])
     text = capsys.readouterr().out

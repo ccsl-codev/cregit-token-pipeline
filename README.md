@@ -1,14 +1,15 @@
 # cregit-token-pipeline
 
-Builds a **token-level code authorship dataset** over a stratified corpus of
-FLOSS repositories, by orchestrating the
+Builds a **token-level code authorship dataset** from a manifest of FLOSS
+repositories, by orchestrating the
 [cregit](https://github.com/cregit/cregit) per-project pipeline and adding
-corpus-level selection, provenance, validation and anonymization around it.
+provenance, validation and anonymization around it. A manifest of projects goes
+in; one validated Parquet per project comes out.
 
 Each project yields one Parquet file with the same 70 columns and **one row per
 token occurrence per file**, carrying the commit and the person that last touched
-that token, the person's employer where it can be resolved, and 29 columns
-recording how the project entered the corpus and how it was labeled.
+that token, and the person's employer where it can be resolved. A sidecar
+supplies the 29 per-project columns.
 
 Stdlib Python only; DuckDB, srcML, ctags, Java and Perl come from the cregit
 checkout's `devenv shell`.
@@ -18,15 +19,8 @@ checkout's `devenv shell`.
 | If you want to | Read |
 | --- | --- |
 | understand the dataset, its grain and all 70 columns | **[`docs/DATASET-SCHEMA.md`](docs/DATASET-SCHEMA.md)** |
-| know what is wrong with the data before you analyze it | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
-| know why attribution changed in September 2026, and by how much | **[`docs/REBLAME-C100.md`](docs/REBLAME-C100.md)** |
-| know how a project got its `stratum`, or label one yourself | [`docs/CODEBOOK.md`](docs/CODEBOOK.md) |
+| know the method limits before you analyze the data | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
 | know why the pipeline is built this way | [`docs/DESIGN.md`](docs/DESIGN.md) |
-| see the sampling frame, exclusions and the per-cell draw | [`docs/CORPUS-REVIEW.md`](docs/CORPUS-REVIEW.md), [`docs/CORPUS-SAMPLE.md`](docs/CORPUS-SAMPLE.md) |
-| see the strata checked against an independent published labeling | [`docs/SPINELLIS-VALIDATION.md`](docs/SPINELLIS-VALIDATION.md) |
-
-The three corpus reports are **generated** — by `select_corpus.py review`,
-`select_corpus.py sample` and `validate_spinellis.py`. Do not edit them by hand.
 
 The authority on the schema is `validate_schema.py`, not any document.
 
@@ -34,17 +28,23 @@ The authority on the schema is `validate_schema.py`, not any document.
 
 ```sh
 # 1. point pipeline.cfg at a cregit checkout with rustTokenizer, and an output dir
-# 2. pick a manifest (TSV: name, url, category, file_mask, size_class).
-#    --manifest defaults to manifest.tsv, which is only 4 legacy pilots.
-M=manifest.phase1-sm.tsv
-./ctp.py run --manifest $M --jobs 3 --skip-html --drop-memo
+# 2. write a manifest (TSV: name, url, category, file_mask, size_class).
+#    --manifest defaults to manifest.tsv, a 4-project example.
+# 3. write the sidecar: a JSON object keyed by manifest name, with the 29
+#    fields of validate_schema.META_FIELDS for each project.
+M=my-run.tsv
+./ctp.py run --manifest $M --jobs 3 --skip-html --drop-memo \
+    --project-meta sidecar.json \
+    --firm-map data/affiliation.merged.csv \
+    --firm-canonical data/firm_canonical.csv
 ./ctp.py status --manifest $M                    # one-screen progress view
-./validate_schema.py <out>/*/*-dataset.parquet   # schema gate over the corpus
-./ctp.py db                                      # rebuild ctp.duckdb + tokens view
+./validate_schema.py <out>/*/*-dataset.parquet   # schema gate over the dataset
+./consolidate.py --manifest $M   # in devenv shell: rebuild ctp.duckdb + tokens view
 ```
 
-Full regeneration, from rosters to an anonymized release, is the step table in
-[`docs/DATASET-SCHEMA.md` §2](docs/DATASET-SCHEMA.md#2-regenerating-it).
+The step table in
+[`docs/DATASET-SCHEMA.md` §2](docs/DATASET-SCHEMA.md#2-regenerating-it) lists
+every step from a manifest to an anonymized release.
 
 Each project runs cregit's `run_pipeline_process.sh` (clone → tokenize via the
 incremental blob-map engine → blame → per-project Parquet), then a validation
@@ -55,9 +55,9 @@ next pass.
 ## Architecture
 
 ```
-candidates.csv ──► select_corpus.py sample ──► manifest.*.tsv
+manifest.*.tsv (one row per project) ──────────────┐
                                                    │
-project_meta.json (29 provenance fields) ──────────┤
+sidecar JSON (29 provenance fields) ───────────────┤
 data/affiliation.merged.csv (domain → firm) ───────┤
                                                    ▼
                                               ctp.py run

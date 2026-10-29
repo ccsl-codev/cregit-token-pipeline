@@ -5,8 +5,8 @@
     ./retain.py jq zstd              # dry run over the named projects
     ./retain.py --apply              # actually delete (dry run is the default)
 
-Why. The corpus grows to 1,423 projects on a 2.0 TB disk with ~1.2 TB free.
-Measured pilot workdirs (4 projects, `du -sh`):
+Why. A run of many projects does not fit on one disk if every workdir is kept
+whole. Measured workdirs of the 4 projects in manifest.tsv (`du -sh`):
 
     project  workdir   memo/           html/
     jq        274 MB    123 MB (45%)    94 MB
@@ -14,9 +14,8 @@ Measured pilot workdirs (4 projects, `du -sh`):
     tmux      2.6 GB    2.3 GB (88%)   255 MB
     zstd      2.3 GB    1.9 GB (83%)   234 MB
 
-memo/ plus html/ is 68-96% of a workdir. Keeping both for 1,423 projects needs
-1.4-3.5 TB, so the corpus does not fit. Dropping both leaves roughly 155 GB.
-The research needs only <name>-dataset.parquet (2.4-6.7 MB per project) and the
+memo/ plus html/ is 68-96% of a workdir, so they decide whether a large run
+fits on the disk. The research needs only <name>-dataset.parquet (2.4-6.7 MB per project) and the
 project's metrics.tsv row. docs/DESIGN.md section 6 already classes memo/ and
 html/ as disposable; this script is that policy, executable.
 
@@ -58,7 +57,7 @@ run_pipeline_process.sh deletes the workdir at FROM_STEP=1 and again from its
 EXIT trap, so a lock kept inside the workdir would go with it.
 
 A live project is SKIPPED, one project at a time; --apply does not refuse the
-whole sweep because some other project is live. Reasons, in order: the corpus
+whole sweep because some other project is live. Reasons, in order: the dataset
 run is long and parallel, so during a multi-day build some project is nearly
 always live, and an any-live refusal would make retention impossible exactly
 when disk pressure is highest — ctp.py defers projects below its 150 GB floor,
@@ -81,7 +80,7 @@ read the same way ctp.py reads it.
 
 Dry run and --apply differ on purpose. A dry run measures every subtree even
 after a refusal, so the reclaimable total is complete and a capacity plan built
-over a partly blocked corpus does not read low. An --apply run deletes nothing
+over a partly blocked dataset does not read low. An --apply run deletes nothing
 for a project that had any refusal at all: a refusal means the walk did not
 understand that project, so no subtree of it is safe to remove.
 
@@ -102,8 +101,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# .resolve() canonicalizes to /local/home form, matching ctp.py — the two
-# scripts must agree on the output dir string or the guards below misfire.
+# .resolve() gives the canonical path, as in ctp.py. The two scripts must
+# agree on the output dir string or the guards below misfire.
 CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
 _cfg.read(CORPUS / "pipeline.cfg")
@@ -114,7 +113,7 @@ def _cfg_path(key: str, default: str) -> Path:
     return (CORPUS / Path(raw).expanduser()).resolve()
 
 
-OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
+OUT = _cfg_path("output_dir", "../ctp-output")
 
 # ctp.py's state directory, mirrored here. ctp.py defines STATE = CORPUS /
 # "state" and the per-project lock as state_dir(name) / ".lock"; both scripts
@@ -223,7 +222,7 @@ def output_dir_refusal() -> str | None:
 
     Both entry points call this — main() for the command line, prune() for
     ctp.py run --drop-memo. The check used to sit in main() alone, so the
-    --drop-memo path, the one that runs 1,423 times, never enforced it. A stated
+    --drop-memo path, the one that runs once per project, never enforced it. A stated
     safety rule must hold where the deletes actually happen.
     """
     if OUT in (Path("/"), Path.home()):
@@ -274,8 +273,8 @@ def _held_by_this_process(lockfile: Path) -> bool:
     reaches prune() from `run --drop-memo` while still holding the project's own
     lock — the call sits inside the try whose finally closes the lockfile. A
     liveness guard that did not except the caller's own lock would therefore
-    refuse every single --drop-memo prune, memo/ would survive for all 1,423
-    projects, and the disk-frugal corpus run would fill the disk instead. The
+    refuse every single --drop-memo prune, memo/ would survive for every
+    project, and the disk-frugal run would fill the disk instead. The
     guard has to distinguish "another run owns this workdir" from "the run asking
     owns it", and this is that distinction.
 
@@ -376,7 +375,7 @@ def finished_projects() -> list[str]:
 
     The predicate is finished(), not a second copy of it. This lister used to
     check only that the stamp file existed, so a project with a zero-byte stamp
-    was listed here and then refused by finished(), and a whole-corpus dry run
+    was listed here and then refused by finished(), and a whole-dataset dry run
     exited 1 naming a project the user never asked about. One definition of
     finished, used everywhere.
     """
@@ -434,8 +433,8 @@ def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
       * DRY RUN keeps going after a refusal. It measures every subtree, reports
         each refusal, and returns a complete reclaimable total. A refused memo/
         used to hide html/ from the total, so a capacity plan built over a partly
-        blocked corpus read low — and that plan decides whether 1,423 projects
-        fit on disk. ok is still False, because the project is not fully
+        blocked dataset read low — and that plan decides whether a run fits
+        on disk. ok is still False, because the project is not fully
         prunable.
       * APPLY fails closed. One refusal anywhere in the project deletes nothing
         for that project, not even a subtree that passed.
@@ -455,8 +454,8 @@ def prune(name: str, subtrees: tuple[str, ...] = DISPOSABLE,
     # skipped whatever its stamp says, so the reason reported is the one that
     # matters and the live run is not asked for I/O it did not want. The guard is
     # here, not in main(), because ctp.py calls prune() directly: a check in
-    # main() alone would leave the --drop-memo path — the one that runs 1,423
-    # times — unguarded, which is exactly the mistake output_dir_refusal() was
+    # main() alone would leave the --drop-memo path — the one that runs once per
+    # project — unguarded, which is exactly the mistake output_dir_refusal() was
     # moved down here to fix.
     if live(name):
         say(f"{name} — SKIP: LIVE, another run holds {lock_path(name)}. memo/ is "

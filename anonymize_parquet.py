@@ -63,7 +63,7 @@ RESIDUAL RISK, to be disclosed in any paper using this output:
     breaking anything. Measured over the three development files: 33 of the 38
     person_domain groups have exactly ONE distinct contributor. The ratio is
     inflated by the small sample -- shared corporate domains gain people as the
-    corpus grows -- but vanity domains (gutwin.org, guerra.sh, haamer.ee,
+    dataset grows -- but vanity domains (gutwin.org, guerra.sh, haamer.ee,
     lukapeschke.com, push-f.com) stay single-person however large it gets, and
     the domain plus the repository together name the person.
     This is a deliberate trade of privacy for the firm signal the dataset exists
@@ -107,7 +107,7 @@ from dataclasses import dataclass, field
 # anonymization does to each column rather than by what type it is.
 # --------------------------------------------------------------------------
 
-# Per-project provenance, injected from project_meta.json. Constant within a
+# Per-project provenance, injected from the sidecar. Constant within a
 # project, carries no personal data (audited by audit_passthrough()). These are
 # the point of the dataset: a reader filters on them without a second join.
 PROVENANCE_COLUMNS: tuple[str, ...] = (

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Count mask-selected files present at HEAD that have no row in the Parquet.
 
-This reproduces the number `docs/LIMITATIONS.md` publishes for the parser-crash
-class. Run it after any corpus run, and update that entry if the count moves.
+This measures the parser-crash class that `docs/LIMITATIONS.md` describes. Run
+it after a run of the pipeline.
 
-    ./measure_dataset_gaps.py                      # the frozen corpus, 187 rows
-    ./measure_dataset_gaps.py --manifest manifest.sample.tsv
+    ./measure_dataset_gaps.py                      # manifest.tsv
+    ./measure_dataset_gaps.py --manifest my-run.tsv
     ./measure_dataset_gaps.py --json gaps.json     # keep the per-path detail
 
 Two things make this measurement wrong if you skip them, and both cost real
@@ -15,12 +15,12 @@ accuracy rather than a rounding error.
 from a symlink or a submodule gitlink. A symlink whose name matches the mask is
 not source and is never tokenized. `powerdns__pdns` carries 331 masked symlinks
 in `pdns/dnsdistdist/`; counting them reports its complete Parquet as 29%
-incomplete. Corpus-wide the naive count is 390 and the true count is 36.
+incomplete.
 
 **This is a HEAD measurement.** A historical revision that crashed the parser is
-invisible here, because the comparison is against HEAD. The blob denylist covers
-197 historical blobs of the 36 HEAD paths, so history is worse than HEAD by at
-least that much. Do not quote a HEAD number as a corpus-wide loss.
+invisible here, because the comparison is against HEAD. The blob denylist can
+hold historical blobs of the same paths, so history can be worse than HEAD. Do
+not quote a HEAD number as a loss over all history.
 
 It does not attribute a cause. A missing path can be a parser crash, an
 empty-but-successful tokenization, a denylisted blob, or a blob over JGit's
@@ -88,7 +88,8 @@ def head_entries(git_dir: Path) -> tuple[list[str], list[str]]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--manifest", default="manifest.phase1-sm.tsv")
+    ap.add_argument("--manifest", default="manifest.tsv",
+                    help="manifest of the run to measure (default: manifest.tsv)")
     ap.add_argument("--out-dir", default=None, help="overrides pipeline.cfg output_dir")
     ap.add_argument("--json", default=None, help="write per-path detail here")
     ap.add_argument(
@@ -112,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     if not manifest.is_absolute():
         manifest = REPO / manifest
     out_dir = Path(args.out_dir) if args.out_dir else cfg_path(
-        "output_dir", "../cregit-workspace/corpus-files"
+        "output_dir", "../ctp-output"
     )
 
     con = duckdb.connect()

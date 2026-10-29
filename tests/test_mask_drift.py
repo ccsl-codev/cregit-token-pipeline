@@ -155,7 +155,10 @@ def test_m4_is_routed_but_not_masked():
 
 def test_the_configured_cregit_checkout_is_the_one_the_pipeline_runs():
     """If pipeline.cfg pointed somewhere else, everything above would be checking
-    a tokenizer no run uses."""
+    a tokenizer no run uses. With no checkout at all there is nothing to compare,
+    so the test skips, like the other cross-repository tests here."""
+    if not ctp.CREGIT.exists():
+        pytest.skip(f"{ctp.CREGIT} is not checked out on this machine")
     assert (ctp.CREGIT / "run_pipeline_process.sh").exists(), (
         f"{ctp.CREGIT} does not look like a cregit checkout; pipeline.cfg is stale")
 

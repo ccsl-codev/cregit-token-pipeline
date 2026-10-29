@@ -20,7 +20,7 @@ Three things are under test here and they fail for different reasons.
    price of not merging names automatically.
 
 These read the LIVE data files on purpose. They are committed artifacts that a
-corpus-wide regeneration reads, so a test against a fixture would prove nothing
+dataset-wide regeneration reads, so a test against a fixture would prove nothing
 about what gets published.
 """
 from __future__ import annotations
@@ -100,8 +100,8 @@ def test_collibra_com_resolves_to_collibra_not_medidata():
     Medidata Solutions owns mdsol.com, which the map already carries.
 
     Unlike the Qualcomm row this one was measured to be unreachable before it was
-    touched: 0 of the 185 firm-bearing corpus Parquets hold a `person_domain`
-    matching collibra or a `firm`/`firm_raw` matching medidata. So the fix
+    touched: no firm-bearing Parquet held a `person_domain` matching collibra
+    or a `firm`/`firm_raw` matching medidata. So the fix
     changes no published number, and no re-run is owed.
     """
     row = {r["domain"]: r for r in rows(CORRECTIONS)}["collibra.com"]
@@ -143,7 +143,7 @@ def test_the_committed_artifact_agrees_with_every_overlay_row():
     stale, which is the one failure mode the overlay cannot prevent by itself.
 
     This was xfailed while data/affiliation.merged.csv was an input to a live
-    corpus run and could not be rewritten. The map was regenerated on 2026-09-20
+    dataset run and could not be rewritten. The map was regenerated on 2026-09-20
     — 9 rows of 4,049 changed, 8 malformed keys dropped and collibra.com
     corrected — so the marker is gone and this is an ordinary assertion again.
     """
@@ -252,7 +252,7 @@ def test_no_merge_target_is_itself_merged_away():
 
 def test_every_name_in_the_table_actually_appears_in_the_map():
     """A dead row is worse than no row: it reads as a reviewed decision about a
-    firm this corpus does not contain, and it hides a typo in the name."""
+    firm this dataset does not contain, and it hides a typo in the name."""
     companies = {r["company"] for r in rows(MERGED)}
     for r in canonical_rows():
         assert r["firm_raw"] in companies, f"firm_raw not in the map: {r['firm_raw']}"
@@ -338,8 +338,8 @@ def run_args(**over):
 
 @pytest.fixture(autouse=True)
 def sandbox(tmp_path, monkeypatch):
-    """Keep cmd_run away from the live corpus. Mirrors tests/test_ctp.py."""
-    out = tmp_path / "corpus-files"
+    """Keep cmd_run away from the live dataset. Mirrors tests/test_ctp.py."""
+    out = tmp_path / "ctp-output"
     out.mkdir()
     cregit = tmp_path / "cregit"
     cregit.mkdir()
@@ -394,7 +394,7 @@ def test_a_runner_that_cannot_take_the_flag_stops_the_run(sandbox):
 
 def test_both_paths_are_resolved_absolute_for_the_runner(sandbox, monkeypatch):
     """The runner is started with cwd=CREGIT while these paths are typed relative
-    to this repository. A whole corpus pass was lost to exactly this."""
+    to this repository. A whole dataset pass was lost to exactly this."""
     monkeypatch.chdir(sandbox)
     (sandbox / "map.csv").write_text("domain,company,kind,source\n")
     (sandbox / "canon.csv").write_text("firm_raw,firm\n")
@@ -445,7 +445,7 @@ def test_the_runner_argv_carries_both_flags(sandbox, monkeypatch):
     # is unchanged.
     sent.clear()
     ctp._OPTS.clear()
-    (sandbox / "corpus-files" / "jq" / "jq.validated").unlink(missing_ok=True)
+    (sandbox / "ctp-output" / "jq" / "jq.validated").unlink(missing_ok=True)
     REAL_RUN_PROJECT(project)
     assert "--firm-map" not in sent[0]
 
@@ -453,7 +453,7 @@ def test_the_runner_argv_carries_both_flags(sandbox, monkeypatch):
     # `firm_raw` and the split spellings stay split, which is honest.
     sent.clear()
     ctp._OPTS.update(firm_map="/m.csv")
-    (sandbox / "corpus-files" / "jq" / "jq.validated").unlink(missing_ok=True)
+    (sandbox / "ctp-output" / "jq" / "jq.validated").unlink(missing_ok=True)
     REAL_RUN_PROJECT(project)
     assert "--firm-map" in sent[0] and "--firm-canonical" not in sent[0]
 

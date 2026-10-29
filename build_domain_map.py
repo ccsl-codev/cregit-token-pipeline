@@ -57,9 +57,11 @@ CACHE = CORPUS / ".corpus-cache" / "affil"
 DATA = CORPUS / "data"
 OUT = DATA / "affiliation.merged.csv"
 
-# The curated map from the VEM paper. Authoritative on any conflict.
-CURATED = Path("/local/home/ellianco/Projects/cregit-workspace/"
-               "cbsoft-vem2026-corporate-truck-factor/pipeline/data/affiliation.csv")
+# The curated map from the VEM paper, a domain,company,kind,source CSV.
+# Authoritative on any conflict. It lives outside this repository, so
+# `build --curated PATH` names it. With no path, load_curated() warns and the
+# build runs without it.
+CURATED: Path | None = None
 
 # This repository's own correction overlay, applied AFTER `curated` and so
 # authoritative over everything. It exists because `CURATED` lives in a third
@@ -341,6 +343,10 @@ def parse_spinellis_domains() -> dict[str, tuple[str, str]]:
 
 
 def load_curated() -> dict[str, tuple[str, str, str]]:
+    if CURATED is None:
+        say("WARNING no curated map given (build --curated PATH), "
+            "built without it")
+        return {}
     if not CURATED.exists():
         say(f"WARNING curated map not found at {CURATED}")
         return {}
@@ -395,6 +401,9 @@ def write_refusal(merged: dict, curated: dict) -> str:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    global CURATED
+    if getattr(args, "curated", None):
+        CURATED = Path(args.curated).expanduser()
     per_domain = parse_source()
     if not per_domain:
         return 1
@@ -463,8 +472,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         return 1
 
     DATA.mkdir(parents=True, exist_ok=True)
-    # Write through a temporary file and rename, as select_corpus.save_json
-    # does, so an interrupted write cannot truncate a good artifact.
+    # Write through a temporary file and rename, so an interrupted write
+    # cannot truncate a good artifact.
     tmp = OUT.parent / (OUT.name + ".tmp")
     with tmp.open("w", newline="") as f:
         w = csv.writer(f)
@@ -508,6 +517,9 @@ def main() -> int:
     b.add_argument("--min-persons", type=int, default=MIN_PERSONS,
                    help="R2: distinct people needed to call a domain a company")
     b.add_argument("--report", action="store_true")
+    b.add_argument("--curated", metavar="PATH",
+                   help="curated map CSV (domain,company,kind,source); "
+                        "authoritative on any conflict")
     b.set_defaults(fn=cmd_build)
     args = ap.parse_args()          # once: parsing twice can only diverge
     return args.fn(args)

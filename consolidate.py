@@ -1,32 +1,21 @@
 #!/usr/bin/env python3
 """Build ctp.duckdb: project tracking table + unified token view.
 
-    ./consolidate.py                                  # the corpus run set
-    ./consolidate.py --manifest manifest.tsv          # the legacy pilots
+    ./consolidate.py                                  # manifest.tsv
+    ./consolidate.py --manifest my-run.tsv            # one manifest
     ./consolidate.py --manifest a.tsv --manifest b.tsv  # repeatable
 
 Derived index, NOT authority — ground truth stays the manifests + validated
 stamps + metrics.tsv. Safe to rerun any time. Run inside devenv (needs duckdb).
 
-WHICH MANIFESTS. The manifest used to be hardcoded to manifest.tsv, which holds
-exactly 4 legacy pilot projects (jq, zstd, libuv, tmux) whose parquets are still
-at the old 23-column schema. ctp.py's `db` command passes no arguments, so
-ctp.duckdb could only ever describe those 4 and no corpus-wide query was
-possible. The default is therefore the corpus RUN set:
-
-    manifest.phase1-sm.tsv  (187 projects)  +  manifest.linux.tsv  (1)
-
-Anyone who wants the legacy pilots asks for them: --manifest manifest.tsv.
-manifest.generated.tsv is never a default: it is a CANDIDATE list of 3,948 rows
-that were never run, so indexing it would stat 3,948 absent workdirs and emit
-thousands of phantom QUEUED rows. A relative --manifest resolves against this
-repo, not the caller's cwd, because ctp.py runs this script from the cregit
-directory. A project named by two manifests is indexed once, from the first
-manifest that names it.
-
-When none of the corpus manifests is present — a fixture tree, or a checkout
-without them — the run set falls back to manifest.tsv, which is the only
-manifest every checkout has.
+WHICH MANIFESTS. With no --manifest the index covers manifest.tsv, the example
+manifest that every checkout carries. ctp.py's `db` command passes no
+arguments, so for any other run, call this script with one --manifest for each
+manifest the run used. Give only manifests that were run: a list of candidates
+that never ran makes one phantom QUEUED row for each absent work directory. A
+relative --manifest resolves against this repo, not the caller's cwd, because
+ctp.py runs this script from the cregit directory. A project named by two
+manifests is indexed once, from the first manifest that names it.
 
 SCHEMA GATE. read_parquet([...]) binds one schema for the whole list, so a
 single file at the old 23 or 38 columns aborts the tokens view for every
@@ -85,7 +74,7 @@ CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
 _cfg.read(CORPUS / "pipeline.cfg")
 OUT = (CORPUS / Path(_cfg.get("paths", "output_dir",
-       fallback="../cregit-workspace/corpus-files")).expanduser()).resolve()
+       fallback="../ctp-output")).expanduser()).resolve()
 DB = CORPUS / "ctp.duckdb"
 # ctp.py's own directory per project, holding the lock and the logs. It is
 # deliberately NOT inside the work directory, because run_pipeline_process.sh
@@ -93,11 +82,8 @@ DB = CORPUS / "ctp.duckdb"
 # would take the lock with it. This must stay in step with ctp.py's state_dir().
 STATE = CORPUS / "state"
 
-# The run set: what was actually run, so what the index can describe.
-CORPUS_MANIFESTS = ("manifest.phase1-sm.tsv", "manifest.linux.tsv")
-# The one manifest every checkout carries. Used only when no corpus manifest is
-# present; it holds the 4 legacy pilots, not the corpus.
-FALLBACK_MANIFEST = "manifest.tsv"
+# The one manifest every checkout carries, indexed when --manifest is not given.
+DEFAULT_MANIFEST = "manifest.tsv"
 
 PROJECTS_DDL = (
     "create or replace table projects (name text primary key, url text, "
@@ -169,21 +155,9 @@ def resolve_manifest(value: str) -> Path:
 
 
 def default_manifests() -> list[Path]:
-    """The manifests indexed when --manifest is not given: the corpus run set.
-
-    A corpus manifest that is absent contributes nothing and is named on stderr,
-    so 187 projects silently becoming 1 is visible. When none of them is present
-    the run set falls back to manifest.tsv — see the module docstring.
-    """
-    present = [CORPUS / name for name in CORPUS_MANIFESTS
-               if (CORPUS / name).is_file()]
-    if present:
-        for name in CORPUS_MANIFESTS:
-            if not (CORPUS / name).is_file():
-                print(f"  ! {name} is absent, it contributes no projects",
-                      file=sys.stderr)
-        return present
-    return [CORPUS / FALLBACK_MANIFEST]
+    """The manifests indexed when --manifest is not given: manifest.tsv only.
+    See the module docstring."""
+    return [CORPUS / DEFAULT_MANIFEST]
 
 
 def project_rows(manifests: Sequence[Path] | None = None) -> list:
@@ -239,7 +213,7 @@ def project_rows(manifests: Sequence[Path] | None = None) -> list:
                 try:
                     n_rows = int(raw)
                 except ValueError:
-                    # Report and carry on: 1,423 projects must not lose their
+                    # Report and carry on: the other projects must not lose their
                     # index because one stamp says rows=many.
                     print(f"  ! {name}: stamp rows={raw!r} is not an integer, "
                           "token_rows left null", file=sys.stderr)
@@ -291,9 +265,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--manifest", action="append", metavar="PATH",
         help="manifest to index, repeatable. A relative path is resolved "
-             "against this repo. Default: "
-             f"{' + '.join(CORPUS_MANIFESTS)} (the corpus run set). Pass "
-             f"--manifest {FALLBACK_MANIFEST} for the legacy pilot projects.")
+             f"against this repo. Default: {DEFAULT_MANIFEST}.")
     return parser.parse_args(list(argv))
 
 
