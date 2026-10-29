@@ -36,6 +36,20 @@ junit-*.xml
 sources/*.tar.gz
 sources/*.txt
 
+# The private pseudonymization salt. anonymize_parquet.py reads it from
+# ~/.config/cregit-token-pipeline/anon-salt, $CTP_ANON_SALT_FILE or
+# $CTP_ANON_SALT, so the salt is not supposed to be in the tree at all -- these
+# patterns are the belt to that braces. Committing the salt makes every pseudonym
+# in every release reversible by anyone who clones this repository, and unlike the
+# old sequential scheme the leak would be silent.
+*.salt
+anon-salt
+anon-salt.*
+salt
+salt.txt
+.env
+.env.*
+
 # TRACKED ON PURPOSE, do not add these here:
 #   candidates.csv                the corpus decision record, one row per
 #                                 candidate with its exclusion reason
