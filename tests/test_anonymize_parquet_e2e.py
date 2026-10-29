@@ -154,7 +154,7 @@ ROW_DAVE = dict(BASE, **{
 
 
 @pytest.fixture
-def corpus(tmp_path: Path) -> tuple[Path, list[str]]:
+def dataset_files(tmp_path: Path) -> tuple[Path, list[str]]:
     """Two input Parquets plus an empty output directory."""
     src = tmp_path / "in"
     src.mkdir()
@@ -222,22 +222,22 @@ def domain_multiset(path: Path) -> dict[str, int]:
 # --------------------------------------------------------------------------
 
 @requires_duckdb
-def test_the_run_of_the_fixture_corpus_succeeds(corpus):
+def test_the_run_of_the_fixture_dataset_succeeds(dataset_files):
     """Control for every other test here: the clean fixture must pass."""
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     report, _ = anonymize(tmp, paths)
     assert report["failures"] == []
 
 
 @requires_duckdb
-def test_one_person_one_pseudonym_through_all_three_routes(corpus):
+def test_one_person_one_pseudonym_through_all_three_routes(dataset_files):
     """author_email, person_email and a Co-authored-by footer agree.
 
     The three routes reach Alice by different code paths: two scalar macros over
     file A and a list macro over file B. A registry that were rebuilt per file,
     or per column, would give her two or three different local parts.
     """
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     _, outdir = anonymize(tmp, paths)
     a = outdir / "acme__widget-dataset.parquet"
     b = outdir / "acme__gadget-dataset.parquet"
@@ -262,18 +262,18 @@ def test_one_person_one_pseudonym_through_all_three_routes(corpus):
 
 
 @requires_duckdb
-def test_pseudonyms_are_consistent_across_files_of_one_invocation(corpus):
+def test_pseudonyms_are_consistent_across_files_of_one_invocation(dataset_files):
     """The registry spans the invocation, so no conflict may be reported."""
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     report, _ = anonymize(tmp, paths)
     assert report["cross_file_consistency"]["conflicts"] == []
     assert report["cross_file_consistency"]["checked"] > 0
 
 
 @requires_duckdb
-def test_a_footer_only_person_is_pseudonymized_not_passed_through(corpus):
+def test_a_footer_only_person_is_pseudonymized_not_passed_through(dataset_files):
     """Carol never authored a commit; she exists only in footer_reviewed_by."""
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     _, outdir = anonymize(tmp, paths)
     got = elements(outdir / "acme__widget-dataset.parquet",
                    "footer_reviewed_by")
@@ -289,14 +289,14 @@ def test_a_footer_only_person_is_pseudonymized_not_passed_through(corpus):
 # --------------------------------------------------------------------------
 
 @requires_duckdb
-def test_domain_multiset_is_unchanged(corpus):
+def test_domain_multiset_is_unchanged(dataset_files):
     """Firm attribution joins on the domain, so it must be bit-for-bit intact.
 
     A multiset, not a set: if anonymization changed how many rows carry
     redhat.com the firm-level row counts would move even though the domain list
     looked right.
     """
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     _, outdir = anonymize(tmp, paths)
     for p in paths:
         before = domain_multiset(Path(p))
@@ -308,8 +308,8 @@ def test_domain_multiset_is_unchanged(corpus):
 
 
 @requires_duckdb
-def test_person_domain_column_is_untouched(corpus):
-    tmp, paths = corpus
+def test_person_domain_column_is_untouched(dataset_files):
+    tmp, paths = dataset_files
     _, outdir = anonymize(tmp, paths)
     a = outdir / "acme__widget-dataset.parquet"
     assert sorted(scalars(a, "person_domain")) == ["intel.com", "redhat.com"]
@@ -320,8 +320,8 @@ def test_person_domain_column_is_untouched(corpus):
 # --------------------------------------------------------------------------
 
 @requires_duckdb
-def test_rows_and_columns_are_unchanged_and_the_schema_still_validates(corpus):
-    tmp, paths = corpus
+def test_rows_and_columns_are_unchanged_and_the_schema_still_validates(dataset_files):
+    tmp, paths = dataset_files
     report, outdir = anonymize(tmp, paths)
     for p in paths:
         entry = report["files"][p]
@@ -334,9 +334,9 @@ def test_rows_and_columns_are_unchanged_and_the_schema_still_validates(corpus):
 
 
 @requires_duckdb
-def test_no_footer_element_is_lost(corpus):
+def test_no_footer_element_is_lost(dataset_files):
     """Element counts are data. Pseudonymizing must not drop a trailer line."""
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     report, _ = anonymize(tmp, paths)
     for p in paths:
         assert report["files"][p]["footer_elements_lost"] == {}
@@ -354,13 +354,13 @@ TRAILER = re.compile(
 
 
 @requires_duckdb
-def test_a_trailer_comes_out_a_well_formed_trailer(corpus):
+def test_a_trailer_comes_out_a_well_formed_trailer(dataset_files):
     """'Signed-off-by: Alice <alice@redhat.com>' -> pseudonym, real domain.
 
     Not mangled text and not NULL: the reference implementation NULLed the
     column that carried this text rather than parse it.
     """
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     _, outdir = anonymize(tmp, paths)
     got = elements(outdir / "acme__widget-dataset.parquet",
                    "footer_signed_off_by")
@@ -371,8 +371,8 @@ def test_a_trailer_comes_out_a_well_formed_trailer(corpus):
 
 
 @requires_duckdb
-def test_every_name_email_trailer_element_is_well_formed(corpus):
-    tmp, paths = corpus
+def test_every_name_email_trailer_element_is_well_formed(dataset_files):
+    tmp, paths = dataset_files
     _, outdir = anonymize(tmp, paths)
     seen = 0
     for p in paths:
@@ -387,9 +387,9 @@ def test_every_name_email_trailer_element_is_well_formed(corpus):
 
 
 @requires_duckdb
-def test_footer_columns_are_not_nulled(corpus):
-    """The partner's decision: pseudonymize, do not drop and do not NULL."""
-    tmp, paths = corpus
+def test_footer_columns_are_not_nulled(dataset_files):
+    """The default: pseudonymize the footers, do not drop and do not NULL them."""
+    tmp, paths = dataset_files
     _, outdir = anonymize(tmp, paths)
     a = outdir / "acme__widget-dataset.parquet"
     assert elements(a, "footer_signed_off_by")
@@ -398,14 +398,14 @@ def test_footer_columns_are_not_nulled(corpus):
 
 
 @requires_duckdb
-def test_an_unparseable_footer_shape_is_counted_and_replaced(corpus):
+def test_an_unparseable_footer_shape_is_counted_and_replaced(dataset_files):
     """Requirement 6 applied to footers: counted, and never passed through.
 
     'Some Cryptic Trailer' is not 'Name <email>'. It is reported under its shape
     and mapped whole through the name registry, so the raw string cannot reach
     the release.
     """
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     report, outdir = anonymize(tmp, paths)
     assert report["registry"]["footer_shapes"].get(A.SHAPE_OTHER) == 1
     got = elements(outdir / "acme__widget-dataset.parquet", "footer_thanks_to")
@@ -419,13 +419,13 @@ def test_an_unparseable_footer_shape_is_counted_and_replaced(corpus):
 # --------------------------------------------------------------------------
 
 @requires_duckdb
-def test_two_runs_are_byte_identical(corpus):
+def test_two_runs_are_byte_identical(dataset_files):
     """Ids come from sorting the distinct values, so nothing may drift.
 
     Byte equality, not value equality: a release is archived and checksummed, so
     a reproducer has to get the same file, not merely the same table.
     """
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     _, first = anonymize(tmp, paths, outname="out1")
     _, second = anonymize(tmp, paths, outname="out2")
     for p in paths:
@@ -434,9 +434,9 @@ def test_two_runs_are_byte_identical(corpus):
 
 
 @requires_duckdb
-def test_input_file_order_does_not_change_the_output(corpus):
+def test_input_file_order_does_not_change_the_output(dataset_files):
     """The registry sorts, so presenting the same files reversed changes nothing."""
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     _, first = anonymize(tmp, paths, outname="fwd")
     _, second = anonymize(tmp, list(reversed(paths)), outname="rev")
     for p in paths:
@@ -449,9 +449,9 @@ def test_input_file_order_does_not_change_the_output(corpus):
 # --------------------------------------------------------------------------
 
 @requires_duckdb
-def test_an_unknown_column_stops_the_run_and_writes_nothing(corpus):
+def test_an_unknown_column_stops_the_run_and_writes_nothing(dataset_files):
     """A widened schema must break the tool loudly, not shrink the release."""
-    tmp, _ = corpus
+    tmp, _ = dataset_files
     src = tmp / "wide"
     src.mkdir()
     wide = write_dataset(src / "acme__widget-dataset.parquet", [ROW_ALICE],
@@ -464,13 +464,13 @@ def test_an_unknown_column_stops_the_run_and_writes_nothing(corpus):
 
 
 @requires_duckdb
-def test_a_too_narrow_input_is_refused(corpus):
-    """Measured on the corpus: jq, libuv, tmux and zstd are 23-column files.
+def test_a_too_narrow_input_is_refused(dataset_files):
+    """Real datasets can hold files with fewer columns than the contract.
 
     Anonymizing one would publish a file that does not match the contract, and
     its invariance could not be checked, so it is refused rather than written.
     """
-    tmp, _ = corpus
+    tmp, _ = dataset_files
     src = tmp / "narrow"
     src.mkdir()
     narrow_cols = tuple((n, t) for n, t in CONTRACT if n != "firm")
@@ -485,7 +485,7 @@ def test_a_too_narrow_input_is_refused(corpus):
 
 
 @requires_duckdb
-def test_identity_text_in_commit_summary_fails_the_run(corpus):
+def test_identity_text_in_commit_summary_fails_the_run(dataset_files):
     """Positive control on the residue gate.
 
     A scanner that never fires proves nothing, so this puts a real contributor
@@ -494,7 +494,7 @@ def test_identity_text_in_commit_summary_fails_the_run(corpus):
     assertion is on the reported failure, which is what main() turns into a
     non-zero exit.
     """
-    tmp, _ = corpus
+    tmp, _ = dataset_files
     src = tmp / "leak"
     src.mkdir()
     row = dict(ROW_ALICE, commit_summary="thanks to Carol Danvers for the fix",
@@ -509,9 +509,9 @@ def test_identity_text_in_commit_summary_fails_the_run(corpus):
 
 
 @requires_duckdb
-def test_null_commit_summary_is_the_documented_escape(corpus):
+def test_null_commit_summary_is_the_documented_escape(dataset_files):
     """The reference implementation's behavior, still available on request."""
-    tmp, _ = corpus
+    tmp, _ = dataset_files
     src = tmp / "leak2"
     src.mkdir()
     row = dict(ROW_ALICE, commit_summary="thanks to Carol Danvers for the fix",
@@ -525,9 +525,9 @@ def test_null_commit_summary_is_the_documented_escape(corpus):
 
 
 @requires_duckdb
-def test_the_missing_marker_never_reaches_the_output(corpus):
+def test_the_missing_marker_never_reaches_the_output(dataset_files):
     """A registry miss must show as a marker, and a marker must fail the run."""
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     report, outdir = anonymize(tmp, paths)
     for p in paths:
         assert report["files"][p]["leaks"]["missing_marker"] == {}
@@ -540,8 +540,8 @@ def test_the_missing_marker_never_reaches_the_output(corpus):
 
 
 @requires_duckdb
-def test_no_identity_column_leaks_a_real_string(corpus):
-    tmp, paths = corpus
+def test_no_identity_column_leaks_a_real_string(dataset_files):
+    tmp, paths = dataset_files
     report, _ = anonymize(tmp, paths)
     for p in paths:
         assert report["files"][p]["leaks"]["identity"] == {}
@@ -550,13 +550,13 @@ def test_no_identity_column_leaks_a_real_string(corpus):
 
 
 @requires_duckdb
-def test_no_real_address_survives_anywhere_in_the_release(corpus):
+def test_no_real_address_survives_anywhere_in_the_release(dataset_files):
     """The independent check: every address in the output is a pseudonym.
 
     Deliberately not registry-aware, so it cannot be fooled by a registry bug.
     Mirrors verify_anon.py's rule over every string column.
     """
-    tmp, paths = corpus
+    tmp, paths = dataset_files
     _, outdir = anonymize(tmp, paths)
     real = re.compile(r"(?<![A-Za-z0-9._%+\-])(?!author_[0-9a-f]+@)"
                       r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
@@ -577,9 +577,9 @@ def test_no_real_address_survives_anywhere_in_the_release(corpus):
 # This is the regression test for the measured defect that motivated the salted
 # hash. Under the superseded sequential registry an id was the ordinal position
 # of a value in the sorted distinct set of ONE invocation, so adding a project
-# renumbered everybody sorting after the new values. Measured over six corpus
-# Parquets: dropping one file moved 150 of the 153 addresses present in both
-# runs -- 98.0%. Here the rate must be exactly 0.0%.
+# renumbered everybody sorting after the new values. On real files, dropping
+# one file moved almost every address present in both runs. Here the rate must
+# be exactly 0.0%.
 #
 # The fixture reproduces the worst case on purpose: release two adds 30 people
 # whose locals and names all sort BEFORE every person in release one, so under
@@ -643,7 +643,7 @@ def pseudonym_map(paths: list[str]) -> tuple[dict, dict]:
 
 @requires_duckdb
 def test_a_release_that_adds_a_project_renumbers_nobody(two_releases):
-    """THE acceptance test. 98.0% renumbered before, 0.0% after."""
+    """THE acceptance test. Almost all renumbered before, 0.0% after."""
     _, one, two = two_releases
     e1, n1 = pseudonym_map(one)
     e2, n2 = pseudonym_map(two)

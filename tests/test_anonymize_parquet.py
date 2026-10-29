@@ -170,10 +170,10 @@ def test_commit_summary_is_preserved_by_default():
 
 def test_parses_the_git_trailer_shape():
     shape, name, email = A.parse_footer_element(
-        "Victor Adossi <vadossi@cosmonic.com>")
+        "Dana Quill <dquill@firm.example>")
     assert shape == A.SHAPE_NAME_EMAIL
-    assert name == "Victor Adossi"
-    assert email == "vadossi@cosmonic.com"
+    assert name == "Dana Quill"
+    assert email == "dquill@firm.example"
 
 
 def test_parses_a_bare_address():
@@ -186,7 +186,7 @@ def test_parses_a_bare_address():
 def test_cregit_personid_convention_is_not_mistaken_for_a_name():
     """'handle at local@domain' carries a real address without angle brackets.
 
-    Measured in footer_personids and in person_name itself. Treated as one
+    Seen in footer_personids and in person_name itself. Treated as one
     opaque string and replaced whole, which is why no address survives.
     """
     shape, name, email = A.parse_footer_element(
@@ -245,7 +245,7 @@ def test_footer_only_person_still_gets_a_pseudonym():
 
 
 def test_derived_footer_values_enter_the_name_registry():
-    """footer_personids can hold people absent from personid. Measured in prql."""
+    """footer_personids can hold people absent from personid. Seen in real data."""
     reg = build(emails=[], names=["known person"],
                 derived={"footer_personids":
                          {"prql-bot at prql-bot@users.noreply.github.com"}})
@@ -287,12 +287,12 @@ def test_pseudonym_formats_are_distinct_per_space():
 # --------------------------------------------------------------------------
 
 def test_adding_values_to_the_set_renumbers_nobody():
-    """The 98.0% renumbering of the superseded sequential scheme, gone.
+    """The renumbering of the superseded sequential scheme, gone.
 
-    Measured on six corpus Parquets before this change: dropping one file from a
-    six-file invocation moved 150 of the 153 addresses present in both runs --
-    98.0%. The cause was that ids came from the ordinal position of a value in
-    the sorted distinct set, so inserting one value shifted everything after it.
+    With the sequential scheme, dropping one file from an invocation moved
+    almost every address present in both runs. The cause was that ids came
+    from the ordinal position of a value in the sorted distinct set, so
+    inserting one value shifted everything after it.
     Here the rate must be exactly zero, for any addition.
     """
     small_e = [f"m{i:03d}@mcorp.example" for i in range(40)]
@@ -649,9 +649,9 @@ def test_domain_masker_prefers_the_longest_domain():
 
 def test_footer_collapses_are_reported():
     """Two trailers differing only by a CR render alike. Said out loud, not hidden."""
-    reg = build(emails=["m@maxroos.com"], names=["Maximilian Roos"],
-                footers=["Maximilian Roos <m@maxroos.com>",
-                         "Maximilian Roos <m@maxroos.com>\r"])
+    reg = build(emails=["pat@personal.example"], names=["Pat Rivera"],
+                footers=["Pat Rivera <pat@personal.example>",
+                         "Pat Rivera <pat@personal.example>\r"])
     collapses = A.footer_collapses(reg)
     assert len(collapses) == 1
     assert len(next(iter(collapses.values()))) == 2
@@ -687,8 +687,8 @@ def test_fifteen_footer_columns():
 
 
 # --------------------------------------------------------------------------
-# ctp schema 2 (dataset v0, the user's rules of 2026-10-19): the 4 organization
-# columns pass unchanged; firm_raw, firm and firm_source are dropped.
+# ctp schema 2: the 4 organization columns pass unchanged; firm_raw, firm and
+# firm_source are dropped, because they hold the superseded firm map.
 # --------------------------------------------------------------------------
 
 SCHEMA2 = [c for c in CONTRACT if c not in A.FIRM_COLUMNS] + list(A.ORGANIZATION_COLUMNS)

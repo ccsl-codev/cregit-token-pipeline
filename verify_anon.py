@@ -63,16 +63,15 @@ REAL_ADDRESS = re.compile(
 MISSING_MARKER = "(ANON-MISSING)"
 
 # An e-mail column after anonymization. The domain is optional because a git
-# author field is not required to hold an address: measured over the 196 corpus
-# parquets, 36 of them carry a bare user name in author_email / committer_email /
-# person_email -- 'robertmartin', 'deanwampler', 'nashjain' -- for 1,332,252 rows
-# in total. anonymize_parquet.py maps such a value whole to 'author_<hex>' with
-# no domain to re-attach, which is correct: the entire string was the local part
-# and the whole of it is replaced.
+# author field is not required to hold an address: real repositories carry a
+# bare user name with no '@' in author_email / committer_email / person_email,
+# often for many rows. anonymize_parquet.py maps such a value whole to
+# 'author_<hex>' with no domain to re-attach, which is correct: the entire
+# string was the local part and the whole of it is replaced.
 #
 # Requiring a domain here made this script contradict the tool it verifies. It
 # reported 'not a pseudonym' for 'author_0109' -- a correctly pseudonymized
-# value -- and so failed 36 of 196 files that anonymize_parquet.py passed. A
+# value -- and so failed files that anonymize_parquet.py passed. A
 # release script running both gates could never go green, which trains a reader
 # to ignore the verifier. That is the failure this optional group removes.
 #
@@ -100,9 +99,9 @@ EXACT_SHAPE = {
 # this as residual risk; the point of listing it here is that a release cannot
 # pretend it is not there.
 #
-# commit_summary is in this set since 2026-10-25: the user decided that the
-# commit message is published as git has it (pseudonymize.py --commit-summary
-# keep), so an address in it is a note, not a failure.
+# commit_summary is in this set because pseudonymize.py can publish the commit
+# message as git has it (--commit-summary keep). The text is the record of the
+# commit and is not rewritten, so an address in it is a note, not a failure.
 CONTENT_COLUMNS = frozenset({"source_text", "token_value", "file_path",
                              "repo_name", "clone_url", "owner", "repo",
                              "roster_name", "fact", "file_mask", "commit_summary"})

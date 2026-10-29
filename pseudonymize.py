@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pseudonymize the released ctp schema 2 Parquet files in one pass per file.
 
-This is the release tool of the dataset (release plan step 7, x1k row X5). It
+This is the release tool of the dataset. It
 replaces the release path of anonymize_parquet.py. anonymize_parquet.py stays as
 the library of rules (column classes, footer shapes, salt file) and as the
 record of the measurements in its docstring.
@@ -9,8 +9,8 @@ record of the measurements in its docstring.
 WHAT CHANGED, AND WHY
 
 1. One registry TABLE, not SQL MAP literals.
-   `registry` reads every input file in ONE invocation (dataset v1 and the
-   extension together) and writes one private Parquet table:
+   `registry` reads every input file in ONE invocation (all parts of the
+   dataset together) and writes one private Parquet table:
 
        space | identity | token | pseudonym | shape | anchor | local
 
@@ -19,11 +19,11 @@ WHAT CHANGED, AND WHY
    runs on this table, so it covers all files. The leak scan reads its probes
    from this table, so a person of file A is also looked for in file B.
    The table holds real identities. It is as private as the salt: mode 0600,
-   never in the release, never in git. The user decided (2026-10-24) to keep
-   it in the private bucket after the release, so that a later release
-   with the same salt gives the same pseudonyms and can check the old footer
-   hashes. The tool refuses a registry path under --outdir, under a
-   --release-root, or under a folder with the layout of a release root.
+   never in the release, never in git. Keep it in private storage after the
+   release, so that a later release with the same salt gives the same
+   pseudonyms and can check the old footer hashes. The tool refuses a
+   registry path under --outdir, under a --release-root, or under a folder
+   with the layout of a release root.
    Its sha256 (over the sorted rows) goes into the footer of each written file.
 
 2. The pseudonym is a keyed hash that DuckDB computes per row.
@@ -35,7 +35,7 @@ WHAT CHANGED, AND WHY
 
        token = substr(sha256(K2 || sha256(K1 || space || ':' || lower(value))), 1, 14)
 
-   in SQL (scheme 2; the user chose it as the release scheme on 2026-10-24).
+   in SQL (scheme 2, the release scheme).
    K1 and K2 are the two halves of blake2b(salt, 64 bytes), as hex.
    The nested hash stops a length-extension attack, and the result has
    PSEUDO_HEX_LEN = 14 hex characters (56 bits), as before. DuckDB runs a
@@ -70,43 +70,45 @@ WHAT CHANGED, AND WHY
    and registry tokens (salted hashes). They never give a value, a name, an
    address or a domain. The report writer also removes each at sign.
 
-5. --memory-limit, --threads (per job) and --jobs (parallel files), as in
-   build_v0.py and run_v0.py. --temp-dir sets the spill folder.
+5. --memory-limit, --threads (per job) and --jobs (parallel files), with the
+   same meaning as in the other ctp tools. --temp-dir sets the spill folder.
 
-6. One fused write (decision D1).
+6. One fused write.
    write_public() takes a source relation (default: the input file) and writes
-   the pseudonymized file in one COPY, with the v1 encoding (ZSTD 19,
+   the pseudonymized file in one COPY, with the release encoding (ZSTD 19,
    ROW_GROUP_SIZE 1000000, PARQUET_VERSION V2). It keeps the footer metadata
    and adds pseudonymization_version and pseudonymization_registry_sha256.
-   build_v0.py can give its organization SELECT as the source relation, so the
-   organization columns and the pseudonyms come from one read and one ZSTD 19
-   encode. See write_public() for the call.
+   A caller that builds its own SELECT (for example one that adds the
+   organization columns) can give it as the source relation. Then the added
+   columns and the pseudonyms come from one read and one ZSTD 19 encode.
+   See write_public() for the call.
 
-7. The decided column rules of docs/ANON-OPEN-QUESTIONS.md and of the release
-   plan:
-     * person_domain is written as lower(trim(person_domain)) (the key of
-       build_links.py; JOIN_PROTOTYPE.md recommendation 4). Measured on
-       dataset v1: this changes 2 of 70,737 distinct values.
-     * commit_summary (the user, 2026-10-25): the default is --commit-summary
-       keep. The commit message is published as git has it. No name and no
+7. The column rules:
+     * person_domain is written as lower(trim(person_domain)). This is the
+       join key of a domain table, so two spellings of one domain must not
+       make two keys.
+     * commit_summary: the default is --commit-summary keep. The commit
+       message is published as git has it. No name and no
        address in it is changed, and the gate does not check it; the leak scan
        gives its counts as information only. The modes pseudonym (each address
        gets the pseudonym of the e-mail columns), scrub (the local part becomes
        'author') and null stay as options. The trailer columns (footer_*) are
        separate and get pseudonyms.
      * The domain of an address (the e-mail columns and the trailers) and a
-       person_domain value with an at sign (the user, 2026-10-25, rule E): the
-       first part after an at sign that is a valid domain, else ''. A valid
-       domain has the STRICT_DOMAIN characters of build_companies.py, a dot
-       and an ICANN public suffix (the Public Suffix List, --psl). See
+       person_domain value with an at sign: the first part after an at sign
+       that is a valid domain, else ''. Thus a value with more than one at
+       sign does not publish a local part as a domain. A valid domain has the
+       STRICT_DOMAIN characters, a dot and an ICANN public suffix (the
+       Public Suffix List, --psl). See
        rule_e_domain_sql(). --email-domain second-part (the old rule) and
        --person-domain-at after-last-at stay as options.
      * The pseudonym forms ('Author <token>', 'author <token>',
        'author_<token>') are masked in the leak scan. The registry holds the
        name 'author', so without the mask every pseudonym was a leak.
      * No name probes in the closed-vocabulary columns, the numeric, date and
-       hash columns, and person_domain (NO_NAME_PROBE_COLUMNS; the main
-       session, 2026-10-26, a false-positive fix open to the user's review).
+       hash columns, and person_domain (NO_NAME_PROBE_COLUMNS). These columns
+       cannot hold a free-text name, so a name probe there gives only false
+       positives.
        The address shape and local part probes stay on every column.
 
 8. Speed. One file per job and one DuckDB thread per job (--jobs N
@@ -144,7 +146,7 @@ from pathlib import Path
 
 # The sibling modules are in the folder of this file. Under `python -I` (no
 # script folder, no PYTHONPATH) that folder is not on the import path, so it
-# is put there. A caller that loads this module under -I (build_v0.py) puts
+# is put there. A caller that loads this module under -I puts
 # the folder on sys.path first, or loads the file with importlib.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -159,7 +161,8 @@ FOOTER_VERSION_KEY = "pseudonymization_version"
 FOOTER_REGISTRY_KEY = "pseudonymization_registry_sha256"
 ORG_FOOTER_KEYS = ("ctp_schema_version", "organizations_version",
                    "organizations_mapping_sha256")
-# The footer keys of release 1 (the British spelling, renamed on 2026-10-28).
+# An earlier spelling of the footer keys (British spelling). Files from an
+# older version of the tool can hold them.
 # A read accepts them and gives them the new name; a write writes only the new
 # name (new_footer_names()).
 OLD_FOOTER_KEYS = {"organisations_version": "organizations_version",
@@ -171,7 +174,7 @@ ORGANIZATION_TYPES = (("firm_based_on_namespace", "VARCHAR"),
                       ("project_enterprise_driven", "BOOLEAN"),
                       ("project_enterprise_basis", "VARCHAR"))
 # The release contract: the 67 kept cregit columns, then the 4 organization
-# columns. It is equal to SCHEMA_2 of release-staging/tools/fill_release.py.
+# columns. A tool that assembles a release must use the same list.
 SCHEMA_2 = tuple((c, t) for c, t in vs.EXPECTED_COLUMNS
                  if c not in A.FIRM_COLUMNS) + ORGANIZATION_TYPES
 
@@ -180,8 +183,9 @@ SPACE_EMAIL, SPACE_NAME, SPACE_FOOTER, SPACE_DOMAIN = (
 # Published organization names and ids. They are not identities. The name
 # replacement and the leak scan mask them, as they mask the domains.
 SPACE_ORGANIZATION = "organization"
-# The label of this space in a registry of release 1. A read of a registry
-# file accepts both labels; a new registry has only the new label.
+# The label of this space in a registry that an older version wrote. A read
+# of a registry file accepts both labels; a new registry has only the new
+# label.
 OLD_SPACE_ORGANIZATION = "organisation"
 ALL_SPACES = (SPACE_EMAIL, SPACE_NAME, SPACE_FOOTER, SPACE_DOMAIN, SPACE_ORGANIZATION)
 ORG_MASK = "<PRESERVED-ORGANIZATION>"
@@ -189,21 +193,21 @@ SALT_CHECK_VALUE = "ctp-anon-salt-check"
 REGISTRY_COLUMNS = ("space", "identity", "token", "pseudonym", "shape",
                     "anchor", "local")
 SUMMARY_MODES = ("keep", "pseudonym", "scrub", "null")
-# The user's decisions of 2026-10-25: commit_summary is published as git has
-# it; the domain of an address and a person_domain value with an at sign follow
-# rule E (the first part after an at sign that is a valid domain).
+# The defaults: commit_summary is published as git has it; the domain of an
+# address and a person_domain value with an at sign is the first part after an
+# at sign that is a valid domain.
 DEFAULT_SUMMARY_MODE = "keep"
 DEFAULT_DOMAIN_AT = "first-valid"
 EMAIL_DOMAIN_MODES = ("first-valid", "second-part", "after-last-at")
 DEFAULT_EMAIL_DOMAIN = "first-valid"
-# Files and folders that mark the root of a release (release plan, layout).
-# 'organisations' is the folder name of a release 1 root.
+# Files and folders that mark the root of a release (the release layout).
+# 'organisations' is the folder name in an earlier spelling of the layout.
 RELEASE_MARKERS = ("organizations", "organisations", "MANIFEST.tsv", "SHA256SUMS")
-# The id column of the organizations table, then its name in release 1.
+# The id column of the organizations table, then its earlier spelling.
 ORG_ID_COLUMNS = ("organization_id", "organisation_id")
-# person_domain values with an at sign (measured on dataset v1: 199 distinct
-# values in 176 files, 70 of them address-shaped in 89 files). 'keep' writes
-# them as they are, and the structural gate then fails those files.
+# person_domain values with an at sign. Real data has them, and some are
+# address-shaped. 'keep' writes them as they are, and the structural gate then
+# fails those files.
 DOMAIN_AT_MODES = ("first-valid", "after-last-at", "empty", "keep")
 MAX_TOKENS_IN_REPORT = 5
 
@@ -229,7 +233,7 @@ RE_SUMMARY_ADDRESS = rf"[A-Za-z0-9._%+\-]+{AT}([A-Za-z0-9.\-]+\.[A-Za-z]{{2,}})"
 
 class PseudonymizeError(Exception):
     """The public error class of this module. safe_error() shows the text of
-    this class and its subclasses, so a caller's own check (build_v0.py) can
+    this class and its subclasses, so a caller's own check can
     raise WriteError (or this class) with a text of counts and column names.
     The text must not hold a data value."""
 
@@ -301,11 +305,12 @@ def q(col: str) -> str:
 def _domain_macros(email_domain: str) -> list[str]:
     """anon_email and anon_addr for one rule of the domain of an address.
 
-    first-valid: rule E (rule_e_domain_sql), the default. second-part: the old
+    first-valid: the first part after an at sign that is a valid domain
+    (rule_e_domain_sql), the default. second-part: the old
     rule of the e-mail columns (the part between the first and the second at
     sign) and of the trailers (all after the first at sign). after-last-at:
-    the part after the last at sign. With rule E an address with no valid part
-    gets the pseudonym with no domain.
+    the part after the last at sign. With first-valid an address with no
+    valid part gets the pseudonym with no domain.
     """
     if email_domain not in EMAIL_DOMAIN_MODES:
         raise ValueError(f"email_domain must be one of {EMAIL_DOMAIN_MODES}")
@@ -398,10 +403,11 @@ def connect(memory_limit: str = "4GB", threads: int = 2,
 
 
 # --------------------------------------------------------------------------
-# Rule E: the first part after an at sign that is a valid domain
+# The first-valid rule: the first part after an at sign that is a valid domain
 # --------------------------------------------------------------------------
 
-# STRICT_DOMAIN of build_companies.py (the domain key of the organization step).
+# The characters of a strict domain. A domain table that joins on person_domain
+# must use the same set, so that both sides agree on what a domain is.
 STRICT_DOMAIN = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*"
 PSL_GLOB = "/nix/store/*-publicsuffix-list-*/share/publicsuffix/public_suffix_list.dat"
 DEFAULT_PSL_PATH: str | None = None          # a fixed file (tests, callers)
@@ -411,7 +417,7 @@ PSL_TYPES = ("anon_psl_rule", "anon_psl_tld", "anon_psl_wild", "anon_psl_exc")
 
 def find_psl() -> str | None:
     """DEFAULT_PSL_PATH, else the newest Public Suffix List in the nix store
-    (the glob of build_companies.py)."""
+    (the nix package publicsuffix-list)."""
     import glob
     if DEFAULT_PSL_PATH:
         return DEFAULT_PSL_PATH
@@ -420,7 +426,7 @@ def find_psl() -> str | None:
 
 
 def load_psl(path: str | None = None) -> dict:
-    """The ICANN section of the Public Suffix List (as build_companies.load_psl):
+    """The ICANN section of the Public Suffix List:
     rules, wildcard bases, exception rules, the top-level labels, and the
     sha256 and path of the file."""
     path = path or find_psl()
@@ -482,16 +488,16 @@ def valid_domain_sql(p: str) -> str:
 
 
 def rule_e_domain_sql(expr: str, *, skip_first: bool) -> str:
-    """SQL, the rule E domain of the SQL expression `expr` (the user,
-    2026-10-25).
+    """SQL, the first-valid domain of the SQL expression `expr`.
 
     The value is lower(trim(expr)), cut at each at sign. The result is the
     first part that is a valid domain (valid_domain_sql), else ''. For an
     address (skip_first=True) the part before the first at sign is not a
     candidate; for a person_domain value (skip_first=False) every part is.
     The first RULE_E_MAX_PARTS parts are examined. NULL gives NULL. The
-    connection needs install_domain_rule(). build_v0.py uses this function
-    (through person_domain_expr) for its domain key.
+    connection needs install_domain_rule(). A caller that joins on the domain
+    must use this function (through person_domain_expr) for its domain key,
+    so that its key and the published domain agree.
     """
     first = 2 if skip_first else 1
     whens = " ".join(f"WHEN {valid_domain_sql(f'ps[{k}]')} THEN ps[{k}]"
@@ -502,8 +508,8 @@ def rule_e_domain_sql(expr: str, *, skip_first: bool) -> str:
 
 def install(con, keys: tuple[str, str] | None, *, email_domain: str = DEFAULT_EMAIL_DOMAIN,
             psl: dict | str | None = None) -> None:
-    """Put the keys into DuckDB variables, create the rule E types and the
-    macros. `psl`: a load_psl() result or a path (default: find_psl())."""
+    """Put the keys into DuckDB variables, create the domain rule types and
+    the macros. `psl`: a load_psl() result or a path (default: find_psl())."""
     if keys is not None:
         con.execute("SET VARIABLE anon_k1 = ?", [keys[0]])
         con.execute("SET VARIABLE anon_k2 = ?", [keys[1]])
@@ -538,7 +544,7 @@ def file_schema(con, path: str) -> list[tuple[str, str]]:
 def person_domain_expr(src: str, domain_at: str = DEFAULT_DOMAIN_AT) -> str:
     """SQL, the published person_domain of the SQL expression `src`:
     lower(trim(value)); a value with an at sign follows `domain_at` (default
-    first-valid, rule E). With first-valid the connection needs
+    first-valid). With first-valid the connection needs
     install_domain_rule()."""
     if domain_at not in DOMAIN_AT_MODES:
         raise ValueError(f"domain_at must be one of {DOMAIN_AT_MODES}")
@@ -649,10 +655,10 @@ def _inside(path: Path, root: Path) -> bool:
 def check_registry_path(registry: str, forbidden: tuple[str, ...] = ()) -> None:
     """Refuse a registry path in a published place.
 
-    The registry is the reverse map. It stays in private storage (the user,
-    2026-10-24: the private bucket, also after the release, so that a later
-    release gives the same pseudonyms). It must not be under a folder of
-    `forbidden` (the output folder of the write, a --release-root), and not
+    The registry is the reverse map. It stays in private storage, also after
+    the release, so that a later release gives the same pseudonyms. It must
+    not be under a folder of `forbidden` (the output folder of the write, a
+    --release-root), and not
     under a folder that has the layout of a release root (a 'parquet' folder
     and one of RELEASE_MARKERS).
     """
@@ -669,7 +675,7 @@ def check_registry_path(registry: str, forbidden: tuple[str, ...] = ()) -> None:
 
 def org_id_column(con, path: str) -> str:
     """The id column of an organizations table: organization_id, or
-    organisation_id in a table of release 1."""
+    organisation_id in a table with the earlier spelling."""
     names = [r[0] for r in con.execute(
         f"DESCRIBE SELECT * FROM read_parquet({sql_str(path)})").fetchall()]
     for c in ORG_ID_COLUMNS:
@@ -750,7 +756,7 @@ def build_registry(paths: list[str], keys: tuple[str, str], registry_out: str, *
         con.execute(f"INSERT INTO anon_raw SELECT DISTINCT '{SPACE_DOMAIN}', "
                     f"substr(v, strpos(v, '{AT}') + 1) FROM anon_raw "
                     f"WHERE space = '{SPACE_EMAIL}' AND strpos(v, '{AT}') > 0")
-        # The published domains of rule E (each part after an at sign).
+        # The published domains of the first-valid rule (each part after an at sign).
         con.execute(f"INSERT INTO anon_raw SELECT DISTINCT '{SPACE_DOMAIN}', d FROM (SELECT "
                     f"unnest(string_split(v, '{AT}')[2:]) AS d FROM anon_raw "
                     f"WHERE space = '{SPACE_EMAIL}' AND strpos(v, '{AT}') > 0)")
@@ -939,8 +945,8 @@ def order_hash(con, path: str, exprs: list[str]) -> tuple[int, int]:
 
 
 def new_footer_names(kv: dict[str, str]) -> dict[str, str]:
-    """The footer metadata `kv` with each key of OLD_FOOTER_KEYS (release 1)
-    under its new name. If both names are present, the new one stays and the
+    """The footer metadata `kv` with each key of OLD_FOOTER_KEYS (the earlier
+    spelling) under its new name. If both names are present, the new one stays and the
     old one goes; the two values must then be equal."""
     out = dict(kv)
     for old, new in OLD_FOOTER_KEYS.items():
@@ -968,24 +974,24 @@ def write_public(con, src: str, dst: str, *, registry: str, registry_sha256: str
 
     con: a DuckDB connection with install() done (the keys are set).
     source_sql: the relation to read, in the row order of `src`. Default:
-        read_parquet(src). The organization write gives its own SELECT here,
-        for example build_v0.py:
+        read_parquet(src). A caller that adds the organization columns gives
+        its own SELECT here, for example:
 
             psl = P.load_psl(psl_path)               # the list of the registry
-            P.install(con, keys, psl=psl)            # keys, rule E types, macros
-            key = P.person_domain_expr("person_domain")   # the rule E domain key
+            P.install(con, keys, psl=psl)            # keys, domain types, macros
+            key = P.person_domain_expr("person_domain")   # the published domain key
             sel = "SELECT t.*, <org columns> FROM read_parquet($src) t POSITIONAL JOIN (...) n"
             P.write_public(con, str(src), str(tmp), registry=reg, registry_sha256=sha,
                            source_sql=sel, source_params=params, kv=kv,
                            source_schema=<the known columns>)
 
-        build_v0.py must take its domain key from person_domain_expr() (it
-        was lower(trim(coalesce(person_domain, '')))), so that
-        firm_based_on_domain is the organization of the published
-        person_domain. The identity columns must come unchanged from `src`.
+        Such a caller must take its domain key from person_domain_expr(), not
+        from its own expression, so that firm_based_on_domain is the
+        organization of the published person_domain. The identity columns
+        must come unchanged from `src`.
     kv: the footer metadata. Default: the footer metadata of `src`.
     source_schema: the (column, type) list of source_sql. Give it when a
-        LIMIT 0 run of source_sql is not cheap (build_v0.py knows its columns).
+        LIMIT 0 run of source_sql is not cheap (the caller knows its columns).
 
     The function writes `dst`, then checks it: columns (SCHEMA_2 if
     expect_schema_2), row count, an order hash of every column that passes
@@ -1161,16 +1167,16 @@ PSEUDONYM_MASK = "<PSEUDONYM>"
 
 
 def mask_pseudonyms(value: str) -> str:
-    """Mask each pseudonym. The registry holds the name 'author' (measured on
-    dataset v1), so an unmasked pseudonym would be a known name."""
+    """Mask each pseudonym. A registry can hold the name 'author' (real data
+    has it), so an unmasked pseudonym would be a known name."""
     return PSEUDONYM_RE.sub(PSEUDONYM_MASK, value)
 
 
 # The three mask texts hold words: pseudonym, preserved, domain, organization.
-# The registry can hold a name that is one of these words (the registry of both
-# commit layers holds the names 'domain' and 'pseudonym'). Then the probe found
-# the name in the mask text itself, for example in a published domain with the
-# word 'domain' (the defect of 2026-10-27: 7 Linux files of the final write).
+# The registry can hold a name that is one of these words (real data holds the
+# names 'domain' and 'pseudonym'). Then the probe found the name in the mask
+# text itself, for example in a published domain with the word 'domain', and
+# failed a clean file.
 # So the probe runs on the masked value with each mask text replaced by one
 # character that is not a word character and not a space: the word boundaries
 # stay as they were, and no name can match in a mask.
@@ -1207,21 +1213,19 @@ def odd_local_hits(value: str, odd: dict[str, str]) -> set[str]:
 
 
 # Columns whose findings never fail the release: the content columns (source
-# code, project namespace) and commit_summary (published as git has it, the
-# user, 2026-10-25).
+# code, project namespace) and commit_summary (published as git has it by
+# default).
 INFORMATION_COLUMNS = frozenset(A.CONTENT_COLUMNS | {"commit_summary"})
 
-# The name probes of the structural gate (decided by the main session on
-# 2026-10-26 as a false-positive fix, open to the user's review). On dataset
-# v1 the gate failed every file only because a single-word registry name was
-# equal to a word of a closed vocabulary (366 distinct values). The address
-# shape and local part probes stay on every column; only the name probes are
-# left out of these columns.
+# The name probes of the structural gate skip these columns. This is a
+# false-positive fix: without it, a single-word registry name that is equal to
+# a word of a closed vocabulary (for example a language or a license name)
+# fails every file. The address shape and local part probes stay on every
+# column; only the name probes are left out of these columns.
 #
 # Closed vocabularies: the values come from a fixed list of the pipeline
-# (docs/DATASET-SCHEMA.md gives the list or its source; the measured number of
-# distinct values over the 3,544 v1 files is in docs/ANON-OPEN-QUESTIONS.md,
-# question 11).
+# (docs/DATASET-SCHEMA.md gives the list or its source). A free-text name
+# cannot occur in them.
 VOCABULARY_COLUMNS = frozenset({
     "provenance_status", "source", "stratum", "contested", "roster_lang", "language",
     "size_class", "license", "owner_type", "archived", "fork", "history_relation",
@@ -1367,7 +1371,7 @@ def identity_shape_violations(con, relation: str, plan: A.Plan | None = None) ->
     commit_summary is not checked (it is kept as git has it). Returns
     {column: count} for the columns with a violation; counts only.
 
-    Example (build_v0.py, after its write):
+    Example (a caller with its own write, after the write):
         bad = P.identity_shape_violations(con, f"SELECT * FROM read_parquet('{tmp}')")
         if bad:
             raise P.WriteError(f"pseudonym shape violated in {sorted(bad)}")
@@ -1661,7 +1665,8 @@ def bench(rows: int, threads: int, workdir: str | None = None, *,
 
 def _add_domain_opts(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--email-domain", choices=EMAIL_DOMAIN_MODES, default=None,
-                    help="the domain of an address (default first-valid, rule E; "
+                    help="the domain of an address (default first-valid: the first "
+                         "part after an at sign that is a valid domain; "
                          "write: the rule of the registry)")
     ap.add_argument("--psl", default=None,
                     help="the Public Suffix List file (default: the newest in the nix store)")

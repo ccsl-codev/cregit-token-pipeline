@@ -37,10 +37,9 @@ of what to publish is not made here. Non-conforming footer elements (anything
 that is not 'Name <email>') are never passed through as they stand: they are
 mapped whole through the name registry, and counted and sampled in the report.
 
-  Measured on the three files this was developed against, the derived columns
-  footer_personids / footer_person_names carry values of the form
-  'prql-bot at prql-bot@users.noreply.github.com' -- cregit's own personid
-  convention, a real e-mail inside a name-shaped string. The original's
+  In real data the derived columns footer_personids / footer_person_names
+  carry values of the form 'handle at handle@users.noreply.github.com' --
+  cregit's own personid convention, a real e-mail inside a name-shaped string. The original's
   registry was built from four scalar columns only, so those values would have
   had no mapping. Element-level mapping of the derived columns is therefore not
   cosmetic; without it the footers leak.
@@ -50,9 +49,9 @@ NEW -- pseudonyms come from a SALTED KEYED HASH, not from a sequence number.
   The original, and this tool up to the commit that added this paragraph, handed
   out ids by sorting the distinct lowercased values of one invocation and
   counting from 1. That is deterministic but NOT stable: an id is an ordinal
-  position, so inserting one value shifts every value after it. Measured over six
-  corpus Parquets, dropping one file from the invocation renumbered 150 of the
-  153 addresses present in both runs -- 98.0%. A second release that adds one
+  position, so inserting one value shifts every value after it. On real files,
+  dropping one file from the invocation renumbered almost every address present
+  in both runs. A second release that adds one
   project therefore renumbers almost every pseudonym and cannot be diffed against
   the first, and a reader cannot follow one contributor across two releases.
 
@@ -64,20 +63,20 @@ NEW -- pseudonyms come from a SALTED KEYED HASH, not from a sequence number.
   * blake2b with a key is a FAST keyed hash, chosen deliberately. A slow
     password KDF (bcrypt, scrypt, argon2, PBKDF2 with a high iteration count)
     exists to burn wall-clock time; that is the opposite of what is wanted for
-    28,339 distinct values inside a release step. The argument for a slow KDF is
+    tens of thousands of distinct values inside a release step. The argument for a slow KDF is
     that it raises the cost of a brute-force guess of the *inputs* by an
     adversary who has ALREADY obtained the salt. That threat is addressed here by
     keeping the salt out of the release and out of the repository, not by making
     the hash slow. See docs/DESIGN.md row 8 if that trade is ever revisited.
-  * PSEUDO_HEX_LEN = 14 hex characters = 56 bits. Collision arithmetic at the
-    measured population of 28,339 distinct addresses over 186 conforming files:
-    n(n-1)/2 = 401,535,291 pairs, over 2^56 = 72,057,594,037,927,936, so the
-    probability that ANY two addresses share a pseudonym is about 5.6e-9 -- one
-    release in 180 million. At ten times the corpus it is still 5.6e-7. 48 bits
-    would give 1.4e-6, or one release in 700,000, which is too coarse for
-    something that hard-fails a release; 64 bits costs two more characters per id
-    and buys nothing usable. The name space is independent and smaller (25,386
-    distinct names, 4.5e-9).
+  * PSEUDO_HEX_LEN = 14 hex characters = 56 bits. Collision arithmetic for an
+    example population of n = 30,000 distinct addresses:
+    n(n-1)/2 = 449,985,000 pairs, over 2^56 = 72,057,594,037,927,936, so the
+    probability that ANY two addresses share a pseudonym is about 6.2e-9 -- one
+    release in 160 million. At ten times that population it is still 6.2e-7.
+    48 bits would give 1.6e-6, or one release in 625,000, which is too coarse
+    for something that hard-fails a release; 64 bits costs two more characters
+    per id and buys nothing usable. The name space is independent and of a
+    similar size, so the same arithmetic applies to it.
   * A collision is NOT tolerated. Two people sharing a pseudonym would merge two
     contributors, drop the distinct-person count and corrupt the dataset's
     headline metric, so build_registry raises CollisionError and the release
@@ -86,8 +85,8 @@ NEW -- pseudonyms come from a SALTED KEYED HASH, not from a sequence number.
   * The salt lives OUTSIDE this repository and is never committed; see load_salt
     for where it is read from. A missing or short salt is a hard error. Nothing
     here ever generates one: a freshly generated salt per run would renumber
-    every pseudonym on every run, which is the 98.0% defect made continuous and
-    silent.
+    every pseudonym on every run, which is the renumbering defect made
+    continuous and silent.
   * The real -> pseudonym map is held in memory for the length of one run and is
     never written anywhere. It is NOT published, and neither is the salt, so the
     release is not reversible from public inputs -- which the sequential scheme
@@ -96,11 +95,10 @@ NEW -- pseudonyms come from a SALTED KEYED HASH, not from a sequence number.
 commit_summary: PRESERVED with an e-mail scrub, reversing the original's
 unconditional NULL. The original's reason was that commit_summary carries
 footer-style 'Name <email>' identity text. In this schema the trailers are 15
-separate columns and commit_summary holds the subject line only. Measured over
-1,393 distinct subjects in the three development files: 0 contain an e-mail
-shape, 0 contain an angle-bracketed address and 0 contain any identity name of
-five characters or more. Publishing it costs nothing and a subject line is
-useful. The check is not assumed: any residue makes the run FAIL, and
+separate columns and commit_summary holds the subject line only. On the files
+this tool was developed against, no distinct subject contained an e-mail shape,
+an angle-bracketed address or an identity name of five characters or more.
+Publishing it costs nothing and a subject line is useful. The check is not assumed: any residue makes the run FAIL, and
 --null-commit-summary restores the original behavior.
 
 RESIDUAL RISK, to be disclosed in any paper using this output:
@@ -184,12 +182,12 @@ PROVENANCE_COLUMNS: tuple[str, ...] = (
 # Firm attribution, resolved from person_domain. Public company data.
 FIRM_COLUMNS: tuple[str, ...] = ("firm_raw", "firm", "firm_source")
 
-# ctp schema 2 (S8 of the dataset study, the user, 2026-10-19). Dataset v0 replaces the 3 firm
-# columns of the old gitdm map with 4 organization columns: ids of the organization reference
-# tables and the two enterprise columns. They are organization data, not person data, so they
-# pass unchanged. In a schema 2 input the 3 firm columns are dropped: they must not reach
-# v1-public. An input with no organization column is schema 1 (the 70-column contract) and keeps
-# the old rules; since 2026-10-19 v1-public is made from schema 2 input only.
+# ctp schema 2 replaces the 3 firm columns of the old gitdm map with 4 organization columns:
+# ids of the organization reference tables and the two enterprise columns. They are
+# organization data, not person data, so they pass unchanged. In a schema 2 input the 3 firm
+# columns are dropped: they hold the superseded firm map and must not reach the published
+# output. An input with no organization column is schema 1 (the 70-column contract) and keeps
+# the old rules.
 ORGANIZATION_COLUMNS: tuple[str, ...] = (
     "firm_based_on_namespace", "firm_based_on_domain",
     "project_enterprise_driven", "project_enterprise_basis",
@@ -340,7 +338,7 @@ def classify(columns: list[str], drop_footers: bool = False) -> Plan:
 
     for c in columns:
         if schema2 and c in FIRM_COLUMNS:
-            dropped.append(c)          # the old firm map leaves v1-public (schema 2)
+            dropped.append(c)          # the old firm map leaves the output (schema 2)
         elif schema2 and c in ORGANIZATION_COLUMNS:
             passthrough.append(c)      # organization data, not person data
         elif c in PASSTHROUGH_COLUMNS:
@@ -442,7 +440,7 @@ DEFAULT_SALT_FILE = "~/.config/cregit-token-pipeline/anon-salt"
 MIN_SALT_BYTES = 32
 
 # 14 lowercase hex characters = 56 bits. See the module docstring for the
-# collision arithmetic at 28,339 distinct addresses (p ~= 5.6e-9).
+# collision arithmetic at 30,000 distinct addresses (p ~= 6.2e-9).
 PSEUDO_HEX_LEN = 14
 
 
@@ -457,7 +455,7 @@ class CollisionError(Exception):
 def load_salt(path: str | None = None, env=None) -> bytes:
     """The private salt, or SaltError. Never generates, never defaults.
 
-    A generated salt would be the 98.0% renumbering defect made continuous and
+    A generated salt would be the renumbering defect made continuous and
     silent: every run would produce a fresh mapping, and nothing in the output
     would say so. So the only outcomes here are "the operator's salt" and "stop".
     """
@@ -554,8 +552,8 @@ def pseudo_token(key: bytes, space: str, value: str) -> str:
     """The pseudonym id for one value: keyed, fast, and set-independent.
 
     blake2b with a key is a FAST keyed hash (roughly memcpy speed on this data);
-    the release step runs it once per distinct value, 28,339 times for the
-    corpus, so it does not show up in wall-clock time at all. A slow password KDF
+    the release step runs it once per distinct value, so it does not show up
+    in wall-clock time at all. A slow password KDF
     would, on purpose, and that is not the threat being defended -- see the module
     docstring.
 
@@ -666,8 +664,8 @@ def build_registry(email_values: set[str], name_values: set[str],
     over the same inputs produce byte-identical output AND a value carries the
     same pseudonym in a later release that adds or drops projects. The previous
     scheme numbered the sorted distinct values from 1, which gave the first
-    property and not the second: measured, adding one file renumbered 98.0% of
-    the addresses present in both runs.
+    property and not the second: adding one file renumbered almost all of the
+    addresses present in both runs.
 
     `salt` is required and has no default. A default would be a published salt,
     and a generated one would renumber everybody on every run.
@@ -718,8 +716,8 @@ def _assign(key: bytes, space: str, values: set[str]) -> dict[str, str]:
     merge two contributors into one pseudonym: two distinct addresses at one
     domain would render identically, count(distinct person_email) would drop, and
     the dataset's headline metric -- a count of distinct people -- would be wrong
-    in a way no downstream reader could detect. At 56 bits over 28,339 addresses
-    the chance is about 5.6e-9, so this is a guard against the improbable rather
+    in a way no downstream reader could detect. At 56 bits over 30,000 addresses
+    the chance is about 6.2e-9, so this is a guard against the improbable rather
     than the expected, and the right response is to stop the release, not to
     disambiguate behind the reader's back.
 
@@ -746,7 +744,7 @@ def _assign(key: bytes, space: str, values: set[str]) -> dict[str, str]:
 
 def render_footer_element(reg: Registry, name: str | None,
                           email: str | None) -> str:
-    """'Author 0007 <author_0003@cosmonic.com>', preserving the domain.
+    """'Author 0007 <author_0003@firm.example>', preserving the domain.
 
     Keeping the trailer shape means a consumer can still parse the column, and
     keeping the domain means a Signed-off-by chain still carries firm signal --

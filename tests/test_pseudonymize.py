@@ -37,7 +37,8 @@ PEOPLE = 200            # local parts p0 .. p199; p100 .. p199 are probes (4 cha
 
 
 # A small Public Suffix List. 'example' is a top-level label here, so that the
-# synthetic domains (corp1.example) are valid domains under rule E.
+# synthetic domains (corp1.example) are valid domains under the first-valid
+# rule.
 TEST_PSL = """// test list
 // ===BEGIN ICANN DOMAINS===
 com
@@ -222,7 +223,7 @@ def test_scalar_macros_keep_null_and_empty_and_the_domain():
                       "anon_name('P5 Person'), anon_personid('P5 Person'), anon_email('nobody')",
                       [addr]).fetchone()
     tok = P.token_py(keys, "email", addr.lower())
-    assert got[0] == f"author_{tok}{AT}corp5.example"     # rule E: lower case
+    assert got[0] == f"author_{tok}{AT}corp5.example"     # first-valid: lower case
     assert got[1] == "" and got[2] is None
     assert got[3] == "Author " + P.token_py(keys, "name", "p5 person")
     assert got[4] == "author " + P.token_py(keys, "name", "p5 person")
@@ -500,7 +501,7 @@ def test_a_schema_1_file_is_not_a_release_file(tmp_path):
 
 @requires_duckdb
 def test_the_fused_write_takes_the_organization_select(tmp_path):
-    """A schema 1 file plus an organization SELECT (as build_v0.py makes it)
+    """A schema 1 file plus an organization SELECT (as a caller makes it)
     gives a schema 2 file in one COPY."""
     src = _make(tmp_path, "raw.parquet", schema2=False)
     reg = str(tmp_path / "r.parquet")
@@ -552,8 +553,8 @@ def test_parallel_jobs_give_the_same_bytes(registry):
 
 @requires_duckdb
 def test_verify_anon_accepts_the_output_of_each_summary_mode(registry, capsys):
-    """verify_anon.py takes commit_summary as a content column since the user
-    decided to keep the commit message (2026-10-25): an address in it is a
+    """verify_anon.py takes commit_summary as a content column, because the
+    default keeps the commit message as git has it: an address in it is a
     note. Each mode, also the old scrub, passes."""
     import verify_anon
     tmp, paths, reg = registry
@@ -874,10 +875,10 @@ def test_the_source_schema_can_be_given(registry):
 
 
 # --------------------------------------------------------------------------
-# The user's decisions of 2026-10-24
+# The defaults
 # --------------------------------------------------------------------------
 
-def test_the_defaults_are_the_decisions_of_2026_10_25():
+def test_the_defaults_keep_the_summary_and_use_first_valid_domains():
     import inspect
     assert P.DEFAULT_SUMMARY_MODE == "keep"
     assert P.DEFAULT_DOMAIN_AT == "first-valid"
@@ -891,9 +892,9 @@ def test_the_defaults_are_the_decisions_of_2026_10_25():
 
 
 @requires_duckdb
-def test_the_cli_defaults_are_the_decisions(files, capsys):
-    """A default run keeps the commit message, uses rule E, and passes
-    verify_anon.py."""
+def test_the_cli_defaults_are_the_documented_defaults(files, capsys):
+    """A default run keeps the commit message, uses first-valid domains, and
+    passes verify_anon.py."""
     import verify_anon
     tmp, paths = files
     salt = _salt_file(tmp)
@@ -917,7 +918,7 @@ def test_the_cli_defaults_are_the_decisions(files, capsys):
 
 
 @requires_duckdb
-def test_a_person_domain_with_two_at_signs_gets_the_rule_e_domain(tmp_path):
+def test_a_person_domain_with_two_at_signs_gets_the_first_valid_domain(tmp_path):
     src = _make(tmp_path, "two.parquet", replace={
         "person_domain": f"CASE WHEN token_index = 2 THEN ' A{AT}B{AT}Corp1.Example ' "
                          f"WHEN token_index = 3 THEN 'c{AT}' ELSE person_domain END"})
@@ -935,7 +936,7 @@ def test_a_person_domain_with_two_at_signs_gets_the_rule_e_domain(tmp_path):
 
 @requires_duckdb
 def test_a_summary_with_an_address_and_a_known_name_is_kept(tmp_path):
-    """Default mode keep (the user, 2026-10-25): the commit message is
+    """Default mode keep: the commit message is
     published as git has it. The scan gives its findings as information, and
     the gate does not fail the file. The trailers still get pseudonyms."""
     addr = "p150" + AT + "corp0.example"
@@ -1015,8 +1016,9 @@ def test_a_name_inside_a_longer_word_is_not_a_hit(tmp_path):
 
 @requires_duckdb
 def test_no_name_probes_in_vocabulary_numeric_and_domain_columns(tmp_path):
-    """The main session, 2026-10-26: a registry name in a closed vocabulary,
-    a numeric column or person_domain is not a leak. The address probes stay
+    """A registry name in a closed vocabulary, a numeric column or
+    person_domain is not a leak. These columns cannot hold a free-text name.
+    The address probes stay
     on these columns."""
     name = "'kept by P150 Person'"
     src = _make(tmp_path, "v.parquet", replace={
@@ -1069,8 +1071,8 @@ def test_organization_spans_and_pseudonym_mask():
 
 @requires_duckdb
 def test_a_registry_name_author_does_not_make_pseudonyms_leaks(tmp_path):
-    """The defect of 8223fae: the registry holds the name 'author' (as dataset
-    v1 does), and every pseudonym 'Author <token>' was a leak."""
+    """A regression guard: a registry can hold the name 'author' (real data
+    does), and then every pseudonym 'Author <token>' was a leak."""
     src = _make(tmp_path, "a.parquet", replace={
         "author_name": "CASE WHEN token_index = 1 THEN 'Author' ELSE author_name END"})
     reg = str(tmp_path / "r.parquet")
@@ -1086,7 +1088,7 @@ def test_a_registry_name_author_does_not_make_pseudonyms_leaks(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Rule E (the user, 2026-10-25)
+# The first-valid domain rule
 # --------------------------------------------------------------------------
 
 def _rule_e(con, value: str | None, skip_first: bool = True) -> str | None:
@@ -1095,7 +1097,7 @@ def _rule_e(con, value: str | None, skip_first: bool = True) -> str | None:
 
 
 @requires_duckdb
-def test_rule_e_takes_the_first_valid_part_after_an_at_sign():
+def test_first_valid_takes_the_first_valid_part_after_an_at_sign():
     con = _con()
     cases = {
         # git-svn: user, at sign, domain, at sign, uuid -> the domain
@@ -1127,7 +1129,7 @@ def test_rule_e_takes_the_first_valid_part_after_an_at_sign():
 
 
 @requires_duckdb
-def test_rule_e_in_the_email_columns_and_the_trailers():
+def test_first_valid_in_the_email_columns_and_the_trailers():
     keys = P.derive_keys(SALT)
     con = _con(keys)
     raw = f"Dev{AT}Corp1.Example{AT}uuid-1"
@@ -1245,8 +1247,8 @@ def test_the_cli_takes_the_organizations_table(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------
-# Read fallbacks for the files of release 1 (British spelling, renamed on
-# 2026-10-28): a read accepts the old names, a write writes only the new ones.
+# Read fallbacks for files with the earlier British spelling: a read accepts
+# the old names, a write writes only the new ones.
 # --------------------------------------------------------------------------
 
 def test_old_footer_keys_are_read_under_the_new_names():
@@ -1287,7 +1289,7 @@ def test_the_write_gives_old_footer_keys_the_new_names(tmp_path):
 
 
 @requires_duckdb
-def test_an_organizations_table_of_release_1_is_read(tmp_path):
+def test_an_organizations_table_with_the_old_spelling_is_read(tmp_path):
     """A table with the old column organisation_id gives the same registry
     rows as a table with organization_id."""
     src = _make(tmp_path, "g.parquet")
@@ -1313,7 +1315,7 @@ def test_an_organizations_table_of_release_1_is_read(tmp_path):
 
 
 @requires_duckdb
-def test_a_registry_of_release_1_masks_its_organization_names(tmp_path):
+def test_an_old_spelling_registry_masks_its_organization_names(tmp_path):
     """The leak scan reads the old space label 'organisation' too."""
     reg = str(tmp_path / "old-registry.parquet")
     con = P.connect("1GB", 1)
@@ -1344,7 +1346,7 @@ def test_the_cli_takes_the_old_option_spelling(tmp_path, monkeypatch):
         assert seen["organizations"] == ["old.parquet", "new.parquet"]
 
 
-def test_a_release_1_root_marks_a_published_place(tmp_path):
+def test_an_old_spelling_release_root_marks_a_published_place(tmp_path):
     release = tmp_path / "release-1"
     (release / "parquet").mkdir(parents=True)
     (release / "organisations").mkdir()
@@ -1364,7 +1366,7 @@ def test_synthetic_summaries_can_name_people():
 
 
 # --------------------------------------------------------------------------
-# The API for the final-write kit (build_v0.py --pseudonymize)
+# The API for a caller that writes its own files
 # --------------------------------------------------------------------------
 
 def test_the_module_runs_and_imports_under_python_isolated(tmp_path):
@@ -1412,12 +1414,12 @@ def test_identity_shape_violations(registry):
 
 
 # --------------------------------------------------------------------------
-# The mask texts are not text (the defect of 2026-10-27)
+# The mask texts are not text
 # --------------------------------------------------------------------------
 
 def test_a_name_equal_to_a_word_of_a_mask_text_is_no_hit():
-    """The registry of both commit layers holds the names 'domain' and
-    'pseudonym'. A published domain with the word 'domain' became
+    """A registry can hold the names 'domain' and 'pseudonym'. A published
+    domain with the word 'domain' became
     '<PRESERVED-DOMAIN>', and the probe found 'domain' in the mask text."""
     tok = "0123456789abcd"
     for name, value, doms in (
