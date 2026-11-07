@@ -332,7 +332,8 @@ def test_main_writes_and_refuses_bad_option_sets(tmp_path, links, anon, capsys):
             "--domain-links", links[0], "--project-links", links[1],
             "--organizations-version", "v9"]
     assert S.main(base) == 0
-    assert json.loads(capsys.readouterr().out.strip())["rows"] == 30
+    printed = json.loads(capsys.readouterr().out.strip())
+    assert printed["rows"] == 30 and printed["input_columns"] == 57
     assert S.main(base + ["--pseudonymize"]) == S.EXIT_USAGE
     assert S.main(base + ["--salt-file", anon["salt_file"]]) == S.EXIT_USAGE
     assert S.main(base + ["--pseudonymize", "--salt-file", anon["salt_file"],

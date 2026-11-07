@@ -319,6 +319,7 @@ def write(src: str, dst: str, *, project: str, domain_links: str, project_links:
     con = _connect(memory_limit, threads, spill)
     result = {"project": project, "pseudonymized": bool(pseudonymize)}
     try:
+        result["input_columns"] = len(file_columns(con, src))
         mapping = links_mapping(con, domain_links, project_links)
         kv = {vs.SCHEMA_KEY: schema, "organizations_version": organizations_version,
               "organizations_mapping_sha256": mapping}
