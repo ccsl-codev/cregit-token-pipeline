@@ -49,7 +49,13 @@ Usage:
   parquet_rename.py SRC DST --rename OLD=NEW [--rename OLD=NEW ...]
   parquet_rename.py SRC DST --map mapping.json
   parquet_rename.py SRC DST --drop NAME [--drop NAME ...] [--rename OLD=NEW ...]
+  parquet_rename.py SRC DST --set-kv KEY=VALUE [...]   with or without the above
   parquet_rename.py SRC DST --tail-only ...   write only the new footer tail
+
+--set-kv KEY=VALUE changes the value of an existing file key-value in the
+footer (alone, with renames or with drops, in the same pass).  It refuses an
+empty key, a key given twice, ARROW:schema (this tool manages it), a key the
+footer does not have and a key the footer has more than once.
 
 With no mapping the output is byte-identical to the input.  One JSON line on
 stdout describes the result.  pyarrow is needed only when the file has an
@@ -542,8 +548,48 @@ def apply_renames(meta: list, ctx: dict, mapping: dict[str, str], drops=()) -> i
     return leaves
 
 
+def apply_kv(meta: list, kv_set: dict[str, str]) -> dict[str, list]:
+    """Set the values of existing file key-values in place; returns {key: [old, new]}."""
+    done: dict[str, list] = {}
+    items = kv_items(meta, FMD_KV)
+    for key, value in kv_set.items():
+        k = key.encode("utf-8")
+        if k == ARROW_SCHEMA_KEY:
+            raise RenameError("--set-kv cannot change ARROW:schema (this tool manages it)")
+        hits = [kv for kv in items if get(kv, KV_KEY) == k]
+        if not hits:
+            raise RenameError(f"--set-kv {key!r}: the footer has no such key-value; refused")
+        if len(hits) > 1:
+            raise RenameError(f"--set-kv {key!r}: the footer has {len(hits)} such key-values; refused")
+        kv = hits[0]
+        old = get(kv, KV_VALUE)
+        if old is None:
+            raise RenameError(f"--set-kv {key!r}: the key-value has no value field; refused")
+        set_value(kv, KV_VALUE, value.encode("utf-8"))
+        done[key] = [old.decode("utf-8", "replace"), value]
+    return done
+
+
+def apply_kv_arrow(ctx: dict, mapping: dict[str, str], drops, kv_set: dict[str, str]) -> list[str]:
+    """Set the kv_set keys that ARROW:schema also holds in its schema metadata, so the
+    Arrow view of the file (schema_arrow.metadata) shows the new values too."""
+    sch = ctx["arrow_schema"]
+    if ctx["arrow_kv"] is None or not kv_set or sch is None:
+        return []
+    md = dict(sch.metadata or {})
+    hit = [k for k in kv_set if k.encode("utf-8") in md]
+    if not hit:
+        return []
+    for k in hit:
+        md[k.encode("utf-8")] = kv_set[k].encode("utf-8")
+    new = renamed_arrow_schema(sch, mapping, drops).with_metadata(md)
+    set_value(ctx["arrow_kv"], KV_VALUE, encode_arrow_schema(new))
+    return hit
+
+
 def rename_footer(footer: bytes, mapping: dict[str, str],
-                  allow_mentions: bool = False) -> tuple[bytes, dict]:
+                  allow_mentions: bool = False,
+                  kv_set: dict[str, str] | None = None) -> tuple[bytes, dict]:
     """Return the new footer bytes and a short report.
 
     With an empty mapping the result is the input, after both round trips.
@@ -551,9 +597,15 @@ def rename_footer(footer: bytes, mapping: dict[str, str],
     meta = parse_checked(footer)
     ctx = prepare(meta, mapping, (), allow_mentions)
     leaves = apply_renames(meta, ctx, mapping)
+    kv_done = apply_kv(meta, kv_set or {})
+    kv_arrow = apply_kv_arrow(ctx, mapping, (), kv_set or {})
     new = encode(meta)
-    return new, dict(renamed=dict(mapping), column_chunks_renamed=leaves,
-                     arrow_schema=ctx["arrow_kv"] is not None, mentions_kept=ctx["found"])
+    rep = dict(renamed=dict(mapping), column_chunks_renamed=leaves,
+               arrow_schema=ctx["arrow_kv"] is not None, mentions_kept=ctx["found"])
+    if kv_set:
+        rep["kv_set"] = kv_done
+        rep["kv_set_in_arrow_schema"] = kv_arrow
+    return new, rep
 
 
 # ---------------------------------------------------------- column drops --
@@ -770,7 +822,7 @@ def drop_footer(meta: list, ctx: dict, mapping, drops, regions: list[Region],
 
 def rewrite_with_drops(src: str, dst: str, mapping: dict[str, str], drops: list[str], *,
                        copy: str = "auto", allow_mentions: bool = False,
-                       fsync: bool = True) -> dict:
+                       fsync: bool = True, kv_set: dict[str, str] | None = None) -> dict:
     """Write src without the dropped columns, and with the renames, to dst.
 
     The kept column chunks, Bloom filters and column indexes are copied byte
@@ -793,6 +845,8 @@ def rewrite_with_drops(src: str, dst: str, mapping: dict[str, str], drops: list[
                   for reg in kept if reg.kind == "offset_index"}
         data_end = layout(kept, chunks, oi_raw)
         renamed = drop_footer(meta, ctx, mapping, drops, regions, nleaves, dropped, new_index)
+        kv_done = apply_kv(meta, kv_set or {})
+        kv_arrow = apply_kv_arrow(ctx, mapping, drops, kv_set or {})
         new = encode(meta)
         tail = new + struct.pack("<I", len(new)) + MAGIC
 
@@ -828,7 +882,8 @@ def rewrite_with_drops(src: str, dst: str, mapping: dict[str, str], drops: list[
                 src=src, dst=dst, in_size=size, in_footer_len=len(footer),
                 out_footer_len=len(new), out_size=data_end + len(tail),
                 columns_kept=len(ctx["spans"]) - len(drops), leaves_dropped=len(dropped),
-                regions_kept=kinds, bytes_copied=copied, copy=method)
+                regions_kept=kinds, bytes_copied=copied, copy=method,
+                **({"kv_set": kv_done, "kv_set_in_arrow_schema": kv_arrow} if kv_set else {}))
 
 
 # ------------------------------------------------------------------ files --
@@ -888,7 +943,7 @@ def copy_range(src_fd: int, dst_fd: int, src_off: int, dst_off: int, length: int
 
 def rename_file(src: str, dst: str, mapping: dict[str, str], *, drops=(),
                 copy: str = "auto", allow_mentions: bool = False, tail_only: bool = False,
-                fsync: bool = True) -> dict:
+                fsync: bool = True, kv_set: dict[str, str] | None = None) -> dict:
     """Write the renamed file (or only its new tail) to dst.
 
     With drops, the kept column chunks are copied to new offsets instead
@@ -900,9 +955,9 @@ def rename_file(src: str, dst: str, mapping: dict[str, str], *, drops=(),
         if tail_only:
             raise RenameError("--tail-only cannot drop columns: the data part changes")
         return rewrite_with_drops(src, dst, mapping, list(drops), copy=copy,
-                                  allow_mentions=allow_mentions, fsync=fsync)
+                                  allow_mentions=allow_mentions, fsync=fsync, kv_set=kv_set)
     size, start, footer = read_footer(src)
-    new, report = rename_footer(footer, mapping, allow_mentions)
+    new, report = rename_footer(footer, mapping, allow_mentions, kv_set)
     tail = new + struct.pack("<I", len(new)) + MAGIC
     tmp = dst + ".tmp"
     dfd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -951,12 +1006,31 @@ def parse_mapping(pairs: list[str], map_file: str | None) -> dict[str, str]:
     return mapping
 
 
+def parse_kv(pairs: list[str]) -> dict[str, str]:
+    """--set-kv KEY=VALUE items to {key: value}; refuses an empty key, a repeat and ARROW:schema."""
+    out: dict[str, str] = {}
+    for p in pairs:
+        key, sep, value = p.partition("=")
+        if not sep:
+            raise RenameError(f"--set-kv {p!r}: expected KEY=VALUE")
+        if not key:
+            raise RenameError(f"--set-kv {p!r}: empty key")
+        if key.encode("utf-8") == ARROW_SCHEMA_KEY:
+            raise RenameError("--set-kv cannot change ARROW:schema (this tool manages it)")
+        if key in out:
+            raise RenameError(f"--set-kv {key!r} is given twice")
+        out[key] = value
+    return out
+
+
 def mapping_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--rename", action="append", default=[], metavar="OLD=NEW",
                     help="rename top-level column OLD to NEW (repeatable)")
     ap.add_argument("--map", metavar="JSON", help="a JSON object of old -> new names")
     ap.add_argument("--drop", action="append", default=[], metavar="NAME",
                     help="drop top-level column NAME (repeatable)")
+    ap.add_argument("--set-kv", action="append", default=[], metavar="KEY=VALUE",
+                    help="set the value of the existing file key-value KEY (repeatable)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -975,9 +1049,10 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     try:
         mapping = parse_mapping(a.rename, a.map)
+        kv_set = parse_kv(a.set_kv)
         rep = rename_file(a.src, a.dst, mapping, drops=a.drop, copy=a.copy,
                           allow_mentions=a.allow_mentions, tail_only=a.tail_only,
-                          fsync=not a.no_fsync)
+                          fsync=not a.no_fsync, kv_set=kv_set)
     except RenameError as e:
         print(json.dumps(dict(src=a.src, dst=a.dst, ok=False, error=str(e))))
         return 2

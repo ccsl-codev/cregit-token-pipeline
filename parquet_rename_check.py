@@ -45,6 +45,10 @@ Usage:
   parquet_rename_check.py --rename OLD=NEW [...] OLD.parquet NEW.parquet [...]
   parquet_rename_check.py --map mapping.json --pairs pairs.tsv
   parquet_rename_check.py --drop NAME [...] [--rename OLD=NEW ...] OLD NEW
+  parquet_rename_check.py ... --set-kv KEY=VALUE [...] OLD NEW
+
+With --set-kv, the expected footer has those values in place of the old ones;
+every other key-value must be unchanged (footer and pyarrow schema metadata).
 """
 
 from __future__ import annotations
@@ -119,8 +123,17 @@ def show(v):
     return None if v is None else str(v)[:60]
 
 
-def footer_problems(old_meta: list, new_meta: list, mapping: dict[str, str]) -> list[str]:
+def expected_kv(meta: list, kv_set) -> list:
+    """meta with the file key-values of kv_set set (the tool's refusals apply)."""
+    if kv_set:
+        pr.apply_kv(meta, kv_set)
+    return meta
+
+
+def footer_problems(old_meta: list, new_meta: list, mapping: dict[str, str],
+                    kv_set=None) -> list[str]:
     enc = {o.encode("utf-8"): n.encode("utf-8") for o, n in mapping.items()}
+    old_meta = expected_kv(pr.parse_footer(pr.encode(old_meta)), kv_set)
     tops = {i: n for i, n in pr.top_level(pr.get(old_meta, pr.FMD_SCHEMA).items)}
     kvs = pr.kv_items(old_meta, pr.FMD_KV)
     arrow_kv = {i for i, kv in enumerate(kvs) if pr.get(kv, pr.KV_KEY) == pr.ARROW_SCHEMA_KEY}
@@ -150,12 +163,23 @@ def footer_problems(old_meta: list, new_meta: list, mapping: dict[str, str]) -> 
             problems.append("ARROW:schema key-value is missing in the new footer")
             continue
         problems += arrow_schema_problems(pr.get(kvs[i], pr.KV_VALUE),
-                                          pr.get(new_kvs[i], pr.KV_VALUE), mapping)
+                                          pr.get(new_kvs[i], pr.KV_VALUE), mapping, (), kv_set)
     return problems
 
 
+def with_kv(schema, kv_set):
+    """schema with the kv_set values in place of the metadata keys it already has."""
+    if not kv_set or not schema.metadata:
+        return schema
+    md = dict(schema.metadata)
+    for k, v in kv_set.items():
+        if k.encode("utf-8") in md:
+            md[k.encode("utf-8")] = v.encode("utf-8")
+    return schema.with_metadata(md)
+
+
 def arrow_schema_problems(old_value: bytes, new_value: bytes, mapping,
-                          drops=()) -> list[str]:
+                          drops=(), kv_set=None) -> list[str]:
     import pyarrow as pa
 
     try:
@@ -163,7 +187,7 @@ def arrow_schema_problems(old_value: bytes, new_value: bytes, mapping,
         new = pa.ipc.read_schema(pa.py_buffer(base64.b64decode(new_value, validate=True)))
     except Exception as e:  # noqa: BLE001 - any decode failure is a finding
         return [f"ARROW:schema does not decode: {e}"]
-    want = pr.renamed_arrow_schema(old, mapping, drops)
+    want = with_kv(pr.renamed_arrow_schema(old, mapping, drops), kv_set)
     if not new.equals(want, check_metadata=True):
         return ["ARROW:schema is not the old schema with the names mapped"]
     return []
@@ -216,7 +240,7 @@ def column_hashes(pf, names: list[str] | None = None) -> dict[str, str]:
     return {n: h.hexdigest() for n, h in zip(names, hashers)}
 
 
-def arrow_problems(old: str, new: str, mapping, rep: dict, drops=()) -> list[str]:
+def arrow_problems(old: str, new: str, mapping, rep: dict, drops=(), kv_set=None) -> list[str]:
     import pyarrow.parquet as pq
 
     po, pn = pq.ParquetFile(old), pq.ParquetFile(new)
@@ -232,6 +256,7 @@ def arrow_problems(old: str, new: str, mapping, rep: dict, drops=()) -> list[str
         if mo.row_group(i).num_rows != mn.row_group(i).num_rows:
             problems.append(f"row group {i} rows differ")
     want = pr.renamed_arrow_schema(po.schema_arrow, mapping, drops)
+    want = with_kv(want, kv_set)  # schema_arrow carries the key-values as its metadata
     if not pn.schema_arrow.equals(want, check_metadata=True):
         problems.append("pyarrow schema is not the old schema with the names mapped")
         return problems
@@ -417,9 +442,10 @@ def relative(old_s, new_s, fid, o0, n0) -> bool:
 
 
 def drop_footer_problems(old: str, new: str, old_footer: bytes, new_meta: list,
-                         mapping, drops, rep: dict) -> list[str]:
+                         mapping, drops, rep: dict, kv_set=None) -> list[str]:
     problems = []
     want, dropped = expected_footer(old_footer, mapping, drops)
+    expected_kv(want, kv_set)
     got = pr.parse_footer(pr.encode(new_meta))
     kvs = pr.kv_items(want, pr.FMD_KV)
     arrow_kv = {i for i, kv in enumerate(kvs) if pr.get(kv, pr.KV_KEY) == pr.ARROW_SCHEMA_KEY}
@@ -433,7 +459,7 @@ def drop_footer_problems(old: str, new: str, old_footer: bytes, new_meta: list,
     for i in arrow_kv:
         if i < len(new_kvs) and pr.get(new_kvs[i], pr.KV_KEY) == pr.ARROW_SCHEMA_KEY:
             problems += arrow_schema_problems(pr.get(kvs[i], pr.KV_VALUE),
-                                              pr.get(new_kvs[i], pr.KV_VALUE), mapping, drops)
+                                              pr.get(new_kvs[i], pr.KV_VALUE), mapping, drops, kv_set)
     if problems:
         return problems
 
@@ -537,10 +563,13 @@ def page_index_problems(path: str, meta: list, rep: dict) -> list[str]:
 
 
 # ------------------------------------------------------------------ check --
-def check_pair(old: str, new: str, mapping: dict[str, str], drops=()) -> dict:
+def check_pair(old: str, new: str, mapping: dict[str, str], drops=(), kv_set=None) -> dict:
     t0 = time.monotonic()
     drops = list(drops)
+    kv_set = dict(kv_set or {})
     rep: dict = dict(old=old, new=new, renamed=dict(mapping), dropped=drops)
+    if kv_set:
+        rep["kv_set"] = kv_set
     problems: list[str] = []
 
     def stage(name, fn, *args):
@@ -560,7 +589,7 @@ def check_pair(old: str, new: str, mapping: dict[str, str], drops=()) -> dict:
 
     rep["old_size"], rep["new_size"] = os.path.getsize(old), nsize
     if drops:
-        stage("footer", drop_footer_problems, old, new, ofooter, new_meta, mapping, drops, rep)
+        stage("footer", drop_footer_problems, old, new, ofooter, new_meta, mapping, drops, rep, kv_set)
     elif nstart != ostart:
         problems.append(f"footer start {ostart} -> {nstart}")
     else:
@@ -575,9 +604,9 @@ def check_pair(old: str, new: str, mapping: dict[str, str], drops=()) -> dict:
         if fh.read(8) != struct.pack("<I", len(nfooter)) + pr.MAGIC:
             problems.append("new tail is not footer length + PAR1")  # pragma: no cover
     if not drops:
-        stage("footer", footer_problems, old_meta, new_meta, mapping)
+        stage("footer", footer_problems, old_meta, new_meta, mapping, kv_set)
     stage("page index", page_index_problems, new, new_meta, rep)
-    stage("arrow", arrow_problems, old, new, mapping, rep, drops)
+    stage("arrow", arrow_problems, old, new, mapping, rep, drops, kv_set)
     stage("duckdb", duckdb_problems, old, new, mapping, rep, drops)
     stage("bloom", bloom_problems, old, new, old_meta, mapping, rep, drops)
     rep["ok"] = not problems
@@ -608,6 +637,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     try:
         mapping = pr.parse_mapping(a.rename, a.map)
+        kv_set = pr.parse_kv(a.set_kv)
         if len(a.files) % 2:
             raise pr.RenameError("files must come in OLD NEW pairs")
         pairs = list(zip(a.files[::2], a.files[1::2]))
@@ -620,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     bad = 0
     for old, new in pairs:
-        rep = check_pair(old, new, mapping, a.drop)
+        rep = check_pair(old, new, mapping, a.drop, kv_set)
         bad += not rep["ok"]
         print(json.dumps(rep), flush=True)
     return 1 if bad else 0
