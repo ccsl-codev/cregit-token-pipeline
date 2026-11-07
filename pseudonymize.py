@@ -1227,7 +1227,8 @@ INFORMATION_COLUMNS = frozenset(A.CONTENT_COLUMNS | {"commit_summary"})
 # (docs/DATASET-SCHEMA.md gives the list or its source). A free-text name
 # cannot occur in them.
 VOCABULARY_COLUMNS = frozenset({
-    "provenance_status", "source", "stratum", "contested", "roster_lang", "language",
+    "provenance_status", "audit_frame_file", "source", "stratum", "contested",
+    "roster_lang", "language",
     "size_class", "license", "owner_type", "archived", "fork", "history_relation",
     "manifest_category", "file_mask", "token_type",
     # schema 2: the organization ids and the basis come from the organizations table

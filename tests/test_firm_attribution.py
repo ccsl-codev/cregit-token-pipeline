@@ -331,7 +331,7 @@ def run_args(**over):
                 shards=0, shard_classes="L", from_step=1, gc=None,
                 blame_jobs=0, memory_limit=None, duckdb_threads=0,
                 project_meta="", mask="", firm_map="", firm_canonical="",
-                allow_empty_provenance=True, reblame=False)
+                allow_empty_provenance=True, reblame=False, schema="1")
     base.update(over)
     return argparse.Namespace(**base)
 

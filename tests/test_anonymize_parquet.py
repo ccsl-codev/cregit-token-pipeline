@@ -677,7 +677,16 @@ def test_the_rule_tables_cover_the_contract_exactly():
     """Drift guard: if validate_schema grows, this fails before a release does."""
     known = (A.PASSTHROUGH_COLUMNS | set(A.SCALAR_TRANSFORMS)
              | set(A.FOOTER_TEXT_COLUMNS) | set(A.FOOTER_DERIVED_COLUMNS))
-    assert known == set(CONTRACT)
+    assert known == set(CONTRACT) | set(A.SCHEMA_3_PROVENANCE_COLUMNS)
+
+
+def test_every_schema_3_column_has_a_rule():
+    """A schema 3 file has the organization columns and audit_frame_file."""
+    cols = [c for c, _ in validate_schema.EXPECTED_COLUMNS_3]
+    plan = A.classify(cols)
+    assert "audit_frame_file" in plan.passthrough
+    assert not plan.dropped
+    assert set(plan.column_order) == set(cols)
 
 
 def test_fifteen_footer_columns():

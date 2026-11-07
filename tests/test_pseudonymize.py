@@ -1044,7 +1044,7 @@ def test_no_name_probes_in_vocabulary_numeric_and_domain_columns(tmp_path):
 
 def test_the_no_name_probe_columns_are_release_columns():
     names = {c for c, _ in P.SCHEMA_2}
-    assert P.NO_NAME_PROBE_COLUMNS <= names
+    assert P.NO_NAME_PROBE_COLUMNS <= names | {c for c, _ in vs.EXPECTED_COLUMNS_3}
     plan = A.classify(sorted(names))
     assert not P.NO_NAME_PROBE_COLUMNS & set(P.identity_columns(plan))
     assert not P.NO_NAME_PROBE_COLUMNS & P.INFORMATION_COLUMNS

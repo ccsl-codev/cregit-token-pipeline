@@ -6,10 +6,13 @@ repositories, by orchestrating the
 provenance, validation and anonymization around it. A manifest of projects goes
 in; one validated Parquet per project comes out.
 
-Each project yields one Parquet file with the same 70 columns and **one row per
-token occurrence per file**, carrying the commit and the person that last touched
-that token, and the person's employer where it can be resolved. A sidecar
-supplies the 29 per-project columns.
+Each project yields one Parquet file with **one row per token occurrence per
+file**, carrying the commit and the person that last touched that token, and the
+organization of the person and of the project where it can be resolved. A run
+writes ctp schema 3 by default: 61 columns, the schema of the "Token on Me"
+release, with no later pass. A sidecar supplies the 19 per-project columns, and
+the run writes the project facts to `project_facts.parquet`. `--schema 1` writes
+the older 70 columns.
 
 Stdlib Python only, except pyarrow for the footer rename tool; DuckDB, srcML,
 ctags, Java and Perl come from the cregit checkout's `devenv shell`. The
@@ -20,7 +23,7 @@ repository puts that tokei on PATH.
 
 | If you want to | Read |
 | --- | --- |
-| understand the dataset, its grain and all 70 columns | **[`docs/DATASET-SCHEMA.md`](docs/DATASET-SCHEMA.md)** |
+| understand the dataset, its grain and its columns (schema 3 in §0) | **[`docs/DATASET-SCHEMA.md`](docs/DATASET-SCHEMA.md)** |
 | know the method limits before you analyze the data | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
 | know why the pipeline is built this way | [`docs/DESIGN.md`](docs/DESIGN.md) |
 
@@ -29,18 +32,26 @@ The authority on the schema is `validate_schema.py`, not any document.
 ## Quickstart
 
 ```sh
-# 1. point pipeline.cfg at a cregit checkout with rustTokenizer, and an output dir
-# 2. write a manifest (TSV: name, url, category, file_mask, size_class).
+# 1. point pipeline.cfg (or the file CTP_CONFIG names) at a cregit checkout
+#    with rustTokenizer and --ctp-schema, and at an output dir
+# 2. write a manifest (TSV: name, url, category, file_mask, size_class, and
+#    an optional sixth field, the commit to pin).
 #    --manifest defaults to manifest.tsv, a 4-project example.
-# 3. write the sidecar: a JSON object keyed by manifest name, with the 29
+# 3. optional: select the rows by language (language_filter.py); kept.tsv
+#    has the pinned commit of each row.
+# 4. write the sidecar: a JSON object keyed by manifest name, with the
 #    fields of validate_schema.META_FIELDS for each project.
-M=my-run.tsv
+./ctp.py select --manifest pinned.tsv --out-dir sel   # the default rule:
+#    the largest programming language by tokei code lines is C, C++, Java or Rust
+M=sel/kept.tsv
 ./ctp.py run --manifest $M --jobs 3 --skip-html --drop-memo \
     --project-meta sidecar.json \
-    --firm-map data/affiliation.merged.csv \
-    --firm-canonical data/firm_canonical.csv
+    --domain-links domain_links.parquet --project-links project_links.parquet \
+    --organizations-version v4.9 \
+    --salt-file /private/salt --registry-dir /private/registry   # pseudonyms
 ./ctp.py status --manifest $M                    # one-screen progress view
-./validate_schema.py <out>/*/*-dataset.parquet   # schema gate over the dataset
+./validate_schema.py <out>/*/*-dataset.parquet   # schema 3 gate (--schema 1 for old files)
+./schema3.py check <out>/*/*-dataset.parquet     # the schema 3 footer key-values too
 ./consolidate.py --manifest $M   # in devenv shell: rebuild ctp.duckdb + tokens view
 ```
 

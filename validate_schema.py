@@ -2,7 +2,11 @@
 """Schema gate: every project parquet must carry the same columns and types.
 
     ./validate_schema.py <dataset.parquet> [<dataset.parquet> ...]
+    ./validate_schema.py --schema 1 <dataset.parquet> ...    # an older schema
     ./validate_schema.py --emit-contract <dataset.parquet>   # print, do not check
+
+The default contract is ctp schema 3 (EXPECTED_COLUMNS_3, 61 columns). Schema 1
+(EXPECTED_COLUMNS, 70 columns) and schema 2 (71 columns) stay available.
 
 Why a separate gate from validate.py: that one asks "did this project produce a
 non-empty parquet". This one asks "do all projects agree". A dataset is unusable
@@ -24,7 +28,8 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-USAGE = "usage: validate_schema.py [--emit-contract] <dataset.parquet> ..."
+USAGE = ("usage: validate_schema.py [--schema 1|2|3] <dataset.parquet> ...\n"
+         "       validate_schema.py --emit-contract <dataset.parquet>")
 EXIT_DRIFT = 1
 EXIT_USAGE = 2
 
@@ -160,6 +165,53 @@ META_FIELDS: tuple[str, ...] = (
     "manifest_category", "file_mask",
 )
 
+# ctp schema 2: the release write removed the 3 firm columns and added the 4
+# organization columns at the end. pseudonymize.SCHEMA_2 is the same list.
+FIRM_COLUMNS: tuple[str, ...] = ("firm_raw", "firm", "firm_source")
+ORGANIZATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("firm_based_on_namespace", "VARCHAR"),
+    ("firm_based_on_domain", "VARCHAR"),
+    ("project_enterprise_driven", "BOOLEAN"),
+    ("project_enterprise_basis", "VARCHAR"),
+)
+EXPECTED_COLUMNS_2: tuple[tuple[str, str], ...] = tuple(
+    (c, t) for c, t in EXPECTED_COLUMNS if c not in FIRM_COLUMNS
+) + ORGANIZATION_COLUMNS
+
+# ctp schema 3, the schema of the "Token on Me" release: schema 2 without 10
+# per-project columns, and provenance_status named audit_frame_file. The 10
+# columns are constant per project, so they are cheap to keep in a side table:
+# `fact` goes to project_facts (schema3.py), and the other 9 stay in the
+# sidecar. The cregit generator writes the 19 kept fields with
+# --ctp-schema 3 (PROJECT_META_COLUMNS_3 there; tests/test_meta_field_drift.py
+# compares the two lists). schema3.py adds the 4 organization columns and the
+# footer key-values below.
+SCHEMA_3_DROPPED: tuple[str, ...] = (
+    "size_kb", "file_mask", "manifest_category", "fact",
+    "history_cluster", "history_shared_with", "history_relation",
+    "history_includes", "history_first", "history_created",
+)
+SCHEMA_3_RENAMED: dict[str, str] = {"provenance_status": "audit_frame_file"}
+META_FIELDS_3: tuple[str, ...] = tuple(
+    SCHEMA_3_RENAMED.get(f, f) for f in META_FIELDS if f not in SCHEMA_3_DROPPED)
+EXPECTED_COLUMNS_3: tuple[tuple[str, str], ...] = tuple(
+    (SCHEMA_3_RENAMED.get(c, c), t) for c, t in EXPECTED_COLUMNS_2
+    if c not in SCHEMA_3_DROPPED)
+
+# The footer key-value that names the schema of a file.
+SCHEMA_KEY = "ctp_schema_version"
+CONTRACTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "1": EXPECTED_COLUMNS, "2": EXPECTED_COLUMNS_2, "3": EXPECTED_COLUMNS_3,
+}
+DEFAULT_SCHEMA = "3"
+
+
+def contract(schema: str) -> tuple[tuple[str, str], ...]:
+    """The (name, type) contract of a ctp schema version."""
+    if schema not in CONTRACTS:
+        raise ValueError(f"unknown ctp schema {schema!r}; use one of {sorted(CONTRACTS)}")
+    return CONTRACTS[schema]
+
 
 @dataclass(frozen=True)
 class Drift:
@@ -226,7 +278,8 @@ def emit_contract(path: str) -> None:
         print(f'    ("{name}", "{typ}"),')
 
 
-def check(paths: list[str]) -> int:
+def check(paths: list[str],
+           expected: tuple[tuple[str, str], ...] = EXPECTED_COLUMNS) -> int:
     """Report every file's drift. Returns the process exit status."""
     worst = 0
     for path in paths:
@@ -237,7 +290,7 @@ def check(paths: list[str]) -> int:
                   file=sys.stderr)
             worst = EXIT_DRIFT
             continue
-        drifts = compare_schema(actual)
+        drifts = compare_schema(actual, expected)
         if drifts:
             worst = EXIT_DRIFT
             print(f"FAIL {path}  ({len(actual)} columns, "
@@ -252,6 +305,12 @@ def check(paths: list[str]) -> int:
 
 def main() -> None:
     args = sys.argv[1:]
+    schema = DEFAULT_SCHEMA
+    if args[:1] == ["--schema"]:
+        if len(args) < 2 or args[1] not in CONTRACTS:
+            print(USAGE, file=sys.stderr)
+            sys.exit(EXIT_USAGE)
+        schema, args = args[1], args[2:]
     if not args:
         print(USAGE, file=sys.stderr)
         sys.exit(EXIT_USAGE)
@@ -261,7 +320,7 @@ def main() -> None:
             sys.exit(EXIT_USAGE)
         emit_contract(args[1])
         return
-    sys.exit(check(args))
+    sys.exit(check(args, contract(schema)))
 
 
 if __name__ == "__main__":

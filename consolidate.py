@@ -20,7 +20,7 @@ manifests is indexed once, from the first manifest that names it.
 SCHEMA GATE. read_parquet([...]) binds one schema for the whole list, so a
 single file at the old 23 or 38 columns aborts the tokens view for every
 project. The view is therefore built only from parquets whose schema matches the
-current dataset contract, and the contract is validate_schema.EXPECTED_COLUMNS
+current dataset contract, validate_schema.contract(DEFAULT_SCHEMA) (schema 3),
 rather than a column count repeated here. Every file left out is named and
 counted in the printed summary: a silent exclusion is worse than the crash it
 replaces, because the row count then looks plausible.
@@ -68,11 +68,15 @@ from pathlib import Path
 
 import duckdb
 
-from validate_schema import EXPECTED_COLUMNS, compare_schema, read_schema
+import retain  # the same pipeline.cfg or CTP_CONFIG as ctp.py
+from validate_schema import DEFAULT_SCHEMA, compare_schema, contract, read_schema
+
+# The contract of the tokens view: the default ctp schema of a run (schema 3).
+EXPECTED_COLUMNS = contract(DEFAULT_SCHEMA)
 
 CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
-_cfg.read(CORPUS / "pipeline.cfg")
+_cfg.read(retain.CONFIG)
 OUT = (CORPUS / Path(_cfg.get("paths", "output_dir",
        fallback="../ctp-output")).expanduser()).resolve()
 DB = CORPUS / "ctp.duckdb"
@@ -240,7 +244,7 @@ def schema_split(paths: Sequence[str]) -> tuple[list[str], list, list]:
                cannot be shown to disagree, so it stays in `usable` and is
                reported instead of dropped.
 
-    The contract is validate_schema.EXPECTED_COLUMNS, so this gate follows a
+    The contract is validate_schema.contract(DEFAULT_SCHEMA), so this gate follows a
     schema widening automatically instead of pinning a column count.
     """
     usable, drifted, unread = [], [], []
@@ -251,7 +255,7 @@ def schema_split(paths: Sequence[str]) -> tuple[list[str], list, list]:
             unread.append((path, f"{type(exc).__name__}"))
             usable.append(path)
             continue
-        drifts = compare_schema(actual)
+        drifts = compare_schema(actual, EXPECTED_COLUMNS)
         if drifts:
             drifted.append((path, len(actual), drifts))
         else:

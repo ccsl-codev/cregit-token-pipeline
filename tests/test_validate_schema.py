@@ -216,10 +216,12 @@ def test_main_with_no_arguments_exits_two(monkeypatch, capsys):
 def test_main_checks_the_files_it_is_given(monkeypatch):
     seen = {}
     monkeypatch.setattr(sys, "argv", ["validate_schema.py", "a.parquet", "b.parquet"])
-    monkeypatch.setattr(vs, "check", lambda paths: seen.setdefault("paths", paths) and 0)
+    monkeypatch.setattr(vs, "check", lambda paths, expected=None: seen.update(
+        paths=paths, expected=expected) or 0)
     with pytest.raises(SystemExit) as exc:
         vs.main()
     assert seen["paths"] == ["a.parquet", "b.parquet"]
+    assert seen["expected"] == vs.EXPECTED_COLUMNS_3, "the default is schema 3"
     assert exc.value.code == 0
 
 

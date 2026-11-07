@@ -262,13 +262,27 @@ def test_manifest_skips_blank_and_whitespace_only_lines(tmp_path):
 
 @pytest.mark.parametrize("row, fields", [
     pytest.param("jq\thttps://x.git\tcommunity\t\\.[ch]$", 4, id="four-fields"),
-    pytest.param("jq\thttps://x.git\tcommunity\t\\.[ch]$\tS\textra", 6, id="six-fields"),
+    pytest.param("jq\thttps://x.git\tcommunity\t\\.[ch]$\tS\t" + "a" * 40 + "\textra", 7,
+                 id="seven-fields"),
 ])
 def test_manifest_rejects_a_row_without_exactly_five_fields(tmp_path, row, fields):
-    """Five tab-separated fields are the contract. A short or long row is a
-    corrupt manifest, and running the dataset off it would mislabel projects."""
+    """Five tab-separated fields are the contract, and a sixth one is the pinned
+    commit. A short or long row is a corrupt manifest, and running the dataset
+    off it would mislabel projects."""
     with pytest.raises(ValueError):
         ctp.read_manifest(write_manifest(tmp_path, row), None)
+
+
+def test_a_sixth_field_is_the_pinned_commit(tmp_path):
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    rows = ctp.read_manifest(write_manifest(tmp_path, VALID_ROW + "\t" + sha, VALID_ROW), None)
+    assert rows[0][ctp.PINNED_FIELD] == sha
+    assert ctp.PINNED_FIELD not in rows[1]
+
+
+def test_a_sixth_field_that_is_not_a_commit_stops_the_run(tmp_path):
+    with pytest.raises(SystemExit, match="not a commit"):
+        ctp.read_manifest(write_manifest(tmp_path, VALID_ROW + "\textra"), None)
 
 
 @pytest.mark.xfail(strict=True, reason=(
@@ -1061,7 +1075,8 @@ def run_args(**over):
                 from_step=1, gc=None, blame_jobs=0,
                 memory_limit=None, duckdb_threads=0, project_meta="",
                 firm_map="", firm_canonical="", allow_empty_provenance=True,
-                mask="", mask_widened=False, retokenize="", reblame=False)
+                mask="", mask_widened=False, retokenize="", reblame=False,
+                schema="1")
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -2667,3 +2682,234 @@ def test_a_blank_retokenize_is_treated_as_absent(sandbox, monkeypatch):
     monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
     monkeypatch.setattr(ctp, "run_project", lambda p: "done")
     assert ctp.cmd_run(run_args(retokenize="   ", from_step=1)) == 0
+
+
+# --------------------------------------------------------------------------- #
+# ctp schema 3: the write phase, the pinned clone, project_facts, select
+# --------------------------------------------------------------------------- #
+
+SCHEMA3_RUNNER_USAGE = REAL_RUNNER_USAGE.replace(
+    "# unknown arguments exit 2",
+    "#   --ctp-schema N    the metadata columns of step 10\n"
+    "#   --tokenizer-worker  one tokenizer process per worker\n"
+    "# unknown arguments exit 2")
+PIN_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture
+def schema3_files(sandbox, runner_script):
+    runner_script(SCHEMA3_RUNNER_USAGE)
+    links = sandbox.root / "links"
+    links.mkdir()
+    for name in ("domain_links.parquet", "project_links.parquet"):
+        (links / name).write_bytes(b"PAR1")
+    private = sandbox.root / "private"
+    private.mkdir()
+    (private / "salt").write_bytes(b"x" * 40)
+    (private / "reg").mkdir()
+    return SimpleNamespace(domain=str(links / "domain_links.parquet"),
+                           project=str(links / "project_links.parquet"),
+                           salt=str(private / "salt"), reg_dir=str(private / "reg"))
+
+
+def schema3_args(f, **over):
+    base = dict(schema="3", domain_links=f.domain, project_links=f.project,
+                organizations_version="v4.9")
+    base.update(over)
+    return run_args(**base)
+
+
+def test_schema_3_is_the_default_of_the_cli():
+    assert ctp.DEFAULT_SCHEMA == "3"
+    assert set(ctp.SCHEMAS) == {"1", "3"}
+
+
+def test_schema_1_refuses_the_schema_3_options(sandbox):
+    with pytest.raises(SystemExit, match="schema 3 options"):
+        ctp.schema3_options(run_args(schema="1", domain_links="d.parquet"), "")
+    with pytest.raises(SystemExit, match="schema 3 options"):
+        ctp.schema3_options(run_args(schema="1", no_leak_scan=True), "")
+    assert ctp.schema3_options(run_args(schema="1"), "") == {"schema": "1"}
+
+
+def test_schema_3_needs_a_runner_that_writes_its_columns(sandbox, runner_script):
+    runner_script(REAL_RUNNER_USAGE)
+    with pytest.raises(SystemExit, match="--ctp-schema"):
+        ctp.schema3_options(run_args(schema="3"), "")
+
+
+def test_schema_3_needs_the_links_and_the_version(schema3_files):
+    with pytest.raises(SystemExit, match="--domain-links, --project-links, --organizations-version"):
+        ctp.schema3_options(run_args(schema="3"), "")
+    with pytest.raises(SystemExit, match="is not a file"):
+        ctp.schema3_options(schema3_args(schema3_files, domain_links="/no/such"), "")
+
+
+def test_schema_3_refuses_the_firm_map(schema3_files):
+    with pytest.raises(SystemExit, match="--firm-map is a schema 1 option"):
+        ctp.schema3_options(schema3_args(schema3_files), "/x/affiliation.csv")
+
+
+def test_schema_3_without_a_salt_says_the_files_are_private(schema3_files, capsys):
+    opts = ctp.schema3_options(schema3_args(schema3_files), "")
+    assert opts == {"schema": "3", "organizations_version": "v4.9",
+                    "domain_links": str(Path(schema3_files.domain).resolve()),
+                    "project_links": str(Path(schema3_files.project).resolve())}
+    assert "private" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("over, match", [
+    (dict(psl="p.dat"), "needs --salt-file"),
+    (dict(no_leak_scan=True), "needs --salt-file"),
+    (dict(salt_file="SALT"), "one of --registry"),
+    (dict(salt_file="SALT", registry="r", registry_dir="REG"), "one of --registry"),
+    (dict(salt_file="SALT", registry="/no/such.parquet"), "is not a file"),
+    (dict(salt_file="SALT", registry_dir="/no/such/dir"), "is not a directory"),
+])
+def test_the_pseudonym_options_are_refused_in_a_wrong_set(schema3_files, over, match):
+    over = {k: {"SALT": schema3_files.salt, "REG": schema3_files.reg_dir}.get(v, v)
+            for k, v in over.items()}
+    with pytest.raises(SystemExit, match=match):
+        ctp.schema3_options(schema3_args(schema3_files, **over), "")
+
+
+def test_a_registry_under_the_output_directory_is_refused(schema3_files, sandbox):
+    inside = sandbox.out / "reg"
+    inside.mkdir()
+    with pytest.raises(SystemExit, match="private storage"):
+        ctp.schema3_options(schema3_args(schema3_files, salt_file=schema3_files.salt,
+                                         registry_dir=str(inside)), "")
+
+
+def test_the_pseudonym_options_reach_the_write_phase(schema3_files, sandbox):
+    opts = ctp.schema3_options(schema3_args(schema3_files, salt_file=schema3_files.salt,
+                                            registry_dir=schema3_files.reg_dir,
+                                            no_leak_scan=True, psl=schema3_files.salt), "")
+    ctp._OPTS.update(opts, memory_limit="6GB", duckdb_threads=2)
+    argv = ctp.write_args(dict(name="jq"), sandbox.out / "jq")
+    parquet = str(sandbox.out / "jq" / "jq-dataset.parquet")
+    assert argv[:5] == ["python3", str(ctp.CORPUS / "schema3.py"), "write", parquet, parquet]
+    for pair in (["--project", "jq"], ["--organizations-version", "v4.9"],
+                 ["--memory-limit", "6GB"], ["--threads", "2"],
+                 ["--registry-dir", str(Path(schema3_files.reg_dir).resolve())]):
+        i = argv.index(pair[0])
+        assert argv[i:i + 2] == pair
+    assert "--pseudonymize" in argv and "--no-scan" in argv and "--registry" not in argv
+    assert "--psl" in argv
+    ctp._OPTS.update(registry="/private/r.parquet")
+    argv = ctp.write_args(dict(name="jq"), sandbox.out / "jq")
+    assert argv[argv.index("--registry") + 1] == "/private/r.parquet"
+
+
+def test_a_schema_3_run_clones_the_pinned_commit_then_writes(schema3_files, sandbox,
+                                                             monkeypatch):
+    calls = []
+
+    def phase(project, name, args):
+        calls.append((name, list(args)))
+        if name == "clone":
+            ctp.pinned_clone_path(project["name"]).mkdir(parents=True)
+        if name == "validate":
+            Path(args[3]).write_text("rows=1\n")
+        return 0
+    monkeypatch.setattr(ctp, "run_phase", phase)
+    ctp._OPTS.update(ctp.schema3_options(schema3_args(schema3_files), ""),
+                     tokenizer_worker=True)
+    project = dict(name="jq", url="https://github.com/jqlang/jq.git", category="c",
+                   file_filter=r"\.c$", size_class="S", commit=PIN_SHA)
+    assert ctp.run_project(project) == "done"
+    assert [c[0] for c in calls] == ["clone", "pipeline", "write", "validate"]
+    clone = calls[0][1]
+    assert clone[clone.index("--commit") + 1] == PIN_SHA
+    pipe = calls[1][1]
+    assert pipe[pipe.index("--repo-url") + 1] == str(ctp.pinned_clone_path("jq"))
+    assert pipe[pipe.index("--commit-url") + 1] == "https://github.com/jqlang/jq/commit/"
+    assert pipe[pipe.index("--ctp-schema") + 1] == "3"
+    assert "--tokenizer-worker" in pipe and "--firm-map" not in pipe
+    assert calls[2][1][2] == "write"
+    assert not ctp.pinned_clone_path("jq").exists(), "the pinned clone was kept"
+
+
+def test_a_failed_write_fails_the_project_before_the_stamp(schema3_files, sandbox,
+                                                           monkeypatch):
+    monkeypatch.setattr(ctp, "run_phase",
+                        lambda project, name, args: 1 if name == "write" else 0)
+    ctp._OPTS.update(ctp.schema3_options(schema3_args(schema3_files), ""))
+    project = dict(name="jq", url="u", category="c", file_filter="x", size_class="S")
+    assert ctp.run_project(project) == "failed"
+    assert not (sandbox.out / "jq" / "jq.validated").exists()
+
+
+def test_a_failed_clone_fails_the_project(schema3_files, sandbox, monkeypatch):
+    seen = []
+    monkeypatch.setattr(ctp, "run_phase",
+                        lambda project, name, args: seen.append(name) or 3)
+    ctp._OPTS.update(ctp.schema3_options(schema3_args(schema3_files), ""))
+    project = dict(name="jq", url="u", category="c", file_filter="x", size_class="S",
+                   commit=PIN_SHA)
+    assert ctp.run_project(project) == "failed"
+    assert seen == ["clone"]
+
+
+def test_a_schema_1_run_has_no_write_phase(sandbox, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ctp, "run_phase",
+                        lambda project, name, args: calls.append((name, args)) or 0)
+    ctp._OPTS.update(schema="1")
+    project = dict(name="jq", url="u", category="c", file_filter="x", size_class="S")
+    ctp.run_project(project)
+    assert [c[0] for c in calls] == ["pipeline", "validate"]
+    assert "--ctp-schema" not in calls[0][1]
+
+
+def test_drop_pinned_clone_refuses_a_link(sandbox, tmp_path):
+    staging = sandbox.out / ctp.pin.STAGING_DIR
+    staging.mkdir()
+    (staging / "jq.git").symlink_to(tmp_path)
+    assert "refusing" in ctp.drop_pinned_clone("jq")[0]
+    assert ctp.drop_pinned_clone("absent") == []
+
+
+def test_project_facts_cover_the_validated_projects_of_the_manifest(sandbox, monkeypatch):
+    seen = {}
+
+    def run(argv, **kw):
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout='{"facts_rows": 1}\n')
+    monkeypatch.setattr(ctp.subprocess, "run", run)
+    for name in ("a", "b"):
+        (sandbox.out / name).mkdir()
+    (sandbox.out / "a" / "a.validated").write_text("")
+    projects = [dict(name="a"), dict(name="b")]
+    assert ctp.write_facts(projects, "/s.json") == 0
+    argv = seen["argv"]
+    assert argv[2:6] == ["facts", "--sidecar", "/s.json", "--out"]
+    assert argv[6] == str(sandbox.out / ctp.FACTS_FILE) and argv[7:] == ["a"]
+    seen.clear()
+    assert ctp.write_facts([dict(name="b")], "/s.json") == 0 and not seen
+
+
+def test_a_schema_3_run_writes_the_facts_after_the_projects(schema3_files, sandbox,
+                                                            monkeypatch, tmp_path):
+    write_manifest(sandbox.root, VALID_ROW)
+    side = tmp_path / "side.json"
+    side.write_text('{"jq": {}}')
+    order = []
+    monkeypatch.setattr(ctp, "capture_devenv_env", lambda: {"PATH": "/x"})
+    monkeypatch.setattr(ctp, "run_project", lambda p: order.append("project") or "done")
+    monkeypatch.setattr(ctp, "write_facts",
+                        lambda projects, meta: order.append(("facts", meta)) or 0)
+    assert ctp.cmd_run(schema3_args(schema3_files, project_meta=str(side),
+                                    allow_empty_provenance=False)) == 0
+    assert order == ["project", ("facts", str(side.resolve()))]
+
+
+def test_select_runs_the_language_filter(monkeypatch):
+    import language_filter
+    seen = {}
+    monkeypatch.setattr(language_filter, "main",
+                        lambda argv: seen.setdefault("argv", argv) and 0)
+    monkeypatch.setattr(ctp.sys, "argv", ["ctp.py", "select", "--manifest", "m.tsv",
+                                          "--out-dir", "d", "--mode", "share"])
+    assert ctp.main() == 0
+    assert seen["argv"] == ["--manifest", "m.tsv", "--out-dir", "d", "--mode", "share"]

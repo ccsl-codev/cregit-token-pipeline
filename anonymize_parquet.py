@@ -204,8 +204,13 @@ OTHER_PASSTHROUGH_COLUMNS: tuple[str, ...] = (
     "person_domain", "repo_tag",
 )
 
+# ctp schema 3 gives provenance_status the name audit_frame_file. The value is
+# the same frame file label, so the rule is the same.
+SCHEMA_3_PROVENANCE_COLUMNS: tuple[str, ...] = ("audit_frame_file",)
+
 PASSTHROUGH_COLUMNS: frozenset[str] = frozenset(
-    PROVENANCE_COLUMNS + FIRM_COLUMNS + OTHER_PASSTHROUGH_COLUMNS)
+    PROVENANCE_COLUMNS + SCHEMA_3_PROVENANCE_COLUMNS + FIRM_COLUMNS
+    + OTHER_PASSTHROUGH_COLUMNS)
 
 # Scalar identity columns -> how to rewrite them. <t> is the 14-hex-character
 # salted token from pseudo_token().

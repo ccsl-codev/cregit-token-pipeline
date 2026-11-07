@@ -87,3 +87,30 @@ def test_the_configured_cregit_checkout_is_the_one_the_pipeline_runs():
         pytest.skip(f"{ctp.CREGIT} is not checked out on this machine")
     assert (ctp.CREGIT / "run_pipeline_process.sh").exists(), (
         f"{ctp.CREGIT} does not look like a cregit checkout; pipeline.cfg is stale")
+
+
+def cregit_literal(name: str):
+    """A literal assignment of the cregit generator, read with `ast`."""
+    tree = ast.parse(GENERATE_DATASET.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    pytest.fail(f"no {name} assignment in {GENERATE_DATASET}")
+
+
+def test_the_generator_and_the_contract_agree_on_schema_3():
+    """ctp schema 3: the generator drops the same 10 fields and renames the same
+    one, so its 19 columns are the 19 of EXPECTED_COLUMNS_3 after repo_name."""
+    if not GENERATE_DATASET.exists():
+        pytest.skip(f"{GENERATE_DATASET} is not checked out on this machine")
+    assert tuple(cregit_literal("SCHEMA_3_DROPPED")) == vs.SCHEMA_3_DROPPED
+    assert cregit_literal("SCHEMA_3_RENAMED") == vs.SCHEMA_3_RENAMED
+
+
+def test_the_schema_3_metadata_block_sits_between_repo_name_and_file_path():
+    names = [n for n, _ in vs.EXPECTED_COLUMNS_3]
+    assert names[0] == "repo_name"
+    assert names[1:1 + len(vs.META_FIELDS_3)] == list(vs.META_FIELDS_3)
+    assert names[1 + len(vs.META_FIELDS_3)] == FIRST_AFTER_META
+    assert {t for n, t in vs.EXPECTED_COLUMNS_3 if n in vs.META_FIELDS_3} == {"VARCHAR"}

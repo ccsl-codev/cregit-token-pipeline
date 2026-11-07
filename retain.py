@@ -104,8 +104,24 @@ from pathlib import Path
 # .resolve() gives the canonical path, as in ctp.py. The two scripts must
 # agree on the output dir string or the guards below misfire.
 CORPUS = Path(__file__).resolve().parent
+
+
+def config_path() -> Path:
+    """pipeline.cfg in this repository, or the file CTP_CONFIG names. A CTP_CONFIG
+    that names no file stops the import: the defaults point at a live dataset."""
+    raw = os.environ.get("CTP_CONFIG")
+    if not raw:
+        return CORPUS / "pipeline.cfg"
+    path = Path(raw).expanduser().resolve()
+    if not path.is_file():
+        raise SystemExit(f"CTP_CONFIG={raw} is not a file. Unset it to use "
+                         f"{CORPUS / 'pipeline.cfg'}.")
+    return path
+
+
+CONFIG = config_path()
 _cfg = configparser.ConfigParser()
-_cfg.read(CORPUS / "pipeline.cfg")
+_cfg.read(CONFIG)
 
 
 def _cfg_path(key: str, default: str) -> Path:

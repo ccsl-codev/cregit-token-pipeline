@@ -801,7 +801,8 @@ def test_the_schema_contract_comes_from_validate_schema(sandbox):
     imported, never a column count copied into consolidate.py."""
     import validate_schema
 
-    assert consolidate.EXPECTED_COLUMNS is validate_schema.EXPECTED_COLUMNS
+    assert consolidate.EXPECTED_COLUMNS is validate_schema.contract(
+        validate_schema.DEFAULT_SCHEMA)
 
 
 @requires_duckdb

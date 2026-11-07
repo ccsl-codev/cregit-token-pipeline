@@ -51,6 +51,7 @@ from pathlib import Path
 
 import configparser
 
+import pin  # the pinned clone of a manifest row with a sixth field
 import retain  # shared prune code path for --drop-memo
 from file_mask import UNIVERSAL_MASK
 
@@ -59,7 +60,8 @@ from file_mask import UNIVERSAL_MASK
 # directory is reached through two symlink aliases.
 CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
-_cfg.read(CORPUS / "pipeline.cfg")
+# pipeline.cfg here, or the file CTP_CONFIG names; retain reads the same file.
+_cfg.read(retain.CONFIG)
 
 
 def _cfg_path(key: str, default: str) -> Path:
@@ -120,6 +122,18 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 # it.
 DATASET_STEP = 10
 
+# The ctp schema that a run writes (validate_schema.CONTRACTS). Schema 3 is the
+# schema of the "Token on Me" release: the cregit generator writes 57 columns
+# (--ctp-schema 3), then the `write` phase (schema3.py) adds the 4 organization
+# columns and the footer key-values, and pseudonymizes when asked. Schema 1 is
+# the older 70-column run of a cregit checkout that does the firm join itself.
+SCHEMAS = ("1", "3")
+DEFAULT_SCHEMA = "3"
+# The run-wide file of the project facts that schema 3 does not keep per row.
+FACTS_FILE = "project_facts.parquet"
+# A manifest row may have a sixth field: the commit to pin (40 hex digits).
+PINNED_FIELD = "commit"
+
 _metrics_lock = threading.Lock()
 _print_lock = threading.Lock()
 # name -> (phase, started_at) for the heartbeat; mutated by worker threads
@@ -140,7 +154,17 @@ def read_manifest(path: Path, only: set | None) -> list[dict]:
     for line in path.read_text().splitlines():
         if not line.strip() or line.startswith("#"):
             continue
-        name, url, category, file_filter, size_class = line.split("\t")
+        fields = line.split("\t")
+        # A sixth field is the pinned commit, as language_filter.py and the
+        # selection steps write it. The row is then cloned at that commit.
+        if len(fields) == 6:
+            *fields, commit = fields
+            if not pin.SHA_RE.match(commit):
+                sys.exit(f"{path}: row {fields[0]}: the sixth field is not a commit "
+                         "of 40 lowercase hex digits")
+        else:
+            commit = ""
+        name, url, category, file_filter, size_class = fields
         if only and name not in only:
             continue
         # An empty file_filter means "the universal mask". Every generated
@@ -148,9 +172,12 @@ def read_manifest(path: Path, only: set | None) -> list[dict]:
         # manifest that leaves the column blank — and it must not send an empty
         # mask, which blobExec rejects and which would otherwise select every
         # file in the repository.
-        projects.append(dict(name=name, url=url, category=category,
-                             file_filter=file_filter or UNIVERSAL_MASK,
-                             size_class=size_class))
+        project = dict(name=name, url=url, category=category,
+                       file_filter=file_filter or UNIVERSAL_MASK,
+                       size_class=size_class)
+        if commit:
+            project[PINNED_FIELD] = commit
+        projects.append(project)
     return projects
 
 
@@ -466,6 +493,52 @@ def run_phase(project: dict, phase: str, args: list[str]) -> int:
     return rc
 
 
+def pinned_clone_path(name: str) -> Path:
+    """Where the clone phase puts a pinned project. Outside the workdir,
+    because the runner deletes the workdir at step 1."""
+    return OUT / pin.STAGING_DIR / f"{name}.git"
+
+
+def drop_pinned_clone(name: str) -> list[str]:
+    """Delete the pinned clone after the pipeline. Returns the errors."""
+    target = pinned_clone_path(name)
+    if not target.exists() and not target.is_symlink():
+        return []
+    if target.is_symlink() or target.resolve().parent != (OUT / pin.STAGING_DIR).resolve():
+        return [f"refusing to delete {target}: not a directory inside {OUT / pin.STAGING_DIR}"]
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        return [f"cannot delete {target}: {exc.strerror}"]
+    return []
+
+
+def write_args(project: dict, workdir: Path) -> list[str]:
+    """schema3.py for the `write` phase: the cregit file of step 10 becomes the
+    schema 3 file in place, with the organization columns and the footer
+    key-values, and the pseudonyms when the run asks for them."""
+    name = project["name"]
+    parquet = str(workdir / f"{name}-dataset.parquet")
+    args = ["python3", str(CORPUS / "schema3.py"), "write", parquet, parquet,
+            "--project", name,
+            "--domain-links", _OPTS["domain_links"],
+            "--project-links", _OPTS["project_links"],
+            "--organizations-version", _OPTS["organizations_version"]]
+    if _OPTS.get("memory_limit"):
+        args += ["--memory-limit", _OPTS["memory_limit"]]
+    if _OPTS.get("duckdb_threads"):
+        args += ["--threads", str(_OPTS["duckdb_threads"])]
+    if _OPTS.get("salt_file"):
+        args += ["--pseudonymize", "--salt-file", _OPTS["salt_file"]]
+        args += (["--registry", _OPTS["registry"]] if _OPTS.get("registry")
+                 else ["--registry-dir", _OPTS["registry_dir"]])
+        if _OPTS.get("psl"):
+            args += ["--psl", _OPTS["psl"]]
+        if _OPTS.get("no_leak_scan"):
+            args.append("--no-scan")
+    return args
+
+
 def run_project(project: dict) -> str:
     """Returns: done | skipped | failed | deferred"""
     name = project["name"]
@@ -497,15 +570,35 @@ def run_project(project: dict) -> str:
         # to send --work-dir and --file-filter, so every project failed rc=2
         # before doing any work. cmd_run now preflights these names, so a rename
         # upstream stops the run once with a clear message.
+        # A pinned row is cloned first, by pin.py, into a bare clone that holds
+        # the pinned commit and its history only. The runner clones from it, so
+        # it tokenizes and blames that commit, not the remote HEAD of today.
+        pinned = project.get(PINNED_FIELD, "")
+        if pinned:
+            rc = run_phase(project, "clone", [
+                "python3", str(CORPUS / "pin.py"), "--url", project["url"],
+                "--commit", pinned, "--dest", str(pinned_clone_path(name)),
+                "--result", str(state_dir(name) / "pin.json")])
+            if rc != 0:
+                return "failed"
         pipeline_args = [
             "./run_pipeline_process.sh",
-            "--repo-url", project["url"],
+            "--repo-url", str(pinned_clone_path(name)) if pinned else project["url"],
             "--repo-name", name,
             "--work", str(workdir),
             # The manifest's mask, which every generated manifest fills with the
             # universal mask. --mask overrides it for one deliberate run.
             "--mask", _OPTS.get("mask") or project["file_filter"],
         ]
+        if pinned:
+            # The runner makes the commit links from --repo-url, a local path now.
+            pipeline_args += ["--commit-url",
+                              project["url"].removesuffix(".git").rstrip("/") + "/commit/"]
+        schema = _OPTS.get("schema", "1")
+        if schema == "3":
+            pipeline_args += ["--ctp-schema", "3"]
+        if _OPTS.get("tokenizer_worker"):
+            pipeline_args.append("--tokenizer-worker")
         if _OPTS.get("skip_html"):
             pipeline_args.append("--skip-html")
         # Replace every .blame file instead of skipping the ones that exist.
@@ -600,6 +693,15 @@ def run_project(project: dict) -> str:
         if rc != 0:
             return "failed"
 
+        if schema == "3":
+            rc = run_phase(project, "write", write_args(project, workdir))
+            if rc != 0:
+                return "failed"
+        if pinned:
+            problems = drop_pinned_clone(name)
+            if problems:
+                say(f"{name} — pinned clone kept: {'; '.join(problems)}")
+
         rc = run_phase(project, "validate", [
             "python3", str(CORPUS / "validate.py"),
             str(workdir / f"{name}-dataset.parquet"), str(stamp),
@@ -626,6 +728,93 @@ def heartbeat(stop: threading.Event, results: dict) -> None:
         done = sum(1 for v in results.values() if v in ("done", "skipped"))
         failed = sum(1 for v in results.values() if v == "failed")
         say(f"♥ running: {running or '—'} | done {done} failed {failed} | disk {free_gb}G free")
+
+
+_SCHEMA3_FILES = ("domain_links", "project_links")
+_PSEUDONYM_OPTIONS = ("salt_file", "psl", "registry", "registry_dir")
+
+
+def _flag(option: str) -> str:
+    return "--" + option.replace("_", "-")
+
+
+def schema3_options(args: argparse.Namespace, firm_map: str) -> dict:
+    """Check the schema options of `ctp run`, and return them for _OPTS.
+
+    Schema 3 needs the two link files and the organizations version, because
+    the `write` phase fills the 4 organization columns from them, and a file
+    with blank organization columns passes every later gate. --salt-file turns
+    on the pseudonyms; without it the identity columns keep the real values,
+    so the files are private. getattr, because callers build the Namespace
+    directly."""
+    schema = str(getattr(args, "schema", DEFAULT_SCHEMA))
+    if schema not in SCHEMAS:
+        sys.exit(f"--schema {schema}: use one of {', '.join(SCHEMAS)}.")
+    vals = {n: getattr(args, n, "") or "" for n in
+            (*_SCHEMA3_FILES, "organizations_version", *_PSEUDONYM_OPTIONS)}
+    no_scan = bool(getattr(args, "no_leak_scan", False))
+    if schema == "1":
+        given = [_flag(n) for n, v in vals.items() if v] + (["--no-leak-scan"] if no_scan else [])
+        if given:
+            sys.exit(f"{', '.join(given)}: schema 3 options, and this run writes "
+                     "schema 1. Drop them, or drop --schema 1.")
+        return {"schema": "1"}
+    if firm_map:
+        sys.exit("--firm-map is a schema 1 option. Schema 3 has no firm columns: its "
+                 "organization columns come from --domain-links and --project-links.")
+    if not script_supports("--ctp-schema"):
+        sys.exit(f"--schema 3 needs --ctp-schema, which {CREGIT}/run_pipeline_process.sh "
+                 "does not accept.\nThat checkout writes the 29 metadata columns of "
+                 "schema 1, and the write phase would refuse every file.")
+    missing = [_flag(n) for n in (*_SCHEMA3_FILES, "organizations_version") if not vals[n]]
+    if missing:
+        sys.exit(f"--schema 3 needs {', '.join(missing)}: they fill the 4 organization "
+                 "columns and the footer key-values of every file.")
+    out = {"schema": "3", "organizations_version": vals["organizations_version"]}
+    for n in _SCHEMA3_FILES:
+        if not Path(vals[n]).is_file():
+            sys.exit(f"{_flag(n)} {vals[n]} is not a file.")
+        # Absolute: the write phase runs with cwd=CREGIT.
+        out[n] = str(Path(vals[n]).resolve())
+    if not vals["salt_file"]:
+        given = [_flag(n) for n in _PSEUDONYM_OPTIONS[1:] if vals[n]]
+        if given or no_scan:
+            sys.exit(f"{', '.join(given or ['--no-leak-scan'])} needs --salt-file: "
+                     "they are options of the pseudonyms.")
+        say("note: no --salt-file: the identity columns keep the real values. "
+            "The files are private, not for release.")
+        return out
+    if bool(vals["registry"]) == bool(vals["registry_dir"]):
+        sys.exit("--salt-file needs one of --registry (an existing registry) and "
+                 "--registry-dir (one registry per project).")
+    for n in ("salt_file", "registry", "psl"):
+        if vals[n] and not Path(vals[n]).is_file():
+            sys.exit(f"{_flag(n)} {vals[n]} is not a file.")
+    if vals["registry_dir"] and not Path(vals["registry_dir"]).is_dir():
+        sys.exit(f"--registry-dir {vals['registry_dir']} is not a directory.")
+    for n in ("registry", "registry_dir"):
+        if vals[n]:
+            p = Path(vals[n]).resolve()
+            if p == OUT.resolve() or OUT.resolve() in p.parents:
+                sys.exit(f"{_flag(n)} is under the output directory {OUT}. The "
+                         "registry holds real identities: keep it in private storage.")
+    out.update({n: str(Path(vals[n]).resolve()) for n in _PSEUDONYM_OPTIONS if vals[n]})
+    out["no_leak_scan"] = no_scan
+    return out
+
+
+def write_facts(projects: list[dict], project_meta: str) -> int:
+    """Write OUT/project_facts.parquet for the validated projects of the run."""
+    names = [p["name"] for p in projects
+             if (OUT / p["name"] / f"{p['name']}.validated").exists()]
+    if not names:
+        return 0
+    argv = ["python3", str(CORPUS / "schema3.py"), "facts", "--sidecar", project_meta,
+            "--out", str(OUT / FACTS_FILE), *names]
+    proc = subprocess.run(argv, cwd=CREGIT, env=_ENV or None, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    say(f"{FACTS_FILE}: {(proc.stdout or '').strip()[-300:]} (rc={proc.returncode})")
+    return proc.returncode
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -694,6 +883,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                      "Point pipeline.cfg at a checkout that supports sharded mode,\n"
                      "or drop --shards and accept the single-process rate.")
     # Same rule again: refuse before the run rather than per project.
+    if getattr(args, "tokenizer_worker", False) and not script_supports("--tokenizer-worker"):
+        sys.exit(f"--tokenizer-worker is not implemented by {CREGIT}/run_pipeline_process.sh.")
     if args.gc and not script_supports("--gc"):
         sys.exit(f"--gc is not implemented by {CREGIT}/run_pipeline_process.sh.\n"
                  "That checkout still packs unconditionally, and an unguarded\n"
@@ -763,6 +954,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     elif getattr(args, "firm_canonical", ""):
         sys.exit("--firm-canonical without --firm-map has no firm_raw to "
                  "canonicalize. Pass data/affiliation.merged.csv too.")
+    schema3 = schema3_options(args, firm_map)
     # Refuse a bad size now. Step 10 is the last step, so the alternative is
     # finding the typo after every earlier step has already run.
     if args.memory_limit:
@@ -873,7 +1065,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     # that cannot forward the flag is still reported by its own sharper message
     # rather than by this general one.
     gaps: list[tuple[str, str]] = []
-    if not project_meta:
+    if not project_meta and schema3["schema"] == "3":
+        gaps.append(("--project-meta",
+                     "19 provenance columns empty on every row, and no "
+                     f"{FACTS_FILE} rows"))
+    elif not project_meta:
         gaps.append(("--project-meta",
                      "29 provenance columns empty on every row: clone_url, "
                      "provenance_status, source, stratum, fact, contested, "
@@ -883,7 +1079,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                      "history_shared_with, history_relation, history_includes, "
                      "history_first, history_created, manifest_category, "
                      "file_mask"))
-    if not firm_map:
+    # Schema 3 has no firm map: schema3_options() has already refused a run
+    # without the two link files that fill the organization columns.
+    if schema3["schema"] == "3":
+        pass
+    elif not firm_map:
         gaps.append(("--firm-map",
                      "3 firm columns empty on every row: firm_raw, firm, "
                      "firm_source — and firm attribution is the measurement this "
@@ -951,7 +1151,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                  # absent --mask means "use the manifest's", which is the default.
                  mask=getattr(args, "mask", ""),
                  project_meta=project_meta,
-                 firm_map=firm_map, firm_canonical=firm_canonical)
+                 firm_map=firm_map, firm_canonical=firm_canonical,
+                 tokenizer_worker=bool(getattr(args, "tokenizer_worker", False)),
+                 **schema3)
     if _OPTS["mask"]:
         # Loud, because the mask in the Parquet's file_mask column comes from the
         # sidecar, which reads the manifest — so an override makes the recorded
@@ -1019,6 +1221,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         stop.set()
 
     rc = 0 if all(v in ("done", "skipped") for v in results.values()) else 1
+    if schema3["schema"] == "3" and project_meta:
+        # The whole manifest, not the --only subset: the table is run-wide.
+        if write_facts(read_manifest(CORPUS / args.manifest, None), project_meta) != 0:
+            rc = 1
     with RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
 
@@ -1186,6 +1392,15 @@ def cmd_db(args: argparse.Namespace) -> int:
     _ENV.update(capture_devenv_env())
     return subprocess.run(["python3", str(CORPUS / "consolidate.py")],
                           cwd=CREGIT, env=_ENV).returncode
+
+
+def cmd_select(args: argparse.Namespace) -> int:
+    """The selection step before a run. language_filter.py keeps the rows of a
+    pinned manifest by the languages of the pinned commit; its kept.tsv has the
+    sixth field, so `ctp.py run --manifest <out-dir>/kept.tsv` clones each row
+    at the measured commit."""
+    import language_filter
+    return language_filter.main(list(args.filter_args))
 
 
 def main() -> int:
@@ -1361,6 +1576,38 @@ def main() -> int:
                             "3 files per minute against 64,536 files, which is 14 "
                             "days. Each file is independent, so N does not change "
                             "the output. Omit to accept the runner's default of 1")
+    run_p.add_argument("--tokenizer-worker", action="store_true",
+                       help="forward --tokenizer-worker: one long-lived tokenizer "
+                            "process per worker. The tokens do not change")
+    run_p.add_argument("--schema", default=DEFAULT_SCHEMA, choices=SCHEMAS,
+                       help=f"the ctp schema to write (default {DEFAULT_SCHEMA}). 3: the "
+                            "61 columns of validate_schema.EXPECTED_COLUMNS_3; needs "
+                            "--domain-links, --project-links and "
+                            "--organizations-version. 1: the 70 columns of a cregit "
+                            "checkout that does the firm join (--firm-map)")
+    run_p.add_argument("--domain-links", default="", metavar="PARQUET",
+                       help="schema 3: the domain links (domain, firm_based_on_domain)")
+    run_p.add_argument("--project-links", default="", metavar="PARQUET",
+                       help="schema 3: the project links (project, "
+                            "firm_based_on_namespace, project_enterprise_driven, "
+                            "project_enterprise_basis), keyed by manifest name")
+    run_p.add_argument("--organizations-version", default="", metavar="V",
+                       help="schema 3: the version of the organization database "
+                            "that made the links, for the footer")
+    run_p.add_argument("--salt-file", default="", metavar="PATH",
+                       help="schema 3: pseudonymize the identity columns with this "
+                            "salt (pseudonymize.py). Without it the files keep the "
+                            "real identities and are private")
+    run_p.add_argument("--registry", default="", metavar="PARQUET",
+                       help="with --salt-file: an existing registry of "
+                            "pseudonymize.py registry")
+    run_p.add_argument("--registry-dir", default="", metavar="DIR",
+                       help="with --salt-file: make one registry per project in DIR "
+                            "(private storage, not under the output directory)")
+    run_p.add_argument("--psl", default="", metavar="PATH",
+                       help="with --salt-file: the Public Suffix List file")
+    run_p.add_argument("--no-leak-scan", action="store_true",
+                       help="with --salt-file: skip the leak scan of the written file")
     run_p.set_defaults(fn=cmd_run)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
@@ -1383,6 +1630,22 @@ def main() -> int:
     db_p = sub.add_parser("db", help="rebuild ctp.duckdb (tracking table + unified tokens view)")
     db_p.set_defaults(fn=cmd_db)
 
+    sel_p = sub.add_parser(
+        "select", help="the language selection step: language_filter.py over a "
+                       "pinned manifest; its kept.tsv is the --manifest of the run",
+        description="Run language_filter.py with the given arguments, for example "
+                    "`ctp.py select --manifest pinned.tsv --out-dir sel` (the default "
+                    "rule: the largest programming language by tokei code lines is "
+                    "one of --targets), or `--mode share --threshold 0.30`. "
+                    "`ctp.py select --help` lists them.",
+        add_help=False)
+    sel_p.add_argument("filter_args", nargs=argparse.REMAINDER)
+    sel_p.set_defaults(fn=cmd_select)
+
+    # argparse does not give options such as --manifest to a REMAINDER
+    # positional, so the select arguments go to language_filter.py unparsed.
+    if sys.argv[1:2] == ["select"]:
+        return cmd_select(argparse.Namespace(filter_args=sys.argv[2:]))
     args = ap.parse_args()
     return args.fn(args)
 

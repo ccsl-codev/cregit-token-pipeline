@@ -10,6 +10,41 @@ you should read before analyzing the data.
 below is a description of it. If the two disagree, the code is right. Regenerate
 the contract from a real file with `./validate_schema.py --emit-contract F.parquet`.
 
+## 0. ctp schema 3, the default of a run
+
+`ctp.py run` writes ctp schema 3 by default (`--schema 3`). This is the schema
+of the "Token on Me" release. The contract is `validate_schema.EXPECTED_COLUMNS_3`,
+61 columns. The rest of this document describes schema 1 (`--schema 1`, 70
+columns, `EXPECTED_COLUMNS`). Schema 3 differs from schema 1 as follows:
+
+- The 3 firm columns (`firm_raw`, `firm`, `firm_source`) are not in the file.
+- The 4 organization columns are at the end: `firm_based_on_namespace`,
+  `firm_based_on_domain`, `project_enterprise_driven` (BOOLEAN) and
+  `project_enterprise_basis`. They come from `--project-links` (key: the
+  manifest name) and `--domain-links` (key: the domain of `person_domain`). A
+  real domain with no link gets `independent`. A blank value, a value with no
+  dot or a value with an at sign gets `unknown`.
+- The 10 per-project columns `size_kb`, `file_mask`, `manifest_category`,
+  `fact` and the six `history_*` columns are not in the file. They are
+  constant per project. The sidecar keeps them. The run writes the `fact`
+  values to `<output_dir>/project_facts.parquet` (`project`, `fact_type`,
+  `fact_value`): one row for each project and fact.
+- `provenance_status` has the name `audit_frame_file`. The sidecar can give
+  the value under either name.
+- The footer has the key-values `ctp_schema_version` = `3`,
+  `organizations_version` (`--organizations-version`) and
+  `organizations_mapping_sha256` (the sha256 of the link pairs and of the two
+  fallback rules).
+- With `--salt-file`, the identity columns have the pseudonyms of
+  `pseudonymize.py`, and the footer also has `pseudonymization_version` and
+  `pseudonymization_registry_sha256`. Without it the identity columns keep the
+  real values, and the files are private.
+
+The cregit generator writes the 57 columns without the organization columns
+(`--ctp-schema 3`). The `write` phase of the run (`schema3.py write`) adds the
+organization columns and the footer key-values, and the pseudonyms when the run
+asks for them. Then the `validate` phase stamps the project.
+
 ---
 
 ## 1. What the dataset is
@@ -86,11 +121,11 @@ a cregit checkout that has `rustTokenizer` and at an output directory.
 | Step | Command | Writes |
 | --- | --- | --- |
 | 1. Write the manifest | by hand, or with your own selection tool | `<run>.tsv` (five fields, `DESIGN.md` §2) |
-| 2. Filter by language (optional) | `./language_filter.py --manifest <pinned>.tsv --out-dir <dir> [--mode share --threshold X]` (needs a sixth field, the pinned commit, and tokei 14) | `<dir>/kept.tsv`, `dropped.tsv`, `languages.tsv` |
+| 2. Filter by language (optional) | `./ctp.py select --manifest <pinned>.tsv --out-dir <dir> [--mode share --threshold X]` (runs `language_filter.py`; needs a sixth field, the pinned commit, and tokei 14) | `<dir>/kept.tsv` (the run manifest, with the pinned commit), `dropped.tsv`, `languages.tsv` |
 | 3. Write the sidecar | a JSON object keyed by manifest name, with the fields of `validate_schema.META_FIELDS` | `<sidecar>.json` |
-| 4. Build the domain→firm map | `./build_domain_map.py fetch` then `build --curated PATH` | `data/affiliation.merged.csv` |
-| 5. Run the pipeline | `./ctp.py run --manifest <run>.tsv --jobs N --skip-html --drop-memo --project-meta <sidecar>.json --firm-map data/affiliation.merged.csv --firm-canonical data/firm_canonical.csv` | one Parquet per project, plus a `.validated` stamp |
-| 6. Gate the schema | `./validate_schema.py <out>/*/*-dataset.parquet` | exit 1 on any drift |
+| 4. Get the organization links | schema 3: the domain links and the project links of your organization database; schema 1: `./build_domain_map.py fetch` then `build --curated PATH` | `domain_links.parquet`, `project_links.parquet` (schema 1: `data/affiliation.merged.csv`) |
+| 5. Run the pipeline | `./ctp.py run --manifest <run>.tsv --jobs N --skip-html --drop-memo --project-meta <sidecar>.json --domain-links D --project-links P --organizations-version V [--salt-file S --registry-dir R]` (schema 1: `--schema 1 --firm-map data/affiliation.merged.csv --firm-canonical data/firm_canonical.csv`) | one schema 3 Parquet per project, a `.validated` stamp, and `<out>/project_facts.parquet` |
+| 6. Gate the schema | `./validate_schema.py <out>/*/*-dataset.parquet` (`--schema 1` for a schema 1 run) and `./schema3.py check <out>/*/*-dataset.parquet` | exit 1 on any drift |
 | 7. Build the index | `./consolidate.py --manifest <run>.tsv` (in `devenv shell`) | `ctp.duckdb` |
 | 8. Prune | `./retain.py --apply` | deletes `memo/` and `html/` only |
 | 9. Pseudonymize for release | `./anonymize_parquet.py OUTDIR <in>.parquet ...` (needs the private salt; exit 2 without one) | anonymized Parquets + JSON report |
