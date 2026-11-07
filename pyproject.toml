@@ -8,7 +8,8 @@
 #
 #   git ls-files '*.py' | xargs grep -hE '^\s*(import|from)\s+' | sort -u
 #
-# Everything that came back is in the standard library except duckdb and pytest.
+# Everything that came back is in the standard library except duckdb, pyarrow
+# and pytest.
 # coverage is the third: run_tests.sh drives the suite through it and fails the
 # run under the 80% floor in .coveragerc.
 
@@ -40,6 +41,11 @@ dependencies = [
     # tests/test_consolidate.py do write a real Parquet and they SKIP when duckdb
     # is missing. Installing it here is what turns those five skips into runs.
     "duckdb==1.5.5",
+    # parquet_rename.py decodes and re-encodes the ARROW:schema footer key-value
+    # with it, and parquet_rename_check.py reads both files with it. The pin is
+    # the version that wrote the released dataset: the rename refuses a file whose
+    # ARROW:schema this pyarrow does not re-encode to the same bytes.
+    "pyarrow==26.0.1",
 ]
 
 [project.optional-dependencies]
@@ -72,6 +78,8 @@ py-modules = [
     "ctp",
     "file_mask",
     "measure_dataset_gaps",
+    "parquet_rename",
+    "parquet_rename_check",
     "retain",
     "validate",
     "validate_schema",

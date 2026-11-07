@@ -11,8 +11,8 @@ token occurrence per file**, carrying the commit and the person that last touche
 that token, and the person's employer where it can be resolved. A sidecar
 supplies the 29 per-project columns.
 
-Stdlib Python only; DuckDB, srcML, ctags, Java and Perl come from the cregit
-checkout's `devenv shell`.
+Stdlib Python only, except pyarrow for the footer rename tool; DuckDB, srcML,
+ctags, Java and Perl come from the cregit checkout's `devenv shell`.
 
 ## Start here
 
@@ -103,6 +103,45 @@ state.
   a mask without rebuilding from scratch.
 - Stop a run by killing the runner PID. Not `pkill -f`, which can self-match and
   orphan pipeline children.
+
+## Renaming columns without rewriting the data
+
+`parquet_rename.py` renames top-level columns of a Parquet file by writing a new
+footer only. Bytes `[0, footer_start)` (the magic, column chunks, pages,
+dictionaries, Bloom filters and page indexes) are copied unchanged, so every
+offset in the footer stays valid. The new footer differs only in the renamed
+`SchemaElement` names, the first element of each `path_in_schema`, and the
+field names in the `ARROW:schema` key-value. With no mapping the output is
+byte-identical to the input.
+
+```sh
+./parquet_rename.py in.parquet out.parquet --rename old_name=new_name
+./parquet_rename.py in.parquet out.parquet --map mapping.json      # {"old": "new"}
+./parquet_rename.py in.parquet tail.bin --rename a=b --tail-only   # new footer tail only
+./parquet_rename_check.py --rename old_name=new_name in.parquet out.parquet
+./parquet_rename_check.py --map mapping.json --pairs pairs.tsv     # OLD<TAB>NEW lines
+```
+
+The copy uses a reflink when the file system can share extents, then
+`copy_file_range`, then plain reads and writes (`--copy read-write` forces the
+last). `--tail-only` writes only the new footer, its length and `PAR1`; the
+renamed file is `in.parquet[0:prefix_len]` followed by that tail, which lets a
+caller build the output without copying the data (for example a multipart upload
+that copies the prefix server-side).
+
+The rename refuses an encrypted file, a name that is not a top-level column, a
+rename to the same or an empty name, a mapping that makes duplicate names, a
+footer or `ARROW:schema` that does not re-encode to the same bytes, and an old
+name that also appears in another key-value or in Arrow metadata (pass
+`--allow-mentions` to keep those unchanged).
+
+`parquet_rename_check.py` proves each pair: the data prefix hashes are equal; the
+footers are equal field by field except the renamed names; pyarrow reads the new
+file with the mapped schema, the same row groups and rows, and the same SHA-256
+per column; DuckDB gives the same `count(*)`, and `count()` and `sum(hash())` of
+each renamed column; and a value from each Bloom-filtered column is found by
+`parquet_bloom_probe` in both files. It prints one JSON line per pair and exits
+1 on any difference.
 
 ## Tests
 
