@@ -78,9 +78,6 @@ NO_REAL_DOMAIN = "unknown"
 PROJECT_LINK_COLUMNS = tuple((c, t) for c, t in vs.ORGANIZATION_COLUMNS
                              if c != "firm_based_on_domain")
 ORG_NAMES = tuple(c for c, _ in vs.ORGANIZATION_COLUMNS)
-# The columns that the cregit generator writes for schema 3: all but the 4
-# organization columns.
-BASE_COLUMNS = tuple((c, t) for c, t in vs.EXPECTED_COLUMNS_3 if c not in ORG_NAMES)
 FACTS_COLUMNS = ("project", "fact_type", "fact_value")
 EXIT_FAIL = 1
 EXIT_USAGE = 2
@@ -88,6 +85,25 @@ EXIT_USAGE = 2
 
 class Schema3Error(Exception):
     """A check failed. The text has counts and column names only."""
+
+
+# The schemas that the write gives. Schema 2 keeps the 29 metadata columns
+# (the release write of TOM v1.0.0, before the column pass); schema 3 is the
+# default.
+OUT_SCHEMAS = ("2", "3")
+
+
+def base_columns(schema: str = SCHEMA_VERSION) -> tuple[tuple[str, str], ...]:
+    """The columns that the write copies from SRC: the contract of `schema`
+    without the 4 organization columns."""
+    if schema not in OUT_SCHEMAS:
+        raise Schema3Error(f"the write gives schema 2 or 3, not {schema!r}")
+    return tuple((c, t) for c, t in vs.contract(schema) if c not in ORG_NAMES)
+
+
+# The columns that the cregit generator writes for schema 3: all but the 4
+# organization columns.
+BASE_COLUMNS = tuple((c, t) for c, t in vs.EXPECTED_COLUMNS_3 if c not in ORG_NAMES)
 
 
 def q(name: str) -> str:
@@ -117,28 +133,32 @@ def mapping_sha256(domain_pairs, project_pairs) -> str:
     return h.hexdigest()
 
 
-def source_projection(columns: list[str]) -> list[tuple[str, str]]:
-    """(source column, schema 3 name) for the 57 base columns, in schema 3 order.
+def source_projection(columns: list[str], schema: str = SCHEMA_VERSION) -> list[tuple[str, str]]:
+    """(source column, output name) for the base columns of `schema`, in order.
 
-    SRC is a cregit schema 3 file (57 columns), a 67-column cregit file or a
-    70-column schema 1 file. Any other column set is refused: a column that
-    the contract does not know must not pass, and a missing one must not
-    become NULL.
+    For schema 3, SRC is a cregit schema 3 file (57 columns), a 67-column
+    cregit file or a 70-column schema 1 file. For schema 2 it is a 67-column
+    cregit file or a 70-column schema 1 file. Any other column set is refused:
+    a column that the contract does not know must not pass, and a missing one
+    must not become NULL.
     """
     have = set(columns)
     if have & set(ORG_NAMES):
         raise Schema3Error("the input already has organization columns")
-    rename = {new: old for old, new in vs.SCHEMA_3_RENAMED.items()}
-    allowed_extra = set(vs.SCHEMA_3_DROPPED) | set(vs.FIRM_COLUMNS) | set(rename.values())
+    base = base_columns(schema)
+    rename = ({new: old for old, new in vs.SCHEMA_3_RENAMED.items()} if schema == "3" else {})
+    allowed_extra = set(vs.FIRM_COLUMNS)
+    if schema == "3":
+        allowed_extra |= set(vs.SCHEMA_3_DROPPED) | set(rename.values())
     items, missing = [], []
-    for name, _ in BASE_COLUMNS:
+    for name, _ in base:
         if name in have:
             items.append((name, name))
         elif rename.get(name) in have:
             items.append((rename[name], name))
         else:
             missing.append(name)
-    unknown = sorted(have - {n for n, _ in BASE_COLUMNS} - allowed_extra)
+    unknown = sorted(have - {n for n, _ in base} - allowed_extra)
     if missing or unknown:
         raise Schema3Error(f"the input is not a cregit or ctp schema 1 file: "
                            f"missing {missing}, unknown {unknown}")
@@ -196,10 +216,10 @@ def links_mapping(con, domain_links: str, project_links: str) -> str:
 
 
 def schema3_select(con, src: str, project: str, domain_links: str, project_links: str,
-                   domain_key: str) -> tuple[str, dict]:
+                   domain_key: str, schema: str = SCHEMA_VERSION) -> tuple[str, dict]:
     """The SELECT of the 61 schema 3 columns over SRC, in the row order of SRC,
     and its parameters. domain_key: an SQL expression over the columns of SRC."""
-    items = source_projection([c for c, _ in file_columns(con, src)])
+    items = source_projection([c for c, _ in file_columns(con, src)], schema)
     p = project_row(con, project_links, project)
     n, ids = load_domain_links(con, domain_links)
     narrow = (f"SELECT x.rn, coalesce(d.di, CASE WHEN {real_domain_sql('x.k')} "
@@ -217,17 +237,18 @@ def schema3_select(con, src: str, project: str, domain_links: str, project_links
     return sel, params
 
 
-def check_file(con, path: str, *, pseudonymized: bool | None = None) -> list[str]:
-    """The problems of a schema 3 file: contract, footer key-values."""
+def check_file(con, path: str, *, pseudonymized: bool | None = None,
+               schema: str = SCHEMA_VERSION) -> list[str]:
+    """The problems of a schema 3 (or 2) file: contract, footer key-values."""
     problems = []
     got = file_columns(con, path)
-    drifts = vs.compare_schema(got, vs.EXPECTED_COLUMNS_3)
+    drifts = vs.compare_schema(got, vs.contract(schema))
     if drifts:
-        problems.append(f"{len(drifts)} drifts from ctp schema 3: "
+        problems.append(f"{len(drifts)} drifts from ctp schema {schema}: "
                         + "; ".join(str(d).strip() for d in drifts[:5]))
     kv = file_kv(con, path)
-    if kv.get(vs.SCHEMA_KEY) != SCHEMA_VERSION:
-        problems.append(f"footer {vs.SCHEMA_KEY} is {kv.get(vs.SCHEMA_KEY)!r}, not '3'")
+    if kv.get(vs.SCHEMA_KEY) != schema:
+        problems.append(f"footer {vs.SCHEMA_KEY} is {kv.get(vs.SCHEMA_KEY)!r}, not {schema!r}")
     for k in ORG_KV_KEYS:
         if not kv.get(k):
             problems.append(f"footer has no {k}")
@@ -239,14 +260,16 @@ def check_file(con, path: str, *, pseudonymized: bool | None = None) -> list[str
     return problems
 
 
-def already_written(path: str, pseudonymize: dict | None) -> bool:
-    """True when `path` is a schema 3 file of the same kind (pseudonyms or not)."""
+def already_written(path: str, pseudonymize: dict | None,
+                    schema: str = SCHEMA_VERSION) -> bool:
+    """True when `path` is a file of `schema` of the same kind (pseudonyms or not)."""
     import duckdb
     con = duckdb.connect()
     try:
         if vs.SCHEMA_KEY not in file_kv(con, path):
             return False
-        return not check_file(con, path, pseudonymized=pseudonymize is not None)
+        return not check_file(con, path, pseudonymized=pseudonymize is not None,
+                              schema=schema)
     finally:
         con.close()
 
@@ -259,11 +282,12 @@ def _connect(memory_limit: str, threads: int, spill: str):
     return con
 
 
-def write_plain(con, src: str, tmp: str, sel: str, params: dict, kv: dict[str, str]) -> None:
+def write_plain(con, src: str, tmp: str, sel: str, params: dict, kv: dict[str, str],
+                schema: str = SCHEMA_VERSION) -> None:
     kvs = ", ".join(f"{k}: {sql_str(v)}" for k, v in kv.items())
     con.execute(f"COPY ({sel}) TO {sql_str(tmp)} ({ENCODING}, KV_METADATA {{{kvs}}})", params)
-    base = [c for c, _ in BASE_COLUMNS]
-    pairs = source_projection([c for c, _ in file_columns(con, src)])
+    base = [c for c, _ in base_columns(schema)]
+    pairs = source_projection([c for c, _ in file_columns(con, src)], schema)
     a = order_hash(con, src, [q(s) for s, _ in pairs])
     b = order_hash(con, tmp, [q(c) for c in base])
     if a != b:
@@ -273,15 +297,18 @@ def write_plain(con, src: str, tmp: str, sel: str, params: dict, kv: dict[str, s
 
 def write(src: str, dst: str, *, project: str, domain_links: str, project_links: str,
           organizations_version: str, memory_limit: str = "4GB", threads: int = 2,
-          pseudonymize: dict | None = None, out=None) -> dict:
-    """Write DST from SRC. pseudonymize: None, or a dict with salt_file, psl,
+          pseudonymize: dict | None = None, out=None, schema: str = SCHEMA_VERSION) -> dict:
+    """Write DST from SRC in `schema` (3, or 2: the 71 columns with the 29
+    metadata columns). pseudonymize: None, or a dict with salt_file, psl,
     registry or registry_dir, and scan (bool). Returns counts only."""
+    base_columns(schema)
     if not organizations_version:
         raise Schema3Error("--organizations-version is empty")
-    if os.path.abspath(src) == os.path.abspath(dst) and already_written(src, pseudonymize):
+    if os.path.abspath(src) == os.path.abspath(dst) and already_written(src, pseudonymize,
+                                                                        schema):
         # A resume after the write: SRC is the schema 3 file of an earlier
         # attempt, and the cregit file it came from is gone.
-        result = {"project": project, "skipped": "already ctp schema 3"}
+        result = {"project": project, "skipped": f"already ctp schema {schema}"}
         print(json.dumps(result, sort_keys=True), file=out or sys.stdout)
         return result
     dst_p = Path(dst)
@@ -293,16 +320,16 @@ def write(src: str, dst: str, *, project: str, domain_links: str, project_links:
     result = {"project": project, "pseudonymized": bool(pseudonymize)}
     try:
         mapping = links_mapping(con, domain_links, project_links)
-        kv = {vs.SCHEMA_KEY: SCHEMA_VERSION, "organizations_version": organizations_version,
+        kv = {vs.SCHEMA_KEY: schema, "organizations_version": organizations_version,
               "organizations_mapping_sha256": mapping}
         if pseudonymize is None:
             sel, params = schema3_select(con, src, project, domain_links, project_links,
-                                         "lower(trim(person_domain))")
-            write_plain(con, src, tmp, sel, params, kv)
+                                         "lower(trim(person_domain))", schema)
+            write_plain(con, src, tmp, sel, params, kv, schema)
         else:
             result.update(_write_pseudonymized(con, src, tmp, private, project, domain_links,
-                                               project_links, kv, pseudonymize, dst_p))
-        problems = check_file(con, tmp, pseudonymized=pseudonymize is not None)
+                                               project_links, kv, pseudonymize, dst_p, schema))
+        problems = check_file(con, tmp, pseudonymized=pseudonymize is not None, schema=schema)
         if problems:
             raise Schema3Error("; ".join(problems))
         result["rows"] = con.execute("SELECT count(*) FROM read_parquet(?)", [tmp]).fetchone()[0]
@@ -320,7 +347,7 @@ def write(src: str, dst: str, *, project: str, domain_links: str, project_links:
 
 def _write_pseudonymized(con, src: str, tmp: str, private: str, project: str,
                          domain_links: str, project_links: str, kv: dict[str, str],
-                         opts: dict, dst_p: Path) -> dict:
+                         opts: dict, dst_p: Path, schema: str = SCHEMA_VERSION) -> dict:
     """The organization columns with the rule E key, then the pseudonyms.
 
     First a private schema 3 file (real identities, the organization columns),
@@ -334,8 +361,9 @@ def _write_pseudonymized(con, src: str, tmp: str, private: str, project: str,
         psl = P.load_psl(opts.get("psl"))
         P.install(con, keys, psl=psl)
         key = P.person_domain_expr("person_domain", P.DEFAULT_DOMAIN_AT)
-        sel, params = schema3_select(con, src, project, domain_links, project_links, key)
-        write_plain(con, src, private, sel, params, kv)
+        sel, params = schema3_select(con, src, project, domain_links, project_links, key,
+                                     schema)
+        write_plain(con, src, private, sel, params, kv, schema)
         registry = opts.get("registry")
         if not registry:
             reg_dir = Path(opts["registry_dir"])
@@ -425,12 +453,15 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     w.add_argument("--registry", default="", help="an existing registry file")
     w.add_argument("--registry-dir", default="", help="make a registry per project here")
     w.add_argument("--no-scan", action="store_true", help="skip the leak scan")
+    w.add_argument("--schema", default=SCHEMA_VERSION, choices=OUT_SCHEMAS,
+                   help="3 (the default), or 2: the 71 columns with the 29 metadata columns")
     f = sub.add_parser("facts", help="write project_facts from the sidecar")
     f.add_argument("--sidecar", required=True)
     f.add_argument("--out", required=True)
     f.add_argument("names", nargs="+")
     c = sub.add_parser("check", help="check schema 3 files")
     c.add_argument("files", nargs="+")
+    c.add_argument("--schema", default=SCHEMA_VERSION, choices=OUT_SCHEMAS)
     return ap.parse_args(argv)
 
 
@@ -446,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
             con = duckdb.connect()
             bad = 0
             for path in a.files:
-                problems = check_file(con, path)
+                problems = check_file(con, path, schema=a.schema)
                 print(("OK   " if not problems else "FAIL ") + path
                       + ("" if not problems else "  " + "; ".join(problems)))
                 bad += bool(problems)
@@ -465,7 +496,8 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_USAGE
         write(a.src, a.dst, project=a.project, domain_links=a.domain_links,
               project_links=a.project_links, organizations_version=a.organizations_version,
-              memory_limit=a.memory_limit, threads=a.threads, pseudonymize=pseudo)
+              memory_limit=a.memory_limit, threads=a.threads, pseudonymize=pseudo,
+              schema=a.schema)
         return 0
     except Schema3Error as e:
         print(f"schema3: {e}", file=sys.stderr)

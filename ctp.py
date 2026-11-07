@@ -127,7 +127,9 @@ DATASET_STEP = 10
 # (--ctp-schema 3), then the `write` phase (schema3.py) adds the 4 organization
 # columns and the footer key-values, and pseudonymizes when asked. Schema 1 is
 # the older 70-column run of a cregit checkout that does the firm join itself.
-SCHEMAS = ("1", "3")
+# Schema 2 is the 71-column release schema before the column pass: the 29
+# metadata columns (--ctp-schema 1) and the same write phase (--schema 2).
+SCHEMAS = ("1", "2", "3")
 DEFAULT_SCHEMA = "3"
 # The run-wide file of the project facts that schema 3 does not keep per row.
 FACTS_FILE = "project_facts.parquet"
@@ -523,7 +525,8 @@ def write_args(project: dict, workdir: Path) -> list[str]:
             "--project", name,
             "--domain-links", _OPTS["domain_links"],
             "--project-links", _OPTS["project_links"],
-            "--organizations-version", _OPTS["organizations_version"]]
+            "--organizations-version", _OPTS["organizations_version"],
+            "--schema", _OPTS["schema"]]
     if _OPTS.get("memory_limit"):
         args += ["--memory-limit", _OPTS["memory_limit"]]
     if _OPTS.get("duckdb_threads"):
@@ -595,8 +598,8 @@ def run_project(project: dict) -> str:
             pipeline_args += ["--commit-url",
                               project["url"].removesuffix(".git").rstrip("/") + "/commit/"]
         schema = _OPTS.get("schema", "1")
-        if schema == "3":
-            pipeline_args += ["--ctp-schema", "3"]
+        if schema in ("2", "3"):
+            pipeline_args += ["--ctp-schema", "3" if schema == "3" else "1"]
         if _OPTS.get("tokenizer_worker"):
             pipeline_args.append("--tokenizer-worker")
         if _OPTS.get("skip_html"):
@@ -693,7 +696,7 @@ def run_project(project: dict) -> str:
         if rc != 0:
             return "failed"
 
-        if schema == "3":
+        if schema in ("2", "3"):
             rc = run_phase(project, "write", write_args(project, workdir))
             if rc != 0:
                 return "failed"
@@ -760,17 +763,17 @@ def schema3_options(args: argparse.Namespace, firm_map: str) -> dict:
                      "schema 1. Drop them, or drop --schema 1.")
         return {"schema": "1"}
     if firm_map:
-        sys.exit("--firm-map is a schema 1 option. Schema 3 has no firm columns: its "
+        sys.exit(f"--firm-map is a schema 1 option. Schema {schema} has no firm columns: its "
                  "organization columns come from --domain-links and --project-links.")
     if not script_supports("--ctp-schema"):
-        sys.exit(f"--schema 3 needs --ctp-schema, which {CREGIT}/run_pipeline_process.sh "
-                 "does not accept.\nThat checkout writes the 29 metadata columns of "
-                 "schema 1, and the write phase would refuse every file.")
+        sys.exit(f"--schema {schema} needs --ctp-schema, which {CREGIT}/run_pipeline_process.sh "
+                 "does not accept.\nThat checkout cannot select the metadata columns, "
+                 "and the write phase would refuse its files.")
     missing = [_flag(n) for n in (*_SCHEMA3_FILES, "organizations_version") if not vals[n]]
     if missing:
-        sys.exit(f"--schema 3 needs {', '.join(missing)}: they fill the 4 organization "
+        sys.exit(f"--schema {schema} needs {', '.join(missing)}: they fill the 4 organization "
                  "columns and the footer key-values of every file.")
-    out = {"schema": "3", "organizations_version": vals["organizations_version"]}
+    out = {"schema": schema, "organizations_version": vals["organizations_version"]}
     for n in _SCHEMA3_FILES:
         if not Path(vals[n]).is_file():
             sys.exit(f"{_flag(n)} {vals[n]} is not a file.")
@@ -1065,10 +1068,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     # that cannot forward the flag is still reported by its own sharper message
     # rather than by this general one.
     gaps: list[tuple[str, str]] = []
-    if not project_meta and schema3["schema"] == "3":
+    if not project_meta and schema3["schema"] in ("2", "3"):
         gaps.append(("--project-meta",
-                     "19 provenance columns empty on every row, and no "
-                     f"{FACTS_FILE} rows"))
+                     f"{19 if schema3['schema'] == '3' else 29} provenance columns "
+                     "empty on every row, and no project facts"))
     elif not project_meta:
         gaps.append(("--project-meta",
                      "29 provenance columns empty on every row: clone_url, "
@@ -1081,7 +1084,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                      "file_mask"))
     # Schema 3 has no firm map: schema3_options() has already refused a run
     # without the two link files that fill the organization columns.
-    if schema3["schema"] == "3":
+    if schema3["schema"] in ("2", "3"):
         pass
     elif not firm_map:
         gaps.append(("--firm-map",
@@ -1583,8 +1586,10 @@ def main() -> int:
                        help=f"the ctp schema to write (default {DEFAULT_SCHEMA}). 3: the "
                             "61 columns of validate_schema.EXPECTED_COLUMNS_3; needs "
                             "--domain-links, --project-links and "
-                            "--organizations-version. 1: the 70 columns of a cregit "
-                            "checkout that does the firm join (--firm-map)")
+                            "--organizations-version. 2: the 71 columns with the 29 "
+                            "metadata columns, with the same options. 1: the 70 "
+                            "columns of a cregit checkout that does the firm join "
+                            "(--firm-map)")
     run_p.add_argument("--domain-links", default="", metavar="PARQUET",
                        help="schema 3: the domain links (domain, firm_based_on_domain)")
     run_p.add_argument("--project-links", default="", metavar="PARQUET",

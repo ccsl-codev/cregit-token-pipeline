@@ -2721,7 +2721,7 @@ def schema3_args(f, **over):
 
 def test_schema_3_is_the_default_of_the_cli():
     assert ctp.DEFAULT_SCHEMA == "3"
-    assert set(ctp.SCHEMAS) == {"1", "3"}
+    assert set(ctp.SCHEMAS) == {"1", "2", "3"}
 
 
 def test_schema_1_refuses_the_schema_3_options(sandbox):
@@ -2913,3 +2913,22 @@ def test_select_runs_the_language_filter(monkeypatch):
                                           "--out-dir", "d", "--mode", "share"])
     assert ctp.main() == 0
     assert seen["argv"] == ["--manifest", "m.tsv", "--out-dir", "d", "--mode", "share"]
+
+
+def test_a_schema_2_run_writes_the_29_metadata_columns(schema3_files, sandbox, monkeypatch):
+    """Schema 2 stays runnable: cregit writes the 29 fields, the write gives 71."""
+    calls = []
+
+    def phase(project, name, args):
+        calls.append((name, list(args)))
+        if name == "validate":
+            Path(args[3]).write_text("rows=1\n")
+        return 0
+    monkeypatch.setattr(ctp, "run_phase", phase)
+    ctp._OPTS.update(ctp.schema3_options(schema3_args(schema3_files, schema="2"), ""))
+    project = dict(name="jq", url="u", category="c", file_filter="x", size_class="S")
+    assert ctp.run_project(project) == "done"
+    assert [c[0] for c in calls] == ["pipeline", "write", "validate"]
+    pipe, write = calls[0][1], calls[1][1]
+    assert pipe[pipe.index("--ctp-schema") + 1] == "1"
+    assert write[write.index("--schema") + 1] == "2"

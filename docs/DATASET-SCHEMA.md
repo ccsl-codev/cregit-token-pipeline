@@ -15,7 +15,10 @@ the contract from a real file with `./validate_schema.py --emit-contract F.parqu
 `ctp.py run` writes ctp schema 3 by default (`--schema 3`). This is the schema
 of the "Token on Me" release. The contract is `validate_schema.EXPECTED_COLUMNS_3`,
 61 columns. The rest of this document describes schema 1 (`--schema 1`, 70
-columns, `EXPECTED_COLUMNS`). Schema 3 differs from schema 1 as follows:
+columns, `EXPECTED_COLUMNS`). `--schema 2` writes the 71 columns of the release
+schema before the column pass (`EXPECTED_COLUMNS_2`): the 29 metadata columns
+and the 4 organization columns, with the same options as schema 3. Schema 3
+differs from schema 1 as follows:
 
 - The 3 firm columns (`firm_raw`, `firm`, `firm_source`) are not in the file.
 - The 4 organization columns are at the end: `firm_based_on_namespace`,

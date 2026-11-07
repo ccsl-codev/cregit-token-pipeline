@@ -349,3 +349,19 @@ def test_main_facts_prints_the_counts(tmp_path, capsys):
     side.write_text(json.dumps({"p": {"fact": "roster:kde"}}))
     assert S.main(["facts", "--sidecar", str(side), "--out", str(tmp_path / "f.parquet"), "p"]) == 0
     assert json.loads(capsys.readouterr().out) == {"facts_rows": 1, "projects": 1}
+
+
+def test_schema_2_keeps_the_29_metadata_columns(tmp_path, links):
+    src = make_file(tmp_path / "a.parquet", vs.EXPECTED_COLUMNS)    # schema 1, 70 columns
+    dst = str(tmp_path / "b.parquet")
+    res = run_write(src, dst, links, schema="2")
+    assert res["rows"] == 30
+    assert [(r[0], r[1]) for r in read(dst, "DESCRIBE SELECT * FROM {F}")] == list(vs.EXPECTED_COLUMNS_2)
+    assert kv_of(dst)["ctp_schema_version"] == "2"
+    assert S.check_file(duckdb.connect(), dst, schema="2") == []
+    assert S.main(["check", "--schema", "2", dst]) == 0
+    with pytest.raises(S.Schema3Error, match="missing"):
+        run_write(make_file(tmp_path / "c.parquet", CREGIT_3), str(tmp_path / "d.parquet"),
+                  links, schema="2")
+    with pytest.raises(S.Schema3Error, match="schema 2 or 3"):
+        S.base_columns("1")
