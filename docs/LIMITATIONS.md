@@ -298,3 +298,48 @@ with `select name from projects where parquet_missing`.
 **No firm or organization rollup exists.** The firm columns are per token. There
 is no aggregated firm table, no packaging step and no dataset card
 (`DESIGN.md` §7).
+
+## 8. Language filter
+
+These apply to `language_filter.py` (README, "Language filter"), which can select
+the manifest before a run.
+
+**A line count is not a token count.** The rule reads tokei's code lines, not
+cregit tokens. A language with long lines or dense syntax has more tokens per
+line than another, so the target share is not the share of tokens that the run
+will produce. Measure the token share on the output if your analysis needs it.
+
+**tokei decides the language by the file name.** A file is counted under the
+language that its extension or name maps to in tokei 14, not under what it
+holds. The Qt rule below is the one correction. Another tokei major version can
+map names in another way, so the step records `tokei_version` and warns when it
+is not 14.
+
+**Qt `.ts` files are removed by their first bytes.** A `.ts` file that starts
+with `<?xml`, `<!DOCTYPE TS` or `<TS`, after an optional byte order mark and
+white space, is removed as a Qt translation file. A real TypeScript file never
+starts so. A Qt file that starts with a comment or another element is counted
+as TypeScript.
+
+**Vendored code is found by directory name only.** A directory named like an
+entry of `--vendored-dirs`, at any depth, is removed. A vendored library under
+another name (`src/zlib/`, `contrib/`) is counted, and a project's own
+`deps/` directory is not.
+
+**Code embedded in another language is not counted.** Only the top-level `code`
+of each tokei language is read. A Rust block in Markdown or a script in HTML is
+under that language's `children`, and both of those languages are dropped.
+
+**C++ modules are their own language.** tokei counts `.cppm`, `.ixx` and the
+like as `C++ Module`, which is not merged into C++ and is not a default target.
+The tokenizer does not parse those files either (`file_mask.py`).
+
+**Submodules and Git LFS objects are not fetched.** The count covers the files
+of the commit itself. A submodule is an empty directory, and an LFS file is its
+pointer text.
+
+**A host that refuses a fetch by commit gives no count.** Some hosts send only
+the commits that a branch or tag names. Such a row is reported as `not measured:
+fetch by commit refused` and dropped; the step does not fall back to another
+commit. A commit that the host does not have reads the same, because git prints
+`not our ref` for both.

@@ -56,6 +56,10 @@ dev = [
 # Not Python, not installable from here, and deliberately optional:
 #   perl  tests/test_mask_drift.py shells out to `perl tokenize/fileMask.pl` in the
 #         cregit checkout. Self-skips when perl or that checkout is absent.
+#   tokei language_filter.py counts code lines with tokei 14. `nix develop` puts
+#         it on PATH (flake.nix pins it). The tests that run the real tokei
+#         self-skip when it is absent; the rest use a stub.
+#   git   language_filter.py and its tests fetch commits with git.
 
 [build-system]
 requires = ["setuptools>=77"]
@@ -71,6 +75,7 @@ py-modules = [
     "consolidate",
     "ctp",
     "file_mask",
+    "language_filter",
     "measure_dataset_gaps",
     "retain",
     "validate",

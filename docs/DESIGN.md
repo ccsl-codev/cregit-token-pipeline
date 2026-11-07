@@ -62,6 +62,11 @@ a polyglot project's other languages. The column stays because it records which
 mask a Parquet was built with.
 
 Project selection is a separate concern: the runner only consumes a manifest.
+One selection step is here, `language_filter.py`, because its rule comes from
+the tokenizer's languages (`file_mask.TOKENIZABLE_LANGUAGES`). It reads a
+manifest with a sixth field, the pinned commit, so that the count is of a known
+revision; it has its own parser for that, and the runner's parsers stay at five
+fields.
 
 ## 3. Per-project pipeline: the delta
 
