@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+import build_programming_table as bpt
 import language_filter as lf
 
 TOKEI = shutil.which("tokei")
@@ -39,9 +39,9 @@ if "--version" in sys.argv:
     print("tokei 14.0.0 compiled with serialization support: json")
     sys.exit(0)
 EXT = {".c": "C", ".h": "C Header", ".py": "Python", ".ts": "TypeScript",
-       ".md": "Markdown", ".json": "JSON"}
+       ".md": "Markdown", ".json": "JSON", ".zz": "Zz Unknown"}
 out = {}
-for top, _, files in os.walk("."):
+for top, _, files in os.walk(sys.argv[-1]):
     for f in files:
         lang = EXT.get(os.path.splitext(f)[1])
         if lang:
@@ -54,11 +54,9 @@ print(json.dumps(out))
 
 
 def git(*args: str, cwd: Path) -> str:
-    env = lf.git_env()
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
     p = subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@example.org",
                         "-c", "init.defaultBranch=main", *args],
-                       cwd=cwd, env=env, capture_output=True, text=True, check=True)
+                       cwd=cwd, env=lf.git_env(), capture_output=True, text=True, check=True)
     return p.stdout.strip()
 
 
@@ -67,6 +65,13 @@ def write(root: Path, files: dict[str, str]) -> None:
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
+
+
+def files(root: Path) -> list[str]:
+    """Regular files and links to files under `root`, without following a directory link."""
+    return sorted(os.path.relpath(os.path.join(top, f), root)
+                  for top, _, fs in os.walk(root) for f in fs
+                  if os.path.isfile(os.path.join(top, f)))
 
 
 @pytest.fixture
@@ -124,16 +129,16 @@ def read_tsv(path: Path) -> list[dict[str, str]]:
 
 def options(**over) -> lf.Options:
     base = dict(fetch_cmd=lf.FETCH_CMD.split(), work_dir=None, tokei="tokei",
-                vendored=frozenset(lf.VENDORED_DIRS), drop=frozenset(lf.DROP_LANGUAGES),
-                timeout=600)
+                vendored=frozenset(lf.VENDORED_DIRS), timeout=600)
     base.update(over)
     return lf.Options(**base)
 
 
-# --- the rule ---------------------------------------------------------------
-
+TABLE = lf.read_programming_table(lf.PROGRAMMING_TABLE)
 TARGETS = frozenset(lf.TARGET_LANGUAGES)
 
+
+# --- the rule ---------------------------------------------------------------
 
 def test_default_targets_are_the_tokenizer_languages():
     assert set(lf.TARGET_LANGUAGES) == {"C", "C++", "Java", "Rust"}
@@ -153,6 +158,8 @@ def test_largest_drops_a_row_whose_largest_language_is_not_a_target():
 def test_largest_breaks_a_tie_by_name():
     assert lf.decide({"Python": 50, "C": 50}, TARGETS, "largest", None).largest == "C"
     assert lf.decide({"Python": 50, "Zig": 50}, TARGETS, "largest", None).largest == "Python"
+    # Code point order, as Python's sorted(): upper case before lower case.
+    assert lf.decide({"jq": 5, "Zig": 5}, TARGETS, "largest", None).largest == "Zig"
 
 
 @pytest.mark.parametrize("threshold,kept", [(0.30, True), (0.60, True), (0.61, False)])
@@ -160,7 +167,7 @@ def test_share_compares_the_target_share_with_the_threshold(threshold, kept):
     d = lf.decide({"C": 30, "Rust": 30, "Python": 40}, TARGETS, "share", threshold)
     assert d.kept is kept
     assert d.share == pytest.approx(0.6)
-    assert d.reason == ("" if kept else f"target share 0.6000 is below {threshold}")
+    assert d.reason == ("" if kept else f"target share 0.600000 is below {threshold}")
 
 
 def test_share_keeps_a_row_whose_largest_language_is_not_a_target():
@@ -168,10 +175,10 @@ def test_share_keeps_a_row_whose_largest_language_is_not_a_target():
     assert d.kept and d.largest == "Python"
 
 
-def test_no_counted_code_is_dropped_with_a_reason():
+def test_no_programming_code_is_dropped_with_a_reason():
     d = lf.decide({}, TARGETS, "largest", None)
     assert (d.kept, d.largest, d.share) == (False, "", None)
-    assert d.reason == "no code lines in a counted language"
+    assert d.reason == "no code lines in a programming language"
 
 
 # --- the counts -------------------------------------------------------------
@@ -179,29 +186,62 @@ def test_no_counted_code_is_dropped_with_a_reason():
 def test_headers_merge_into_their_language():
     report = {"C": {"code": 10}, "C Header": {"code": 5}, "C++": {"code": 7},
               "C++ Header": {"code": 3}, "Total": {"code": 25}}
-    assert lf.code_lines(report, frozenset()) == {"C": 15, "C++": 10}
+    assert lf.language_counts(report) == {"C": 15, "C++": 10}
 
 
 def test_a_header_alone_counts_as_its_language():
-    assert lf.code_lines({"C Header": {"code": 4}}, frozenset()) == {"C": 4}
+    assert lf.language_counts({"C Header": {"code": 4}}) == {"C": 4}
 
 
-def test_dropped_languages_and_the_total_are_not_counted():
-    report = {"Rust": {"code": 9}, "JSON": {"code": 500}, "Markdown": {"code": 80},
-              "YAML": {"code": 20}, "Plain Text": {"code": 1}, "Total": {"code": 610}}
-    assert lf.code_lines(report, frozenset(lf.DROP_LANGUAGES)) == {"Rust": 9}
+def test_embedded_code_counts_toward_the_language_that_holds_it():
+    blob = {"code": 2, "blobs": {"Python": {"code": 1, "blobs": {}}}}
+    report = {"Markdown": {"code": 1, "children": {
+        "Rust": [{"stats": {"code": 30, "blobs": {}}}, {"stats": blob}]}},
+        "Rust": {"code": 4, "children": {}}}
+    assert lf.language_counts(report) == {"Markdown": 34, "Rust": 4}
 
 
-def test_embedded_children_are_not_counted():
-    report = {"Markdown": {"code": 0, "children": {"Rust": [{"stats": {"code": 30}}]}}}
-    assert lf.code_lines(report, frozenset()) == {}
+def test_languages_with_no_code_are_left_out():
+    assert lf.language_counts({"Markdown": {"code": 0, "children": {}}}) == {}
 
 
-def test_the_drop_list_holds_the_named_formats():
-    must = {"JSON", "YAML", "TOML", "XML", "Markdown", "Plain Text", "HTML", "CSS", "SVG",
-            "ReStructuredText", "AsciiDoc", "INI"}
-    assert must <= set(lf.DROP_LANGUAGES)
-    assert not set(lf.DROP_LANGUAGES) & set(lf.TARGET_LANGUAGES)
+def test_only_programming_languages_are_counted():
+    counts = {"Rust": 9, "JSON": 500, "Markdown": 80, "Shell": 7, "Makefile": 3, "CMake": 2,
+              "New Language": 4}
+    c = lf.count_programming(counts, TABLE)
+    assert c.code == {"Rust": 9, "Shell": 7, "Makefile": 3, "CMake": 2}
+    assert c.nonprogramming == 584
+    assert c.unknown == ["New Language"]
+
+
+# --- the programming table --------------------------------------------------
+
+def test_the_shipped_table_decides_every_row():
+    rows = read_tsv(lf.PROGRAMMING_TABLE)
+    assert rows and {r["programming"] for r in rows} == {"yes", "no"}
+    assert {r["decided_by"] for r in rows} == {"name", "hand"}
+    assert len({r["tokei_language"] for r in rows}) == len(rows)
+
+
+@pytest.mark.parametrize("lang,prog", [
+    ("C", True), ("C++", True), ("Java", True), ("Rust", True), ("C Header", True),
+    ("Shell", True), ("Makefile", True), ("CMake", True), ("Autoconf", True),
+    ("JSON", False), ("YAML", False), ("TOML", False), ("XML", False), ("Markdown", False),
+    ("Plain Text", False), ("HTML", False), ("CSS", False), ("SVG", False),
+    ("ReStructuredText", False), ("AsciiDoc", False), ("INI", False),
+])
+def test_the_shipped_table_classifies_known_languages(lang, prog):
+    assert TABLE[lang] is prog
+
+
+def test_read_programming_table_skips_comments_and_rejects_an_empty_table(tmp_path):
+    path = tmp_path / "t.tsv"
+    path.write_text("# a comment\ntokei_language\tprogramming\tdecided_by\tlinguist\n"
+                    "Zz\tyes\thand\tnone\nYy\tno\tname\tYy (data)\n")
+    assert lf.read_programming_table(path) == {"Zz": True, "Yy": False}
+    path.write_text("tokei_language\tprogramming\tdecided_by\tlinguist\n")
+    with pytest.raises(ValueError, match="no rows"):
+        lf.read_programming_table(path)
 
 
 # --- the Qt .ts rule --------------------------------------------------------
@@ -214,8 +254,6 @@ def test_the_drop_list_holds_the_named_formats():
     b'\xef\xbb\xbf<?xml version="1.0"?>',
     b'\n\n  \t<?xml version="1.0"?>',
     b'\xef\xbb\xbf  \n<TS version="2.1">',
-    b"\xff\xfe" + '<?xml version="1.0"?>'.encode("utf-16-le"),
-    b"\xfe\xff" + '\n<TS version="2.1">'.encode("utf-16-be"),
 ])
 def test_qt_translation_files_are_detected(head):
     assert lf.is_qt_ts(head)
@@ -225,9 +263,10 @@ def test_qt_translation_files_are_detected(head):
     b"export const x = 1;\n",
     b"import { a } from './a';\n<?xml",
     b"// <TS>\n",
-    b"<TSomething>value;\n",
     b"",
     b"\xef\xbb\xbf/// <reference path='x.d.ts' />\n",
+    # Only a UTF-8 byte order mark is skipped.
+    b"\xff\xfe" + '<?xml version="1.0"?>'.encode("utf-16-le"),
 ])
 def test_typescript_is_not_taken_for_a_translation_file(head):
     assert not lf.is_qt_ts(head)
@@ -235,32 +274,46 @@ def test_typescript_is_not_taken_for_a_translation_file(head):
 
 def test_remove_qt_ts_deletes_only_translation_files(tmp_path):
     write(tmp_path, {"a/app_de.ts": QT_TS, "a/app.ts": TYPESCRIPT, "b/UPPER.TS": QT_TS,
-                     "b/notes.xml": QT_TS})
+                     "b/notes.xml": QT_TS, ".ts": QT_TS})
     (tmp_path / "link.ts").symlink_to(tmp_path / "a" / "app_de.ts")
-    assert lf.remove_qt_ts(tmp_path) == 2
-    left = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+    (tmp_path / "dir.ts").mkdir()
+    assert lf.remove_qt_ts(tmp_path) == 3
+    left = files(tmp_path)
     assert left == ["a/app.ts", "b/notes.xml"]
     assert (tmp_path / "link.ts").is_symlink()
 
 
 # --- the vendored-path rule -------------------------------------------------
 
+def test_the_default_vendored_names():
+    assert set(lf.VENDORED_DIRS) == {"vendor", "vendored", "third_party", "third-party",
+                                     "thirdparty", "3rdparty", "external", "deps"}
+
+
 def test_vendored_directories_are_removed_at_any_depth(tmp_path):
-    write(tmp_path, {"vendor/a.c": "x", "src/third_party/b.c": "x", "src/Deps/c.c": "x",
-                     "lib/node_modules/d/e.js": "x", "external/f.c": "x",
-                     "third-party/g.c": "x", "src/keep.c": "x", "src/vendors/h.c": "x",
-                     "src/vendor.c": "x"})
+    write(tmp_path, {"vendor/a.c": "x", "vendor/sub/a2.c": "x", "src/third_party/b.c": "x",
+                     "src/Deps/c.c": "x", "lib/ThirdParty/d.c": "x", "external/f.c": "x",
+                     "third-party/g.c": "x", "x/3rdParty/h.c": "x", "Vendored/i.c": "x",
+                     "src/keep.c": "x", "src/vendors/h.c": "x", "src/vendor.c": "x",
+                     "web/node_modules/m.js": "x"})
     (tmp_path / "src" / "real").mkdir()
+    (tmp_path / "src" / "real" / "r.c").write_text("x")
     (tmp_path / "deps").symlink_to(tmp_path / "src" / "real")
-    assert lf.remove_vendored(tmp_path, frozenset(lf.VENDORED_DIRS)) == 7
-    left = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
-    assert left == ["src/keep.c", "src/vendor.c", "src/vendors/h.c"]
-    assert (tmp_path / "src" / "real").is_dir()
+    assert lf.remove_vendored(tmp_path, frozenset(lf.VENDORED_DIRS)) == (8, 9)
+    left = files(tmp_path)
+    assert left == ["src/keep.c", "src/real/r.c", "src/vendor.c", "src/vendors/h.c",
+                    "web/node_modules/m.js"]
+    assert (tmp_path / "deps").is_symlink()
+
+
+def test_node_modules_is_an_option(tmp_path):
+    write(tmp_path, {"web/node_modules/m.js": "x"})
+    assert lf.remove_vendored(tmp_path, frozenset({"node_modules"})) == (1, 1)
 
 
 def test_an_empty_vendored_list_removes_nothing(tmp_path):
     write(tmp_path, {"vendor/a.c": "x"})
-    assert lf.remove_vendored(tmp_path, frozenset()) == 0
+    assert lf.remove_vendored(tmp_path, frozenset()) == (0, 0)
     assert (tmp_path / "vendor" / "a.c").exists()
 
 
@@ -355,12 +408,13 @@ def test_a_fetch_that_runs_too_long_times_out(repo, tmp_path):
     assert lf.fetch_commit(repo["url"], repo["first"], dest, slow)[0] == lf.TIMED_OUT
 
 
-def test_git_env_drops_the_variables_that_redirect_git(monkeypatch):
+def test_git_env_drops_the_machine_configuration_and_redirects(monkeypatch):
     monkeypatch.setenv("GIT_DIR", "/elsewhere")
     monkeypatch.setenv("GIT_WORK_TREE", "/elsewhere")
     env = lf.git_env()
     assert "GIT_DIR" not in env and "GIT_WORK_TREE" not in env
-    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert (env["GIT_CONFIG_NOSYSTEM"], env["GIT_CONFIG_GLOBAL"]) == ("1", os.devnull)
+    assert (env["GIT_TERMINAL_PROMPT"], env["LC_ALL"]) == ("0", "C")
 
 
 # --- one row, with the stub tokei -------------------------------------------
@@ -370,8 +424,8 @@ def test_measure_row_counts_and_deletes_its_folder(repo, tmp_path, stub_tokei):
     row = lf.Row("p", repo["url"], repo["first"], "")
     m = lf.measure_row(row, options(tokei=stub_tokei, work_dir=work))
     assert m.status == lf.MEASURED
-    assert m.code == {"C": 7, "TypeScript": 3, "Python": 2}
-    assert (m.qt_ts_removed, m.vendored_dirs_removed) == (1, 1)
+    assert m.counts == {"C": 7, "TypeScript": 3, "Python": 2, "Markdown": 2, "JSON": 3}
+    assert (m.qt_ts_removed, m.vendored_dirs_removed, m.vendored_files_removed) == (1, 1, 1)
     assert list(work.iterdir()) == []
 
 
@@ -426,11 +480,14 @@ def test_main_writes_the_three_files(repo, tmp_path, stub_tokei, capsys):
     p = table["pinned"]
     assert (p["status"], p["kept"], p["largest_language"]) == (lf.MEASURED, "yes", "C")
     assert (p["code:C"], p["code:TypeScript"], p["code:Python"]) == ("7", "3", "2")
-    assert (p["target_share"], p["total_code"]) == ("0.5833", "12")
-    assert (p["qt_ts_removed"], p["vendored_dirs_removed"]) == ("1", "1")
-    assert p["tokei_version"] == "14.0.0"
+    assert (p["target_share"], p["programming_code"], p["nonprogramming_code"]) == (
+        "0.583333", "12", "5")
+    assert (p["qt_ts_removed"], p["vendored_dirs_removed"], p["vendored_files_removed"]) == (
+        "1", "1", "1")
+    assert (p["tokei_version"], p["unknown_languages"]) == ("14.0.0", "")
     assert table["unpinned"]["status"] == lf.NO_COMMIT
     assert table["gone"]["status"] == lf.FETCH_FAILED
+    assert table["gone"]["programming_code"] == "" and table["gone"]["code:C"] == "0"
     assert "code:Markdown" not in p and "code:JSON" not in p
 
     kept = (out / "kept.tsv").read_text().splitlines()
@@ -449,7 +506,7 @@ def test_main_share_mode(repo, tmp_path, stub_tokei):
                           "--threshold", "0.60")
     assert rc == 0
     assert (out / "kept.tsv").read_text().count("\n") == 1
-    assert read_tsv(out / "dropped.tsv")[0]["reason"] == "target share 0.5833 is below 0.6"
+    assert read_tsv(out / "dropped.tsv")[0]["reason"] == "target share 0.583333 is below 0.6"
 
 
 def test_main_reports_a_refused_fetch_and_does_not_fall_back(repo, tmp_path, stub_tokei):
@@ -458,18 +515,22 @@ def test_main_reports_a_refused_fetch_and_does_not_fall_back(repo, tmp_path, stu
                           "git -c protocol.version=0 fetch --depth 1 {url} {commit}")
     assert rc == 1
     row = read_tsv(out / "languages.tsv")[0]
-    assert (row["status"], row["kept"], row["total_code"]) == (lf.FETCH_REFUSED, "no", "")
+    assert (row["status"], row["kept"], row["programming_code"]) == (lf.FETCH_REFUSED, "no", "")
     assert read_tsv(out / "dropped.tsv")[0]["reason"].startswith(lf.FETCH_REFUSED)
 
 
-def test_main_vendored_dirs_and_drop_list_are_configurable(repo, tmp_path, stub_tokei):
+def test_main_vendored_dirs_and_table_are_configurable(repo, tmp_path, stub_tokei):
+    table = tmp_path / "t.tsv"
+    table.write_text("tokei_language\tprogramming\tdecided_by\tlinguist\n"
+                     "C\tyes\tname\tC\nJSON\tyes\thand\tdata as code\n")
     rows = [("pinned", repo["url"], repo["first"])]
     rc, out, _ = run_main(tmp_path, rows, "--tokei", stub_tokei, "--vendored-dirs", "",
-                          "--drop-languages", "JSON")
+                          "--programming-table", str(table), "--targets", "C")
     row = read_tsv(out / "languages.tsv")[0]
     assert rc == 0
-    assert (row["code:C"], row["code:Markdown"], row["vendored_dirs_removed"]) == ("47", "2", "0")
-    assert "code:JSON" not in row
+    assert (row["code:C"], row["code:JSON"], row["vendored_dirs_removed"]) == ("47", "3", "0")
+    assert (row["nonprogramming_code"], row["unknown_languages"]) == (
+        "7", "Markdown,Python,TypeScript")
 
 
 def test_main_warns_on_another_tokei_major(repo, tmp_path, stub_tokei, capsys):
@@ -492,6 +553,12 @@ def test_main_exits_2_on_a_program_that_is_not_tokei(tmp_path, capsys):
     assert "not a tokei version" in capsys.readouterr().err
 
 
+def test_main_exits_2_on_a_target_that_is_not_programming(tmp_path, stub_tokei, capsys):
+    rc, _, _ = run_main(tmp_path, [], "--tokei", stub_tokei, "--targets", "C,JSON")
+    assert rc == 2
+    assert "not a programming language" in capsys.readouterr().err
+
+
 def test_main_exits_2_on_a_malformed_manifest(tmp_path, stub_tokei):
     path = tmp_path / "bad.tsv"
     path.write_text("a\tb\n")
@@ -505,8 +572,7 @@ def test_main_exits_2_on_a_malformed_manifest(tmp_path, stub_tokei):
     (["--mode", "share", "--threshold", "1.5"], "needs --threshold"),
     (["--threshold", "0.3"], "applies only to --mode share"),
     (["--targets", ""], "--targets is empty"),
-    (["--targets", "C,C Header"], "merged or dropped"),
-    (["--targets", "C,JSON"], "merged or dropped"),
+    (["--targets", "C,C Header"], "merged into another language"),
     (["--fetch-cmd", "git fetch {url}"], "must contain"),
     (["--jobs", "0"], "at least 1"),
 ])
@@ -532,12 +598,9 @@ def test_real_tokei_is_version_14():
 
 
 @needs_tokei
-def test_every_configured_language_name_is_a_tokei_language():
-    listing = subprocess.run([TOKEI, "--languages"], capture_output=True, text=True,
-                             check=True).stdout
-    names = set(lf.DROP_LANGUAGES) | set(lf.TARGET_LANGUAGES) | set(lf.HEADER_MERGE)
-    missing = [n for n in names if not re.search(rf"^\W*{re.escape(n)}\s\s", listing, re.M)]
-    assert missing == []
+def test_the_table_lists_exactly_the_tokei_languages():
+    assert [r["tokei_language"] for r in read_tsv(lf.PROGRAMMING_TABLE)] == \
+        bpt.tokei_languages(TOKEI)
 
 
 @needs_tokei
@@ -561,6 +624,8 @@ def test_end_to_end_with_real_tokei(repo, tmp_path):
     assert (pinned["largest_language"], pinned["kept"]) == ("C", "yes")
     assert (pinned["qt_ts_removed"], pinned["vendored_dirs_removed"]) == ("1", "1")
     assert pinned["tokei_version"].startswith("14.")
+    # data.json; tokei counts the Markdown text as comments.
+    assert pinned["nonprogramming_code"] == "3"
     assert not any(k in pinned for k in ("code:C Header", "code:Markdown", "code:JSON"))
     tip = table["tip"]
     assert (tip["largest_language"], tip["kept"]) == ("Python", "no")

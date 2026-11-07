@@ -66,23 +66,37 @@ nix develop                                  # tokei 14 on PATH
 ```
 
 For each row it makes an empty repository in a temporary folder, fetches that one
-commit with depth 1 (never the history) and checks it out. It then removes the
-vendored directories and the Qt translation files, runs `tokei --hidden
---no-ignore --output json`, and deletes the folder. The counts are tokei's `code`
-lines. `C Header` is merged into C and `C++ Header` into C++. Data, markup and
-documentation languages (`DROP_LANGUAGES` in the module: JSON, YAML, TOML, XML,
-Markdown, Plain Text, HTML, CSS, SVG, reStructuredText, AsciiDoc, INI and more)
-are not counted. A `.ts` file that starts with `<?xml`, `<!DOCTYPE TS` or `<TS`,
-after an optional byte order mark and white space, is a Qt translation file, and
-tokei 14 would count it as TypeScript, so it is removed.
+commit with depth 1 (never the history), checks it out and deletes `.git`. git
+runs without the machine's git configuration. The step then removes the vendored
+directories and the Qt translation files, runs `tokei --hidden --no-ignore
+--output json` on the folder, and deletes the folder.
+
+The count of a language is tokei's `code` lines plus the code embedded in its
+files (tokei's `children`), as in tokei's own total. `C Header` is merged into C
+and `C++ Header` into C++. Only programming languages are counted: the table
+[`data/tokei14_programming.tsv`](data/tokei14_programming.tsv) says, for each
+tokei 14 language, whether it is one. A language is programming when Linguist
+gives its name `type: programming`, or when a hand decision for a tokei name that
+Linguist does not have says so. So Shell, Makefile, CMake and Autoconf count, and
+JSON, YAML, TOML, XML, Markdown, Plain Text, HTML, CSS, SVG, reStructuredText,
+AsciiDoc and INI do not. A language that the table does not list is not counted
+and is named in `unknown_languages`. `build_programming_table.py` rebuilds the
+table from Linguist's `languages.yml` and `tokei --languages`; its docstring
+names the Linguist commit of the shipped table.
+
+A vendored directory is one whose name is in `--vendored-dirs`, at any depth,
+compared without case; a symbolic link with such a name is kept. A `.ts` file
+that starts with `<?xml`, `<!DOCTYPE TS` or `<TS`, after an optional UTF-8 byte
+order mark and white space, is a Qt translation file, and tokei 14 would count it
+as TypeScript, so it is removed.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--targets` | `C,C++,Java,Rust` (`file_mask.TOKENIZABLE_LANGUAGES`) | the target languages, as tokei names them |
+| `--targets` | `C,C++,Java,Rust` (`file_mask.TOKENIZABLE_LANGUAGES`) | the target languages, as tokei names them. Each must be programming in the table |
 | `--mode` | `largest` | `largest` keeps a row whose largest language is a target. `share` keeps a row whose target share is at least `--threshold` |
 | `--threshold` | none | the share mode's threshold in (0, 1], for example 0.30 or 0.50 |
-| `--drop-languages` | `DROP_LANGUAGES` | comma-separated tokei languages that are not counted |
-| `--vendored-dirs` | `deps,external,node_modules,third-party,third_party,vendor` | directory names removed at any depth, compared without case. Empty removes none |
+| `--programming-table` | `data/tokei14_programming.tsv` | which tokei languages are counted |
+| `--vendored-dirs` | `3rdparty,deps,external,third-party,third_party,thirdparty,vendor,vendored` | directory names removed. Add `node_modules` if you want it. Empty removes none |
 | `--fetch-cmd` | `git fetch --quiet --depth 1 --no-tags {url} {commit}` | the fetch, run in the empty repository with no shell |
 | `--work-dir` | the system temporary folder | where the temporary checkouts go |
 | `--tokei`, `--timeout`, `--jobs` | `tokei`, 3600 s, 1 | the executable, the limit per git or tokei command, rows measured at once |
@@ -99,13 +113,14 @@ It writes three files to `--out-dir`:
 | `name`, `url`, `commit` | from the manifest |
 | `status` | `measured`, or `not measured: <why>`: `no pinned commit`, `fetch by commit refused`, `fetch failed`, `checkout failed`, `timed out`, `tokei failed` |
 | `kept` | `yes` or `no`. A row that was not measured is dropped |
-| `largest_language` | the counted language with the most code lines; a tie goes to the name that sorts first |
-| `target_share` | target-language code lines / all counted code lines, 4 decimals |
-| `total_code` | all counted code lines |
-| `qt_ts_removed`, `vendored_dirs_removed` | how many Qt `.ts` files and vendored directories were removed |
+| `largest_language` | the programming language with the most code lines; a tie goes to the name that sorts first (code point order) |
+| `target_share` | target-language code lines / all programming-language code lines, 6 decimals |
+| `programming_code`, `nonprogramming_code` | the code lines of the counted languages, and of the others |
+| `unknown_languages` | tokei languages with code that the table does not list |
+| `qt_ts_removed`, `vendored_dirs_removed`, `vendored_files_removed` | what the two removals took out |
 | `tokei_version` | from `tokei --version`. Another major version than 14 prints a warning |
 | `detail` | the first line of the git or tokei error, for a row that was not measured |
-| `code:<language>` | code lines per counted language, one column per language seen in the run |
+| `code:<language>` | code lines per programming language, one column per language seen in the run |
 
 Exit status: 0 every row was measured, 1 at least one was not (the files are
 still written), 2 wrong invocation or no usable tokei. `ctp.py run` reads five

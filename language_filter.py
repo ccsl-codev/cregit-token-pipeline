@@ -5,9 +5,11 @@
     ./language_filter.py --manifest IN.tsv --out-dir DIR --mode share --threshold 0.30
 
 For each row, fetch the files of the pinned commit alone (depth 1, never the
-history) into a temporary folder. Remove the vendored directories and the Qt
-translation files, count the code lines per language with tokei, then delete the
-folder. Apply the rule and write three files to DIR:
+history) into a temporary folder and delete its .git. Remove the vendored
+directories and the Qt translation files, count the code lines per language with
+tokei, then delete the folder. Count only the programming languages of the table
+that build_programming_table.py builds. Apply the rule and write three files to
+DIR:
 
   languages.tsv  one row per manifest row: the counts, the rule inputs, the status
   kept.tsv       the manifest rows that the rule keeps, copied verbatim
@@ -23,6 +25,7 @@ three files are still written), 2 wrong invocation or no usable tokei.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -44,51 +47,16 @@ TARGET_LANGUAGES: tuple[str, ...] = TOKENIZABLE_LANGUAGES
 # grammar and .hpp with the C++ grammar, so a header counts toward its language.
 HEADER_MERGE: dict[str, str] = {"C Header": "C", "C++ Header": "C++"}
 
-# tokei languages that are data, markup, documentation, style sheets, project
-# files or plain text, not programming languages. Their lines are not counted.
-# Every name is a tokei 14 language name; tests/test_language_filter.py checks
-# this against `tokei --languages`. CSV is not a tokei language, so it is never
-# counted and needs no entry. Build languages (Makefile, CMake, Autoconf, Meson)
-# and shells stay counted.
-DROP_LANGUAGES: tuple[str, ...] = (
-    ".NET Resource",
-    "AXAML",
-    "AsciiDoc",
-    "CSS",
-    "HEX",
-    "HTML",
-    "INI",
-    "Intel HEX",
-    "JSON",
-    "LESS",
-    "MDX",
-    "MSBuild",
-    "Markdown",
-    "NuGet Config",
-    "Org",
-    "PO File",
-    "Plain Text",
-    "PostCSS",
-    "ReStructuredText",
-    "Rusty Object Notation",
-    "SVG",
-    "Sass",
-    "Stylus",
-    "TOML",
-    "TeX",
-    "Unreal Markdown",
-    "Visual Studio Project",
-    "Visual Studio Solution",
-    "XAML",
-    "XML",
-    "Xcode Config",
-    "YAML",
-)
+# For each tokei 14 language, whether it is a programming language: Linguist's
+# `type: programming`, or a hand decision. build_programming_table.py builds it.
+# A language that the table does not list is not counted.
+PROGRAMMING_TABLE = Path(__file__).resolve().parent / "data" / "tokei14_programming.tsv"
 
 # A directory with one of these names, at any depth, is removed before the count.
-# Compared without case.
+# Compared without case. A symbolic link with such a name is kept.
 VENDORED_DIRS: tuple[str, ...] = (
-    "deps", "external", "node_modules", "third-party", "third_party", "vendor",
+    "3rdparty", "deps", "external", "third-party", "third_party", "thirdparty",
+    "vendor", "vendored",
 )
 
 # Run in an empty repository made with `git init`. {url} and {commit} are
@@ -100,11 +68,12 @@ MODES = ("largest", "share")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MANIFEST_FIELDS = 5
 
-# A Qt Linguist translation file: an XML document whose root element is <TS>.
-# tokei counts every .ts file as TypeScript.
-QT_TS_RE = re.compile(rb"^(<\?xml|<!DOCTYPE\s+TS[\s>]|<TS[\s>])")
-QT_TS_HEAD_BYTES = 1024
-BOMS = ((b"\xef\xbb\xbf", "utf-8"), (b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be"))
+# A Qt Linguist translation file: after an optional UTF-8 byte order mark and
+# white space, the file starts with one of these. tokei counts every .ts file as
+# TypeScript.
+QT_TS_PREFIXES = (b"<?xml", b"<!DOCTYPE TS", b"<TS")
+QT_TS_HEAD_BYTES = 8192
+UTF8_BOM = b"\xef\xbb\xbf"
 
 MEASURED = "measured"
 NO_COMMIT = "not measured: no pinned commit"
@@ -115,7 +84,8 @@ CHECKOUT_FAILED = "not measured: checkout failed"
 TOKEI_FAILED = "not measured: tokei failed"
 
 # What git prints when the host will not send a commit that no ref names. A
-# commit that the host does not have reads the same: "not our ref".
+# commit that the host does not have reads the same: "not our ref". git runs with
+# LC_ALL=C, so these are its English messages.
 REFUSED_MARKERS = ("not our ref", "unadvertised object", "allowReachableSHA1InWant",
                    "allowAnySHA1InWant")
 
@@ -135,10 +105,18 @@ class Row:
 @dataclass
 class Measure:
     status: str
-    code: dict[str, int] = field(default_factory=dict)
+    counts: dict[str, int] = field(default_factory=dict)
     qt_ts_removed: int = 0
     vendored_dirs_removed: int = 0
+    vendored_files_removed: int = 0
     detail: str = ""
+
+
+@dataclass
+class Counted:
+    code: dict[str, int]
+    nonprogramming: int
+    unknown: list[str]
 
 
 @dataclass
@@ -155,7 +133,6 @@ class Options:
     work_dir: Path | None
     tokei: str
     vendored: frozenset[str]
-    drop: frozenset[str]
     timeout: int
 
 
@@ -175,9 +152,21 @@ def read_manifest(path: Path) -> list[Row]:
     return rows
 
 
+def read_programming_table(path: Path) -> dict[str, bool]:
+    """tokei language -> True when it is a programming language."""
+    with path.open(newline="") as fh:
+        reader = csv.DictReader((x for x in fh if not x.startswith("#")), delimiter="\t")
+        table = {r["tokei_language"]: r["programming"] == "yes" for r in reader}
+    if not table:
+        raise ValueError(f"{path}: no rows")
+    return table
+
+
 def git_env() -> dict[str, str]:
+    """The environment, without the machine's git configuration or a redirect."""
     env = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
-    env.update(GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+               GIT_LFS_SKIP_SMUDGE="1", LC_ALL="C")
     return env
 
 
@@ -198,8 +187,8 @@ def fetch_commit(url: str, commit: str, dest: Path, opts: Options) -> tuple[str,
     steps = [
         (["git", "init", "--quiet", str(dest)], CHECKOUT_FAILED),
         ([a.replace("{url}", url).replace("{commit}", commit) for a in opts.fetch_cmd], None),
-        (["git", "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit],
-         CHECKOUT_FAILED),
+        (["git", "-c", "advice.detachedHead=false", "-c", "core.symlinks=true", "checkout",
+          "--quiet", "--detach", commit], CHECKOUT_FAILED),
     ]
     for cmd, failure in steps:
         try:
@@ -214,29 +203,31 @@ def fetch_commit(url: str, commit: str, dest: Path, opts: Options) -> tuple[str,
     return MEASURED, ""
 
 
-def remove_vendored(root: Path, names: frozenset[str]) -> int:
-    """Delete every directory under `root` whose name is in `names`. Returns how many."""
-    removed = 0
+def remove_vendored(root: Path, names: frozenset[str]) -> tuple[int, int]:
+    """Delete every directory under `root` whose name is in `names`, but not a symbolic link.
+
+    Returns how many directories, and how many files they held.
+    """
+    dirs_removed = files_removed = 0
     for top, dirs, _ in os.walk(root):
-        for d in list(dirs):
-            if d.lower() in names:
-                path = Path(top, d)
-                if path.is_symlink():
-                    path.unlink()
-                else:
-                    shutil.rmtree(path)
-                dirs.remove(d)
-                removed += 1
-    return removed
+        keep = []
+        for d in dirs:
+            path = os.path.join(top, d)
+            if d.lower() in names and not os.path.islink(path):
+                files_removed += sum(len(fs) for _, _, fs in os.walk(path))
+                shutil.rmtree(path, ignore_errors=True)
+                dirs_removed += 1
+            else:
+                keep.append(d)
+        dirs[:] = keep
+    return dirs_removed, files_removed
 
 
 def is_qt_ts(head: bytes) -> bool:
     """True when `head`, the first bytes of a .ts file, starts a Qt translation file."""
-    for bom, encoding in BOMS:
-        if head.startswith(bom):
-            head = head[len(bom):].decode(encoding, errors="ignore").encode("utf-8")
-            break
-    return bool(QT_TS_RE.match(head.lstrip()))
+    if head.startswith(UTF8_BOM):
+        head = head[len(UTF8_BOM):]
+    return head.lstrip().startswith(QT_TS_PREFIXES)
 
 
 def remove_qt_ts(root: Path) -> int:
@@ -244,46 +235,57 @@ def remove_qt_ts(root: Path) -> int:
     removed = 0
     for top, _, files in os.walk(root):
         for f in files:
-            path = Path(top, f)
-            if path.suffix.lower() != ".ts" or path.is_symlink():
+            path = os.path.join(top, f)
+            if not f.lower().endswith(".ts") or os.path.islink(path) or not os.path.isfile(path):
                 continue
-            with path.open("rb") as fh:
+            with open(path, "rb") as fh:
                 head = fh.read(QT_TS_HEAD_BYTES)
             if is_qt_ts(head):
-                path.unlink()
+                os.unlink(path)
                 removed += 1
     return removed
 
 
-def code_lines(report: dict, drop: frozenset[str]) -> dict[str, int]:
-    """Code lines per language from `tokei -o json`, headers merged, dropped languages out.
+def _code(stats: dict) -> int:
+    return stats["code"] + sum(_code(b) for b in stats.get("blobs", {}).values())
 
-    Only the top-level `code` of each language is read. Code embedded in another
-    language (a Rust block in Markdown, a script in HTML) sits under that
-    language's `children` and is not counted.
+
+def language_counts(report: dict) -> dict[str, int]:
+    """Code lines per tokei language from `tokei -o json`, headers merged.
+
+    A language's lines are its own `code` plus the code embedded in its files
+    (its `children`: a Rust block in Markdown counts toward Markdown), as in
+    tokei's own total.
     """
     counts: dict[str, int] = {}
     for lang, stats in report.items():
         if lang == "Total":
             continue
-        lang = HEADER_MERGE.get(lang, lang)
-        if lang in drop:
-            continue
-        counts[lang] = counts.get(lang, 0) + int(stats.get("code", 0))
-    return {k: v for k, v in counts.items() if v > 0}
+        n = stats["code"] + sum(_code(rep["stats"]) for reps in stats.get("children", {}).values()
+                                for rep in reps)
+        if n:
+            lang = HEADER_MERGE.get(lang, lang)
+            counts[lang] = counts.get(lang, 0) + n
+    return counts
+
+
+def count_programming(counts: dict[str, int], table: dict[str, bool]) -> Counted:
+    return Counted(code={k: v for k, v in counts.items() if table.get(k, False)},
+                   nonprogramming=sum(v for k, v in counts.items() if not table.get(k, False)),
+                   unknown=sorted(k for k in counts if k not in table))
 
 
 def decide(code: dict[str, int], targets: frozenset[str], mode: str,
            threshold: float | None) -> Decision:
-    """Apply the rule to one measured row.
+    """Apply the rule to the programming-language code lines of one measured row.
 
     The largest language has the most code lines; a tie goes to the name that
     sorts first. The target share is the target-language code lines over all the
-    counted code lines.
+    programming-language code lines.
     """
     total = sum(code.values())
     if total == 0:
-        return Decision(False, "", None, "no code lines in a counted language")
+        return Decision(False, "", None, "no code lines in a programming language")
     largest = min(code, key=lambda lang: (-code[lang], lang))
     share = sum(n for lang, n in code.items() if lang in targets) / total
     if mode == "largest":
@@ -291,7 +293,7 @@ def decide(code: dict[str, int], targets: frozenset[str], mode: str,
         reason = "" if kept else f"largest language is {largest}"
     else:
         kept = share >= threshold
-        reason = "" if kept else f"target share {share:.4f} is below {threshold}"
+        reason = "" if kept else f"target share {share:.6f} is below {threshold}"
     return Decision(kept, largest, share, reason)
 
 
@@ -308,8 +310,8 @@ def tokei_version(tokei: str) -> str:
 
 
 def run_tokei(root: Path, opts: Options) -> dict:
-    p = subprocess.run([opts.tokei, "--hidden", "--no-ignore", "--output", "json", "."],
-                       cwd=root, capture_output=True, text=True, timeout=opts.timeout)
+    p = subprocess.run([opts.tokei, "--hidden", "--no-ignore", "--output", "json", str(root)],
+                       cwd=root.parent, capture_output=True, text=True, timeout=opts.timeout)
     if p.returncode != 0:
         raise RuntimeError(first_line(p.stderr) or f"exit {p.returncode}")
     return json.loads(p.stdout)
@@ -320,12 +322,14 @@ def measure_row(row: Row, opts: Options) -> Measure:
         return Measure(NO_COMMIT)
     if opts.work_dir:
         opts.work_dir.mkdir(parents=True, exist_ok=True)
-    dest = Path(tempfile.mkdtemp(prefix="ctp-lang-", dir=opts.work_dir))
+    tmp = Path(tempfile.mkdtemp(prefix="ctp-lang-", dir=opts.work_dir))
+    dest = tmp / "w"
     try:
+        dest.mkdir()
         status, detail = fetch_commit(row.url, row.commit, dest, opts)
         if status != MEASURED:
             return Measure(status, detail=detail)
-        vendored = remove_vendored(dest, opts.vendored)
+        vendored_dirs, vendored_files = remove_vendored(dest, opts.vendored)
         qt = remove_qt_ts(dest)
         try:
             report = run_tokei(dest, opts)
@@ -333,38 +337,38 @@ def measure_row(row: Row, opts: Options) -> Measure:
             return Measure(TIMED_OUT, detail=f"tokei ran longer than {opts.timeout} s")
         except (OSError, RuntimeError, ValueError) as e:
             return Measure(TOKEI_FAILED, detail=str(e))
-        return Measure(MEASURED, code_lines(report, opts.drop), qt, vendored)
+        return Measure(MEASURED, language_counts(report), qt, vendored_dirs, vendored_files)
     finally:
-        shutil.rmtree(dest, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def cell(value: object) -> str:
     return re.sub(r"[\t\r\n]+", " ", str(value))
 
 
-def write_tsv(path: Path, header: list[str], rows: list[list[object]],
-              comments: tuple[str, ...] = ()) -> None:
-    lines = [f"# {c}" for c in comments]
-    lines.append("\t".join(header))
-    lines += ["\t".join(cell(v) for v in r) for r in rows]
+def write_tsv(path: Path, header: list[str], rows: list[list[object]]) -> None:
+    lines = ["\t".join(header)] + ["\t".join(cell(v) for v in r) for r in rows]
     path.write_text("\n".join(lines) + "\n")
 
 
 def write_outputs(out_dir: Path, rows: list[Row], measures: list[Measure],
-                  decisions: list[Decision | None], version: str, rule: str) -> None:
+                  counted: list[Counted | None], decisions: list[Decision | None],
+                  version: str, rule: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    langs = sorted({lang for m in measures for lang in m.code})
+    langs = sorted({lang for c in counted if c for lang in c.code})
     header = ["name", "url", "commit", "status", "kept", "largest_language", "target_share",
-              "total_code", "qt_ts_removed", "vendored_dirs_removed", "tokei_version",
+              "programming_code", "nonprogramming_code", "unknown_languages", "qt_ts_removed",
+              "vendored_dirs_removed", "vendored_files_removed", "tokei_version",
               "detail"] + [f"code:{lang}" for lang in langs]
     table, kept_lines, dropped = [], [], []
-    for row, m, d in zip(rows, measures, decisions, strict=True):
-        share = "" if d is None or d.share is None else f"{d.share:.4f}"
+    for row, m, c, d in zip(rows, measures, counted, decisions, strict=True):
+        share = "" if d is None or d.share is None else f"{d.share:.6f}"
         table.append([row.name, row.url, row.commit, m.status, "yes" if d and d.kept else "no",
                       d.largest if d else "", share,
-                      sum(m.code.values()) if m.status == MEASURED else "",
-                      m.qt_ts_removed, m.vendored_dirs_removed, version, m.detail]
-                     + [m.code.get(lang, 0) for lang in langs])
+                      sum(c.code.values()) if c else "", c.nonprogramming if c else "",
+                      ",".join(c.unknown) if c else "", m.qt_ts_removed,
+                      m.vendored_dirs_removed, m.vendored_files_removed, version, m.detail]
+                     + [c.code.get(lang, 0) if c else 0 for lang in langs])
         if d and d.kept:
             kept_lines.append(row.line)
         else:
@@ -395,9 +399,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                          "least --threshold")
     ap.add_argument("--threshold", type=float, default=None, metavar="X",
                     help="the share mode's threshold, in (0, 1], e.g. 0.30")
-    ap.add_argument("--drop-languages", default=",".join(DROP_LANGUAGES), metavar="LANGS",
-                    help="comma-separated tokei languages that are not counted "
-                         "(default: the list in language_filter.DROP_LANGUAGES)")
+    ap.add_argument("--programming-table", default=str(PROGRAMMING_TABLE), metavar="TSV",
+                    help="which tokei languages are programming languages "
+                         "(default: data/tokei14_programming.tsv)")
     ap.add_argument("--vendored-dirs", default=",".join(VENDORED_DIRS), metavar="NAMES",
                     help="comma-separated directory names removed before the count, at "
                          "any depth (default: %(default)s). Empty removes none")
@@ -419,11 +423,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     elif args.threshold is not None:
         ap.error("--threshold applies only to --mode share")
     args.targets = frozenset(comma_list(args.targets))
-    args.drop_languages = frozenset(comma_list(args.drop_languages))
     if not args.targets:
         ap.error("--targets is empty")
-    if bad := sorted(args.targets & (set(HEADER_MERGE) | args.drop_languages)):
-        ap.error(f"a target is merged or dropped before the rule: {', '.join(bad)}")
+    if bad := sorted(args.targets & set(HEADER_MERGE)):
+        ap.error(f"a target is merged into another language before the rule: {', '.join(bad)}")
     args.fetch_cmd = shlex.split(args.fetch_cmd)
     if not any("{url}" in a for a in args.fetch_cmd) or \
             not any("{commit}" in a for a in args.fetch_cmd):
@@ -437,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         rows = read_manifest(Path(args.manifest))
+        table = read_programming_table(Path(args.programming_table))
+        if bad := sorted(t for t in args.targets if not table.get(t, False)):
+            raise ValueError(f"a target is not a programming language in "
+                             f"{args.programming_table}: {', '.join(bad)}")
         version = tokei_version(args.tokei)
     except (OSError, ValueError) as e:
         print(f"language_filter: {e}", file=sys.stderr)
@@ -448,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
                    work_dir=Path(args.work_dir).resolve() if args.work_dir else None,
                    tokei=args.tokei,
                    vendored=frozenset(n.lower() for n in comma_list(args.vendored_dirs)),
-                   drop=args.drop_languages, timeout=args.timeout)
+                   timeout=args.timeout)
 
     def one(i_row: tuple[int, Row]) -> Measure:
         i, row = i_row
@@ -458,12 +465,14 @@ def main(argv: list[str] | None = None) -> int:
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         measures = list(pool.map(one, enumerate(rows, 1)))
-    decisions = [decide(m.code, args.targets, args.mode, args.threshold)
-                 if m.status == MEASURED else None for m in measures]
+    counted = [count_programming(m.counts, table) if m.status == MEASURED else None
+               for m in measures]
+    decisions = [decide(c.code, args.targets, args.mode, args.threshold) if c else None
+                 for c in counted]
     rule = ("mode largest" if args.mode == "largest"
             else f"mode share, threshold {args.threshold}")
     rule += f", targets {','.join(sorted(args.targets))}"
-    write_outputs(Path(args.out_dir), rows, measures, decisions, version, rule)
+    write_outputs(Path(args.out_dir), rows, measures, counted, decisions, version, rule)
 
     kept = sum(1 for d in decisions if d and d.kept)
     unmeasured = sum(1 for m in measures if m.status != MEASURED)

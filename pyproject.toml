@@ -72,6 +72,7 @@ build-backend = "setuptools.build_meta"
 py-modules = [
     "anonymize_parquet",
     "build_domain_map",
+    "build_programming_table",
     "consolidate",
     "ctp",
     "file_mask",

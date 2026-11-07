@@ -315,24 +315,33 @@ holds. The Qt rule below is the one correction. Another tokei major version can
 map names in another way, so the step records `tokei_version` and warns when it
 is not 14.
 
+**Which languages count is a judgment.** `data/tokei14_programming.tsv` follows
+Linguist's `type: programming` where a tokei name is a Linguist name, and a hand
+decision otherwise (`build_programming_table.py`, `HAND`). Shell, Makefile, CMake
+and Autoconf count; Protocol Buffers, Jupyter Notebooks and every data, markup
+and prose language do not. Pass another table to change it.
+
 **Qt `.ts` files are removed by their first bytes.** A `.ts` file that starts
-with `<?xml`, `<!DOCTYPE TS` or `<TS`, after an optional byte order mark and
-white space, is removed as a Qt translation file. A real TypeScript file never
-starts so. A Qt file that starts with a comment or another element is counted
-as TypeScript.
+with `<?xml`, `<!DOCTYPE TS` or `<TS`, after an optional UTF-8 byte order mark
+and white space, is removed as a Qt translation file. A TypeScript file that
+starts with a `<TS...>` type assertion would be removed too, which is rare. A Qt
+file in UTF-16, or one that starts with a comment, is counted as TypeScript.
 
 **Vendored code is found by directory name only.** A directory named like an
-entry of `--vendored-dirs`, at any depth, is removed. A vendored library under
-another name (`src/zlib/`, `contrib/`) is counted, and a project's own
-`deps/` directory is not.
+entry of `--vendored-dirs`, at any depth, is removed; a symbolic link with such
+a name is kept. A vendored library under another name (`src/zlib/`, `contrib/`,
+`node_modules/` by default) is counted, and a project's own `deps/` directory is
+removed.
 
-**Code embedded in another language is not counted.** Only the top-level `code`
-of each tokei language is read. A Rust block in Markdown or a script in HTML is
-under that language's `children`, and both of those languages are dropped.
+**Embedded code counts toward the language that holds it.** A language's lines
+include the code in its `children`, as in tokei's total. So a Rust block in
+Markdown counts as Markdown and a script in HTML as HTML, and neither is counted,
+because neither of those languages is a programming language.
 
 **C++ modules are their own language.** tokei counts `.cppm`, `.ixx` and the
-like as `C++ Module`, which is not merged into C++ and is not a default target.
-The tokenizer does not parse those files either (`file_mask.py`).
+like as `C++ Module`. It is a programming language in the table, so it counts,
+but it is not merged into C++ and is not a default target. The tokenizer does not
+parse those files either (`file_mask.py`).
 
 **Submodules and Git LFS objects are not fetched.** The count covers the files
 of the commit itself. A submodule is an empty directory, and an LFS file is its
@@ -342,4 +351,4 @@ pointer text.
 the commits that a branch or tag names. Such a row is reported as `not measured:
 fetch by commit refused` and dropped; the step does not fall back to another
 commit. A commit that the host does not have reads the same, because git prints
-`not our ref` for both.
+`not our ref` for both. A failed fetch is not retried.
