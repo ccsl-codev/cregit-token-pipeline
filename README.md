@@ -11,7 +11,8 @@ file**, carrying the commit and the person that last touched that token, and the
 organization of the person and of the project where it can be resolved. A run
 writes ctp schema 3 by default: 53 columns, the schema of the "Token on Me"
 release, with no later pass. A sidecar supplies the 16 per-project columns, and
-the run writes the project facts to `project_facts.parquet`. `--schema 1` writes
+the run writes the project facts to `project_facts.parquet` (the `fact` items, and
+the `roster_lang` value with the fact type `roster_language`). `--schema 1` writes
 the older 70 columns.
 
 Stdlib Python only, except pyarrow for the footer rename tool; DuckDB, srcML,

@@ -318,7 +318,7 @@ def test_the_facts_table_has_one_row_per_project_and_fact(tmp_path):
     assert S.write_facts(str(side), str(out), ["p2", "p1", "p3", "p1"]) == 3
     rows = read(out, "SELECT * FROM {F}")
     assert rows == [("p1", "owner_kind", "org"), ("p1", "roster", "asf"),
-                    ("p1", "roster_lang", "asf:Java")]
+                    ("p1", "roster_language", "asf:Java")]
     assert [r[0] for r in read(out, "DESCRIBE SELECT * FROM {F}")] == list(S.FACTS_COLUMNS)
     assert S.write_facts(str(side), str(tmp_path / "e.parquet"), ["p2"]) == 0
     assert read(tmp_path / "e.parquet", "SELECT count(*) FROM {F}") == [(0,)]

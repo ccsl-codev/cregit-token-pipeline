@@ -51,8 +51,8 @@ of every column that the write copies, and the footer key-values. With
 `facts` writes project_facts (project, fact_type, fact_value): one row for each
 `;`-separated item of the sidecar field `fact` of each NAME, split at the first
 `:` (fact_value is NULL when the item has no `:`), and one row with fact_type
-`roster_lang` and the sidecar value of `roster_lang` (for example `asf:Java`)
-when that value is not empty. A project with no fact has no row. `check` checks the schema 3 contract and the footer key-values of files.
+`roster_language` and the sidecar value of `roster_lang` as it is (for example
+`asf:Java`) when that value is not empty. A project with no fact has no row. `check` checks the schema 3 contract and the footer key-values of files.
 
 Exit 0 written or checked, 1 a check failed, 2 usage.
 """
@@ -82,9 +82,9 @@ PROJECT_LINK_COLUMNS = tuple((c, t) for c, t in vs.ORGANIZATION_COLUMNS
 ORG_NAMES = tuple(c for c, _ in vs.ORGANIZATION_COLUMNS)
 FACTS_COLUMNS = ("project", "fact_type", "fact_value")
 # The sidecar fields that leave the token file for project_facts. `fact` is a
-# list of items; the others are one value each, under their own name.
+# list of items; the others are one value each: sidecar field -> fact_type.
 FACT_LIST_FIELD = "fact"
-FACT_VALUE_FIELDS = ("roster_lang",)
+FACT_VALUE_FIELDS = {"roster_lang": "roster_language"}
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 
@@ -419,9 +419,9 @@ def facts_rows(sidecar: dict, names: list[str]) -> list[tuple[str, str, str | No
             raise Schema3Error(f"{name} is not in the sidecar")
         for t, v in split_fact(sidecar[name].get(FACT_LIST_FIELD, "")):
             rows.append((name, t, v))
-        for field in FACT_VALUE_FIELDS:
+        for field, fact_type in FACT_VALUE_FIELDS.items():
             if sidecar[name].get(field):
-                rows.append((name, field, sidecar[name][field]))
+                rows.append((name, fact_type, sidecar[name][field]))
     return rows
 
 

@@ -32,8 +32,8 @@ differs from schema 1 as follows:
   are not in the file. They are constant per project. The sidecar keeps them.
   The run writes the `fact` items and the `roster_lang` value to
   `<output_dir>/project_facts.parquet` (`project`, `fact_type`, `fact_value`):
-  one row for each project and fact. A `roster_lang` row has the fact type
-  `roster_lang` and the value as the sidecar gives it (for example
+  one row for each project and fact. The `roster_lang` value gets the fact
+  type `roster_language` and the value as the sidecar gives it (for example
   `asf:Java`).
 - The 5 token columns `person_name`, `person_email`, `footer_person_names`,
   `cregit_commit_sha` and `repo_tag` are not in the file. The first three
