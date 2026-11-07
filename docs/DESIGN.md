@@ -179,6 +179,13 @@ Built:
    and the protection is simply not publishing the registry. `verify_anon.py`
    checks the published files alone, needs no secrets, and is therefore the check
    worth putting in a release script.
+4. **`reencode_parquet.py`** — the final files written again with pyarrow and
+   fixed writer settings (ZSTD 19, data page V1, row groups of 1,000,000 rows,
+   PLAIN or DELTA_BINARY_PACKED for the large columns, Bloom filters on the
+   filter columns), with a content check of each output against its input: row
+   count, row, column and order hashes, schema, footer entries, a full pyarrow
+   decode and a DuckDB read. An output that fails a check is not kept. Every
+   setting is an option; `docs/REENCODE.md` gives them.
 
 Not built. Each is a gap, not a plan:
 

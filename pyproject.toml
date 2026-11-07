@@ -43,7 +43,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# reencode_parquet.py writes Parquet with pyarrow. The default is the version that
+# wrote the published dataset files; the tool checks it at the start.
+reencode = [
+    "pyarrow==26.0.1",
+]
 dev = [
+    # tests/test_reencode_parquet.py skips without pyarrow.
+    "pyarrow==26.0.1",
     # The test runner. pytest.ini sets --strict-markers and the `network` marker,
     # both of which need a real pytest rather than unittest.
     "pytest==9.1.1",
@@ -72,6 +79,7 @@ py-modules = [
     "ctp",
     "file_mask",
     "measure_dataset_gaps",
+    "reencode_parquet",
     "retain",
     "validate",
     "validate_schema",

@@ -12,7 +12,8 @@ that token, and the person's employer where it can be resolved. A sidecar
 supplies the 29 per-project columns.
 
 Stdlib Python only; DuckDB, srcML, ctags, Java and Perl come from the cregit
-checkout's `devenv shell`.
+checkout's `devenv shell`. The optional re-encode step also needs pyarrow
+(`pip install -e '.[reencode]'`).
 
 ## Start here
 
@@ -21,6 +22,7 @@ checkout's `devenv shell`.
 | understand the dataset, its grain and all 70 columns | **[`docs/DATASET-SCHEMA.md`](docs/DATASET-SCHEMA.md)** |
 | know the method limits before you analyze the data | **[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)** |
 | know why the pipeline is built this way | [`docs/DESIGN.md`](docs/DESIGN.md) |
+| re-encode the final Parquet files (smaller files, Bloom filters, no data change) | [`docs/REENCODE.md`](docs/REENCODE.md) |
 
 The authority on the schema is `validate_schema.py`, not any document.
 
@@ -75,6 +77,8 @@ ctp.py db ──► ctp.duckdb ├─ projects       DONE/RUNNING/FAILED/QUEUED 
                          └─ tokens (view)  every schema-conforming parquet, unified
 
 anonymize_parquet.py ──► pseudonymized parquets ──► verify_anon.py
+
+reencode_parquet.py ──► the same rows, other writer settings, checked file by file
 ```
 
 Ground truth is always the files — stamps, manifests, `metrics.tsv`.
