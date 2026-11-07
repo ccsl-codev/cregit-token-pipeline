@@ -157,6 +157,45 @@ the old one moved, that the page index points at real data pages, and that the
 footer equals the old one with the columns removed and the offsets blanked. It
 then runs the pyarrow, DuckDB and Bloom checks below on the kept columns.
 
+`--set NAME=VALUE` gives a top-level string column one value in every row.
+`--set-null NAME` makes the column null. Use them alone or with `--drop` and
+`--rename` in the same pass. NAME is the name in the input file. The tool
+writes a new chunk for that column in each row group, with pyarrow. All other
+regions are copied byte for byte, as for a drop. The new chunk keeps the
+physical type, the logical type, the codec, the encoding family (dictionary,
+PLAIN or DELTA_*), the data page version, the page checksums and the rows per
+page. The column gets new statistics with the same fields as before. It gets
+a new column index, offset index and Bloom filter only if it had one before.
+The schema and `ARROW:schema` do not change, because the type does not
+change.
+
+```sh
+./parquet_rename.py in.parquet out.parquet --set language=Go --set-null license
+./parquet_rename.py --values values.tsv --out-dir out/ --drop a --rename b=c
+./parquet_rename_check.py --set language=Go --set-null license in.parquet out.parquet
+./parquet_rename_check.py --values values.tsv --out-dir out/ --drop a --rename b=c
+```
+
+`values.tsv` has `FILE<TAB>COLUMN<TAB>OLD<TAB>NEW` lines. `\N` is a null. The
+output of FILE is `out/` with the base name of FILE. The tool refuses a file
+when its column does not hold OLD, and continues with the next file. It exits
+2 when it refuses a file.
+
+A replacement refuses a nested or repeated column, a column that is not a
+string, a null for a required column, a column that is also dropped, an
+encrypted file and a file with no rows. It also refuses a column with more
+than one distinct value. Give `--force-multi` to replace all of them; then OLD
+must be one of the values.
+
+For a replacement the check runs the drop checks on every other column. For
+the replaced column it proves that each new chunk keeps the old form (type,
+codec, path, value count, encoding family, page version, checksums, the
+fields that are present) and that its statistics give the new value. It also
+proves that the row group sizes are the sums of the new chunk sizes, that
+pyarrow and DuckDB read the new value in every row, that OLD held the
+expected old value, and that a Bloom probe finds the new value and no old
+value.
+
 `parquet_rename_check.py` proves each pair: the data prefix hashes are equal; the
 footers are equal field by field except the renamed names; pyarrow reads the new
 file with the mapped schema, the same row groups and rows, and the same SHA-256
