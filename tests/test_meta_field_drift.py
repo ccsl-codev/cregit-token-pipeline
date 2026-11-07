@@ -100,12 +100,15 @@ def cregit_literal(name: str):
 
 
 def test_the_generator_and_the_contract_agree_on_schema_3():
-    """ctp schema 3: the generator drops the same 10 fields and renames the same
-    one, so its 19 columns are the 19 of EXPECTED_COLUMNS_3 after repo_name."""
+    """ctp schema 3: the generator drops the same 13 fields and renames the same
+    one and leaves out the same 5 token columns, so its 16 metadata columns are
+    the 16 of EXPECTED_COLUMNS_3 after repo_name."""
     if not GENERATE_DATASET.exists():
         pytest.skip(f"{GENERATE_DATASET} is not checked out on this machine")
     assert tuple(cregit_literal("SCHEMA_3_DROPPED")) == vs.SCHEMA_3_DROPPED
     assert cregit_literal("SCHEMA_3_RENAMED") == vs.SCHEMA_3_RENAMED
+    assert tuple(cregit_literal("SCHEMA_3_DROPPED_TOKEN_COLUMNS")) == \
+        vs.SCHEMA_3_DROPPED_TOKEN_COLUMNS
 
 
 def test_the_schema_3_metadata_block_sits_between_repo_name_and_file_path():

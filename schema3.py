@@ -11,12 +11,13 @@
 
 ctp.py run calls `write` after step 10 of cregit, so that a normal run gives the
 file of the "Token on Me" release with no later pass. ctp schema 3 is
-validate_schema.EXPECTED_COLUMNS_3 (61 columns):
+validate_schema.EXPECTED_COLUMNS_3 (53 columns):
 
-  - the 20 project columns and the 37 token columns of the cregit generator
-    (--ctp-schema 3). SRC can also be a 67-column cregit file or a 70-column
-    schema 1 file: then the 10 columns of validate_schema.SCHEMA_3_DROPPED and
-    the 3 firm columns are not copied, and provenance_status gets the name
+  - the 17 project columns and the 32 token columns of the cregit generator
+    (--ctp-schema 3, 49 columns). SRC can also be a 67-column cregit file or a
+    70-column schema 1 file: then the 13 columns of
+    validate_schema.SCHEMA_3_DROPPED, the 5 of SCHEMA_3_DROPPED_TOKEN_COLUMNS
+    and the 3 firm columns are not copied, and provenance_status gets the name
     audit_frame_file;
   - the 4 organization columns, from two link tables:
       firm_based_on_namespace, project_enterprise_driven,
@@ -49,8 +50,9 @@ of every column that the write copies, and the footer key-values. With
 
 `facts` writes project_facts (project, fact_type, fact_value): one row for each
 `;`-separated item of the sidecar field `fact` of each NAME, split at the first
-`:` (fact_value is NULL when the item has no `:`). A project with no fact has no
-row. `check` checks the schema 3 contract and the footer key-values of files.
+`:` (fact_value is NULL when the item has no `:`), and one row with fact_type
+`roster_lang` and the sidecar value of `roster_lang` (for example `asf:Java`)
+when that value is not empty. A project with no fact has no row. `check` checks the schema 3 contract and the footer key-values of files.
 
 Exit 0 written or checked, 1 a check failed, 2 usage.
 """
@@ -79,6 +81,10 @@ PROJECT_LINK_COLUMNS = tuple((c, t) for c, t in vs.ORGANIZATION_COLUMNS
                              if c != "firm_based_on_domain")
 ORG_NAMES = tuple(c for c, _ in vs.ORGANIZATION_COLUMNS)
 FACTS_COLUMNS = ("project", "fact_type", "fact_value")
+# The sidecar fields that leave the token file for project_facts. `fact` is a
+# list of items; the others are one value each, under their own name.
+FACT_LIST_FIELD = "fact"
+FACT_VALUE_FIELDS = ("roster_lang",)
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 
@@ -136,7 +142,7 @@ def mapping_sha256(domain_pairs, project_pairs) -> str:
 def source_projection(columns: list[str], schema: str = SCHEMA_VERSION) -> list[tuple[str, str]]:
     """(source column, output name) for the base columns of `schema`, in order.
 
-    For schema 3, SRC is a cregit schema 3 file (57 columns), a 67-column
+    For schema 3, SRC is a cregit schema 3 file (49 columns), a 67-column
     cregit file or a 70-column schema 1 file. For schema 2 it is a 67-column
     cregit file or a 70-column schema 1 file. Any other column set is refused:
     a column that the contract does not know must not pass, and a missing one
@@ -149,7 +155,8 @@ def source_projection(columns: list[str], schema: str = SCHEMA_VERSION) -> list[
     rename = ({new: old for old, new in vs.SCHEMA_3_RENAMED.items()} if schema == "3" else {})
     allowed_extra = set(vs.FIRM_COLUMNS)
     if schema == "3":
-        allowed_extra |= set(vs.SCHEMA_3_DROPPED) | set(rename.values())
+        allowed_extra |= (set(vs.SCHEMA_3_DROPPED) | set(vs.SCHEMA_3_DROPPED_TOKEN_COLUMNS)
+                          | set(rename.values()))
     items, missing = [], []
     for name, _ in base:
         if name in have:
@@ -217,7 +224,7 @@ def links_mapping(con, domain_links: str, project_links: str) -> str:
 
 def schema3_select(con, src: str, project: str, domain_links: str, project_links: str,
                    domain_key: str, schema: str = SCHEMA_VERSION) -> tuple[str, dict]:
-    """The SELECT of the 61 schema 3 columns over SRC, in the row order of SRC,
+    """The SELECT of the schema 3 (or 2) columns over SRC, in the row order of SRC,
     and its parameters. domain_key: an SQL expression over the columns of SRC."""
     items = source_projection([c for c, _ in file_columns(con, src)], schema)
     p = project_row(con, project_links, project)
@@ -410,8 +417,11 @@ def facts_rows(sidecar: dict, names: list[str]) -> list[tuple[str, str, str | No
     for name in names:
         if name not in sidecar:
             raise Schema3Error(f"{name} is not in the sidecar")
-        for t, v in split_fact(sidecar[name].get("fact", "")):
+        for t, v in split_fact(sidecar[name].get(FACT_LIST_FIELD, "")):
             rows.append((name, t, v))
+        for field in FACT_VALUE_FIELDS:
+            if sidecar[name].get(field):
+                rows.append((name, field, sidecar[name][field]))
     return rows
 
 

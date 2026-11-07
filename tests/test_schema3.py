@@ -96,16 +96,25 @@ def kv_of(path):
 # the contract
 # --------------------------------------------------------------------------- #
 
-def test_schema_3_has_61_columns_in_the_release_order():
+def test_schema_3_has_53_columns_in_the_release_order():
     names = [c for c, _ in vs.EXPECTED_COLUMNS_3]
-    assert len(names) == 61 and len(set(names)) == 61
+    assert len(names) == 53 and len(set(names)) == 53
     assert names[:3] == ["repo_name", "clone_url", "audit_frame_file"]
-    assert names[19:21] == ["fork", "file_path"]
+    assert names[16:18] == ["owner_type", "file_path"]
     assert names[-4:] == list(S.ORG_NAMES)
+    assert names[-5] == "footer_personids"
     assert not set(vs.SCHEMA_3_DROPPED) & set(names)
+    assert not set(vs.SCHEMA_3_DROPPED_TOKEN_COLUMNS) & set(names)
     assert "provenance_status" not in names
     assert dict(vs.EXPECTED_COLUMNS_3)["project_enterprise_driven"] == "BOOLEAN"
-    assert len(vs.META_FIELDS_3) == 19 and vs.META_FIELDS_3[1] == "audit_frame_file"
+    assert len(vs.META_FIELDS_3) == 16 and vs.META_FIELDS_3[1] == "audit_frame_file"
+    # The 53 are the 61 of the first schema 3 without the 8 that left on 2026-11-07.
+    first = [(vs.SCHEMA_3_RENAMED.get(c, c), t) for c, t in vs.EXPECTED_COLUMNS_2
+             if c not in vs.SCHEMA_3_DROPPED[:10]]
+    assert len(first) == 61
+    eight = {"person_name", "person_email", "footer_person_names", "cregit_commit_sha",
+             "repo_tag", "archived", "fork", "roster_lang"}
+    assert [x for x in first if x[0] not in eight] == list(vs.EXPECTED_COLUMNS_3)
     assert len(vs.EXPECTED_COLUMNS_2) == 71
 
 
@@ -117,7 +126,7 @@ def test_contract_names_each_schema_and_refuses_another():
 
 
 @pytest.mark.parametrize("layout", ["cregit3", "cregit1", "schema1"])
-def test_each_known_input_layout_projects_to_the_57_base_columns(layout):
+def test_each_known_input_layout_projects_to_the_49_base_columns(layout):
     cols = {"cregit3": [c for c, _ in CREGIT_3], "cregit1": [c for c, _ in CREGIT_1],
             "schema1": [c for c, _ in vs.EXPECTED_COLUMNS]}[layout]
     pairs = S.source_projection(cols)
@@ -302,12 +311,14 @@ def test_split_fact_splits_items_at_the_first_colon():
 
 def test_the_facts_table_has_one_row_per_project_and_fact(tmp_path):
     side = tmp_path / "s.json"
-    side.write_text(json.dumps({"p1": {"fact": "roster:asf;owner_kind:org"},
-                                "p2": {"fact": ""}, "p3": {}}))
+    side.write_text(json.dumps({"p1": {"fact": "roster:asf;owner_kind:org",
+                                       "roster_lang": "asf:Java"},
+                                "p2": {"fact": "", "roster_lang": ""}, "p3": {}}))
     out = tmp_path / "f" / S.FACTS_COLUMNS[0]
-    assert S.write_facts(str(side), str(out), ["p2", "p1", "p3", "p1"]) == 2
+    assert S.write_facts(str(side), str(out), ["p2", "p1", "p3", "p1"]) == 3
     rows = read(out, "SELECT * FROM {F}")
-    assert rows == [("p1", "owner_kind", "org"), ("p1", "roster", "asf")]
+    assert rows == [("p1", "owner_kind", "org"), ("p1", "roster", "asf"),
+                    ("p1", "roster_lang", "asf:Java")]
     assert [r[0] for r in read(out, "DESCRIBE SELECT * FROM {F}")] == list(S.FACTS_COLUMNS)
     assert S.write_facts(str(side), str(tmp_path / "e.parquet"), ["p2"]) == 0
     assert read(tmp_path / "e.parquet", "SELECT count(*) FROM {F}") == [(0,)]
@@ -333,7 +344,7 @@ def test_main_writes_and_refuses_bad_option_sets(tmp_path, links, anon, capsys):
             "--organizations-version", "v9"]
     assert S.main(base) == 0
     printed = json.loads(capsys.readouterr().out.strip())
-    assert printed["rows"] == 30 and printed["input_columns"] == 57
+    assert printed["rows"] == 30 and printed["input_columns"] == 49
     assert S.main(base + ["--pseudonymize"]) == S.EXIT_USAGE
     assert S.main(base + ["--salt-file", anon["salt_file"]]) == S.EXIT_USAGE
     assert S.main(base + ["--pseudonymize", "--salt-file", anon["salt_file"],

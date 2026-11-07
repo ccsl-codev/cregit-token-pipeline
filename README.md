@@ -9,8 +9,8 @@ in; one validated Parquet per project comes out.
 Each project yields one Parquet file with **one row per token occurrence per
 file**, carrying the commit and the person that last touched that token, and the
 organization of the person and of the project where it can be resolved. A run
-writes ctp schema 3 by default: 61 columns, the schema of the "Token on Me"
-release, with no later pass. A sidecar supplies the 19 per-project columns, and
+writes ctp schema 3 by default: 53 columns, the schema of the "Token on Me"
+release, with no later pass. A sidecar supplies the 16 per-project columns, and
 the run writes the project facts to `project_facts.parquet`. `--schema 1` writes
 the older 70 columns.
 

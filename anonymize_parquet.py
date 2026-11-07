@@ -207,6 +207,7 @@ OTHER_PASSTHROUGH_COLUMNS: tuple[str, ...] = (
 # ctp schema 3 gives provenance_status the name audit_frame_file. The value is
 # the same frame file label, so the rule is the same.
 SCHEMA_3_PROVENANCE_COLUMNS: tuple[str, ...] = ("audit_frame_file",)
+SCHEMA_3_ABSENT_IDENTITY: tuple[str, ...] = ("person_name", "person_email")
 
 PASSTHROUGH_COLUMNS: frozenset[str] = frozenset(
     PROVENANCE_COLUMNS + SCHEMA_3_PROVENANCE_COLUMNS + FIRM_COLUMNS
@@ -361,6 +362,11 @@ def classify(columns: list[str], drop_footers: bool = False) -> Plan:
             unknown.append(c)
 
     required = [ORGANIZATION_GROUP_KEY if (schema2 and c == "firm") else c for c in REQUIRED_COLUMNS]
+    if schema2 and "audit_frame_file" in columns:
+        # ctp schema 3 has no person_name and no person_email (validate_schema
+        # SCHEMA_3_DROPPED_TOKEN_COLUMNS): the pseudonyms of personid and of
+        # author_email cover the same identities.
+        required = [c for c in required if c not in SCHEMA_3_ABSENT_IDENTITY]
     missing = [c for c in required if c not in columns]
     if missing and not unknown:
         raise MissingColumnError(

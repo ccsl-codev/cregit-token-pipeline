@@ -5,7 +5,7 @@
     ./validate_schema.py --schema 1 <dataset.parquet> ...    # an older schema
     ./validate_schema.py --emit-contract <dataset.parquet>   # print, do not check
 
-The default contract is ctp schema 3 (EXPECTED_COLUMNS_3, 61 columns). Schema 1
+The default contract is ctp schema 3 (EXPECTED_COLUMNS_3, 53 columns). Schema 1
 (EXPECTED_COLUMNS, 70 columns) and schema 2 (71 columns) stay available.
 
 Why a separate gate from validate.py: that one asks "did this project produce a
@@ -178,25 +178,38 @@ EXPECTED_COLUMNS_2: tuple[tuple[str, str], ...] = tuple(
     (c, t) for c, t in EXPECTED_COLUMNS if c not in FIRM_COLUMNS
 ) + ORGANIZATION_COLUMNS
 
-# ctp schema 3, the schema of the "Token on Me" release: schema 2 without 10
-# per-project columns, and provenance_status named audit_frame_file. The 10
-# columns are constant per project, so they are cheap to keep in a side table:
-# `fact` goes to project_facts (schema3.py), and the other 9 stay in the
-# sidecar. The cregit generator writes the 19 kept fields with
-# --ctp-schema 3 (PROJECT_META_COLUMNS_3 there; tests/test_meta_field_drift.py
-# compares the two lists). schema3.py adds the 4 organization columns and the
-# footer key-values below.
+# ctp schema 3, the schema of the "Token on Me" release: 53 columns. It is
+# schema 2 without 13 per-project columns and 5 token columns, and with
+# provenance_status named audit_frame_file.
+#   - The 13 per-project columns are constant per project, so a side table
+#     holds them: `fact` and `roster_lang` go to project_facts (schema3.py),
+#     and the other 11 stay in the sidecar (`archived` and `fork` are False or
+#     empty in every release project).
+#   - person_name, person_email and footer_person_names repeat personid,
+#     author_email and footer_personids with a fixed text change;
+#     cregit_commit_sha maps one to one to original_commit_sha; repo_tag is
+#     always empty.
+# The cregit generator writes the 16 kept fields and leaves out the 5 token
+# columns with --ctp-schema 3 (PROJECT_META_COLUMNS_3 and
+# SCHEMA_3_DROPPED_TOKEN_COLUMNS there; tests/test_meta_field_drift.py compares
+# the lists). schema3.py adds the 4 organization columns and the footer
+# key-values below.
 SCHEMA_3_DROPPED: tuple[str, ...] = (
     "size_kb", "file_mask", "manifest_category", "fact",
     "history_cluster", "history_shared_with", "history_relation",
     "history_includes", "history_first", "history_created",
+    "roster_lang", "archived", "fork",
+)
+SCHEMA_3_DROPPED_TOKEN_COLUMNS: tuple[str, ...] = (
+    "person_name", "person_email", "footer_person_names",
+    "cregit_commit_sha", "repo_tag",
 )
 SCHEMA_3_RENAMED: dict[str, str] = {"provenance_status": "audit_frame_file"}
 META_FIELDS_3: tuple[str, ...] = tuple(
     SCHEMA_3_RENAMED.get(f, f) for f in META_FIELDS if f not in SCHEMA_3_DROPPED)
 EXPECTED_COLUMNS_3: tuple[tuple[str, str], ...] = tuple(
     (SCHEMA_3_RENAMED.get(c, c), t) for c, t in EXPECTED_COLUMNS_2
-    if c not in SCHEMA_3_DROPPED)
+    if c not in SCHEMA_3_DROPPED and c not in SCHEMA_3_DROPPED_TOKEN_COLUMNS)
 
 # The footer key-value that names the schema of a file.
 SCHEMA_KEY = "ctp_schema_version"

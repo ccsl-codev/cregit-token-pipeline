@@ -14,7 +14,7 @@ the contract from a real file with `./validate_schema.py --emit-contract F.parqu
 
 `ctp.py run` writes ctp schema 3 by default (`--schema 3`). This is the schema
 of the "Token on Me" release. The contract is `validate_schema.EXPECTED_COLUMNS_3`,
-61 columns. The rest of this document describes schema 1 (`--schema 1`, 70
+53 columns. The rest of this document describes schema 1 (`--schema 1`, 70
 columns, `EXPECTED_COLUMNS`). `--schema 2` writes the 71 columns of the release
 schema before the column pass (`EXPECTED_COLUMNS_2`): the 29 metadata columns
 and the 4 organization columns, with the same options as schema 3. Schema 3
@@ -27,11 +27,19 @@ differs from schema 1 as follows:
   manifest name) and `--domain-links` (key: the domain of `person_domain`). A
   real domain with no link gets `independent`. A blank value, a value with no
   dot or a value with an at sign gets `unknown`.
-- The 10 per-project columns `size_kb`, `file_mask`, `manifest_category`,
-  `fact` and the six `history_*` columns are not in the file. They are
-  constant per project. The sidecar keeps them. The run writes the `fact`
-  values to `<output_dir>/project_facts.parquet` (`project`, `fact_type`,
-  `fact_value`): one row for each project and fact.
+- The 13 per-project columns `size_kb`, `file_mask`, `manifest_category`,
+  `fact`, the six `history_*` columns, `roster_lang`, `archived` and `fork`
+  are not in the file. They are constant per project. The sidecar keeps them.
+  The run writes the `fact` items and the `roster_lang` value to
+  `<output_dir>/project_facts.parquet` (`project`, `fact_type`, `fact_value`):
+  one row for each project and fact. A `roster_lang` row has the fact type
+  `roster_lang` and the value as the sidecar gives it (for example
+  `asf:Java`).
+- The 5 token columns `person_name`, `person_email`, `footer_person_names`,
+  `cregit_commit_sha` and `repo_tag` are not in the file. The first three
+  repeat `personid`, `author_email` and `footer_personids` with a fixed text
+  change. `cregit_commit_sha` maps one to one to `original_commit_sha`.
+  `repo_tag` is always empty.
 - `provenance_status` has the name `audit_frame_file`. The sidecar can give
   the value under either name.
 - The footer has the key-values `ctp_schema_version` = `3`,
@@ -43,7 +51,7 @@ differs from schema 1 as follows:
   `pseudonymization_registry_sha256`. Without it the identity columns keep the
   real values, and the files are private.
 
-The cregit generator writes the 57 columns without the organization columns
+The cregit generator writes the 49 columns without the organization columns
 (`--ctp-schema 3`). The `write` phase of the run (`schema3.py write`) adds the
 organization columns and the footer key-values, and the pseudonyms when the run
 asks for them. Then the `validate` phase stamps the project.

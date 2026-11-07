@@ -123,7 +123,7 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 DATASET_STEP = 10
 
 # The ctp schema that a run writes (validate_schema.CONTRACTS). Schema 3 is the
-# schema of the "Token on Me" release: the cregit generator writes 57 columns
+# schema of the "Token on Me" release: the cregit generator writes 49 columns
 # (--ctp-schema 3), then the `write` phase (schema3.py) adds the 4 organization
 # columns and the footer key-values, and pseudonymizes when asked. Schema 1 is
 # the older 70-column run of a cregit checkout that does the firm join itself.
@@ -1070,7 +1070,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     gaps: list[tuple[str, str]] = []
     if not project_meta and schema3["schema"] in ("2", "3"):
         gaps.append(("--project-meta",
-                     f"{19 if schema3['schema'] == '3' else 29} provenance columns "
+                     f"{16 if schema3['schema'] == '3' else 29} provenance columns "
                      "empty on every row, and no project facts"))
     elif not project_meta:
         gaps.append(("--project-meta",
@@ -1584,7 +1584,7 @@ def main() -> int:
                             "process per worker. The tokens do not change")
     run_p.add_argument("--schema", default=DEFAULT_SCHEMA, choices=SCHEMAS,
                        help=f"the ctp schema to write (default {DEFAULT_SCHEMA}). 3: the "
-                            "61 columns of validate_schema.EXPECTED_COLUMNS_3; needs "
+                            "53 columns of validate_schema.EXPECTED_COLUMNS_3; needs "
                             "--domain-links, --project-links and "
                             "--organizations-version. 2: the 71 columns with the 29 "
                             "metadata columns, with the same options. 1: the 70 "
