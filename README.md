@@ -104,7 +104,7 @@ state.
 - Stop a run by killing the runner PID. Not `pkill -f`, which can self-match and
   orphan pipeline children.
 
-## Renaming columns without rewriting the data
+## Renaming and dropping columns without re-encoding the data
 
 `parquet_rename.py` renames top-level columns of a Parquet file by writing a new
 footer only. Bytes `[0, footer_start)` (the magic, column chunks, pages,
@@ -134,6 +134,28 @@ rename to the same or an empty name, a mapping that makes duplicate names, a
 footer or `ARROW:schema` that does not re-encode to the same bytes, and an old
 name that also appears in another key-value or in Arrow metadata (pass
 `--allow-mentions` to keep those unchanged).
+
+`--drop NAME` (repeatable, with or without `--rename` in the same pass) removes
+top-level columns. The output is `PAR1`, then the kept column chunks, Bloom
+filters, column indexes and offset indexes in their original order, then a new
+footer. Chunks, Bloom filters and column indexes are copied byte for byte; only
+the offset indexes are re-encoded, because they hold absolute page offsets. The
+footer loses the dropped columns' schema elements, column chunks and column
+orders, and every offset, row group size and sort column index is moved to
+match. A drop refuses every column, a dropped sort column, a column both
+renamed and dropped, and a file whose data part the footer's regions do not
+tile exactly.
+
+```sh
+./parquet_rename.py in.parquet out.parquet --drop a --drop b --rename c=d
+./parquet_rename_check.py --drop a --drop b --rename c=d in.parquet out.parquet
+```
+
+For a drop the check proves that every kept column chunk, Bloom filter and
+column index has the same bytes at its new offset, that each offset index is
+the old one moved, that the page index points at real data pages, and that the
+footer equals the old one with the columns removed and the offsets blanked. It
+then runs the pyarrow, DuckDB and Bloom checks below on the kept columns.
 
 `parquet_rename_check.py` proves each pair: the data prefix hashes are equal; the
 footers are equal field by field except the renamed names; pyarrow reads the new

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Rename top-level columns of a Parquet file by rewriting only its footer.
+"""Rename or drop top-level columns of a Parquet file without re-encoding a page.
+
+Rename only: the footer is the only part that changes.
 
 The output is the input bytes [0, footer_start) unchanged, then a new Thrift
 FileMetaData, then the 4-byte footer length and "PAR1".  The "PAR1" magic, the
@@ -19,15 +21,34 @@ tool checks that round trip on every input, and the same for the Arrow schema
 (pyarrow must serialize the decoded schema back to the stored bytes), before
 it changes anything.
 
+Drop (with or without renames, in the same pass): the output is "PAR1", then
+every region the footer points at for a kept column (column chunk, Bloom
+filter, column index, offset index), copied in its original order, then the
+new footer.  Chunks, Bloom filters and column indexes are copied byte for
+byte; page headers (data page V1 and V2, dictionary page) hold sizes, counts,
+encodings and statistics but no file offset, so no page changes.  The offset
+indexes hold absolute page offsets; they are decoded, moved and re-encoded.
+The new footer drops the SchemaElements, ColumnChunks and column_orders of
+the dropped columns, fixes the root num_children, moves every offset
+(file_offset, data/index/dictionary page offsets, bloom_filter_offset,
+column_index_offset, offset_index_offset and length, RowGroup file_offset),
+recomputes the RowGroup total_byte_size and total_compressed_size, remaps
+sorting_columns, and drops the fields from ARROW:schema.
+
 It refuses: an encrypted footer ("PARE") or encrypted column metadata, a name
 that is not a top-level column, an empty new name, a rename to the same name,
 a mapping that gives two columns one name, and (unless --allow-mentions) an
-old name that also appears in another key-value or in Arrow metadata, which
-this tool would leave unchanged.
+old or dropped name that also appears in another key-value or in Arrow
+metadata, which this tool would leave unchanged.  A drop also refuses: every
+column, a column both renamed and dropped, a dropped sort column, a column
+chunk in another file, and a data part that the footer's regions do not tile
+exactly (gaps, overlaps, or bytes no offset reaches), or sizes and offsets
+that do not add up the way the format defines them.
 
 Usage:
   parquet_rename.py SRC DST --rename OLD=NEW [--rename OLD=NEW ...]
   parquet_rename.py SRC DST --map mapping.json
+  parquet_rename.py SRC DST --drop NAME [--drop NAME ...] [--rename OLD=NEW ...]
   parquet_rename.py SRC DST --tail-only ...   write only the new footer tail
 
 With no mapping the output is byte-identical to the input.  One JSON line on
@@ -59,6 +80,20 @@ SE_NAME, SE_NUM_CHILDREN = 4, 5
 RG_COLUMNS = 1
 CC_META_DATA, CC_CRYPTO_METADATA, CC_ENCRYPTED_COLUMN_METADATA = 3, 8, 9
 CMD_PATH_IN_SCHEMA, CMD_KV, CMD_BLOOM_FILTER_OFFSET = 3, 8, 14
+CMD_TOTAL_UNCOMPRESSED_SIZE, CMD_TOTAL_COMPRESSED_SIZE = 6, 7
+CMD_DATA_PAGE_OFFSET, CMD_INDEX_PAGE_OFFSET, CMD_DICTIONARY_PAGE_OFFSET = 9, 10, 11
+CMD_BLOOM_FILTER_LENGTH = 15
+CC_FILE_PATH, CC_FILE_OFFSET = 1, 2
+CC_OFFSET_INDEX_OFFSET, CC_OFFSET_INDEX_LENGTH = 4, 5
+CC_COLUMN_INDEX_OFFSET, CC_COLUMN_INDEX_LENGTH = 6, 7
+RG_TOTAL_BYTE_SIZE, RG_SORTING_COLUMNS, RG_FILE_OFFSET, RG_TOTAL_COMPRESSED_SIZE = 2, 4, 5, 6
+FMD_COLUMN_ORDERS = 7
+SC_COLUMN_IDX = 1
+OI_PAGE_LOCATIONS, PL_OFFSET, PL_COMPRESSED_PAGE_SIZE, PL_FIRST_ROW_INDEX = 1, 1, 2, 3
+BF_NUM_BYTES = 1
+PH_TYPE, PH_COMPRESSED_PAGE_SIZE = 1, 3
+PAGE_DATA, PAGE_DATA_V2 = 0, 3
+CI_NULL_PAGES = 1
 KV_KEY, KV_VALUE = 1, 2
 
 
@@ -327,31 +362,40 @@ def refuse_encryption(meta: list) -> None:
                 raise RenameError("a column chunk is encrypted; refused")
 
 
-def top_level(schema: list) -> list[tuple[int, str]]:
-    """(index in the flat schema list, name) of every top-level column.
+def schema_spans(schema: list) -> list[tuple[int, int, str, int]]:
+    """(first index, end index, name, leaf count) of every top-level column.
 
     The schema is a depth-first list; element 0 is the root and each group
-    element carries num_children.
+    element carries num_children.  An element without num_children is a leaf.
     """
 
-    def skip(i: int) -> int:
-        n = get(schema[i], SE_NUM_CHILDREN) or 0
-        i += 1
-        for _ in range(n):
-            i = skip(i)
-        return i
+    def skip(i: int) -> tuple[int, int]:
+        if not has(schema[i], SE_NUM_CHILDREN):
+            return i + 1, 1
+        j, leaves = i + 1, 0
+        for _ in range(get(schema[i], SE_NUM_CHILDREN)):
+            j, n = skip(j)
+            leaves += n
+        return j, leaves
 
     out = []
     i = 1
     for _ in range(get(schema[0], SE_NUM_CHILDREN) or 0):
-        out.append((i, get(schema[i], SE_NAME).decode("utf-8")))
-        i = skip(i)
+        end, leaves = skip(i)
+        out.append((i, end, get(schema[i], SE_NAME).decode("utf-8"), leaves))
+        i = end
     if i != len(schema):
         raise RenameError(f"the schema tree covers {i} of {len(schema)} elements")
     return out
 
 
-def validate_mapping(mapping: dict[str, str], names: list[str]) -> None:
+def top_level(schema: list) -> list[tuple[int, str]]:
+    """(index in the flat schema list, name) of every top-level column."""
+    return [(i, name) for i, _, name, _ in schema_spans(schema)]
+
+
+def validate_mapping(mapping: dict[str, str], names: list[str],
+                     drops: list[str] | tuple = ()) -> None:
     present = set(names)
     for old, new in mapping.items():
         if old not in present:
@@ -360,7 +404,16 @@ def validate_mapping(mapping: dict[str, str], names: list[str]) -> None:
             raise RenameError(f"empty new name for {old!r}")
         if new == old:
             raise RenameError(f"{old!r} is renamed to itself")
-    after = [mapping.get(n, n) for n in names]
+    for d in drops:
+        if d not in present:
+            raise RenameError(f"no top-level column {d!r} to drop")
+        if d in mapping:
+            raise RenameError(f"{d!r} is both renamed and dropped")
+    if len(set(drops)) != len(drops):
+        raise RenameError("a column is named twice in the drop list")
+    if drops and len(set(drops)) == len(names):
+        raise RenameError("the drop list names every column")
+    after = [mapping.get(n, n) for n in names if n not in drops]
     dup = sorted({n for n in after if after.count(n) > 1})
     if dup:
         raise RenameError(f"the mapping makes duplicate column names: {dup}")
@@ -387,10 +440,10 @@ def arrow_schema_of(value: bytes):
     return schema
 
 
-def renamed_arrow_schema(schema, mapping: dict[str, str]):
+def renamed_arrow_schema(schema, mapping: dict[str, str], drops=()):
     import pyarrow as pa
 
-    fields = [f.with_name(mapping.get(f.name, f.name)) for f in schema]
+    fields = [f.with_name(mapping.get(f.name, f.name)) for f in schema if f.name not in drops]
     return pa.schema(fields, metadata=schema.metadata)
 
 
@@ -441,18 +494,13 @@ def mentions(meta: list, arrow_schema, olds: list[bytes]) -> list[str]:
     return sorted(set(out))
 
 
-def rename_footer(footer: bytes, mapping: dict[str, str],
-                  allow_mentions: bool = False) -> tuple[bytes, dict]:
-    """Return the new footer bytes and a short report.
-
-    With an empty mapping the result is the input, after both round trips.
-    """
-    meta = parse_checked(footer)
+def prepare(meta: list, mapping: dict[str, str], drops, allow_mentions: bool) -> dict:
+    """Validate a parsed footer and the mapping; find ARROW:schema."""
     refuse_encryption(meta)
     schema = get(meta, FMD_SCHEMA).items
-    tops = top_level(schema)
-    names = [n for _, n in tops]
-    validate_mapping(mapping, names)
+    spans = schema_spans(schema)
+    names = [n for _, _, n, _ in spans]
+    validate_mapping(mapping, names, drops)
 
     arrow_kv = None
     arrow_schema = None
@@ -466,16 +514,21 @@ def rename_footer(footer: bytes, mapping: dict[str, str],
         if arrow_schema.names != names:
             raise RenameError("ARROW:schema field names differ from the Parquet schema")
 
-    olds = [o.encode("utf-8") for o in mapping]
+    olds = [o.encode("utf-8") for o in list(mapping) + list(drops)]
     found = mentions(meta, arrow_schema, olds)
     if found and not allow_mentions:
-        raise RenameError("an old name also appears in " + "; ".join(found)
-                          + " (not renamed by this tool; pass --allow-mentions to keep them)")
+        raise RenameError("an old or dropped name also appears in " + "; ".join(found)
+                          + " (not changed by this tool; pass --allow-mentions to keep them)")
+    return dict(schema=schema, spans=spans, names=names, arrow_kv=arrow_kv,
+                arrow_schema=arrow_schema, found=found)
 
+
+def apply_renames(meta: list, ctx: dict, mapping: dict[str, str], drops=()) -> int:
+    """Rename schema names, path_in_schema[0] and ARROW:schema in place."""
     enc = {o.encode("utf-8"): n.encode("utf-8") for o, n in mapping.items()}
-    for i, name in tops:
+    for i, _, name, _ in ctx["spans"]:
         if name in mapping:
-            set_value(schema[i], SE_NAME, enc[name.encode("utf-8")])
+            set_value(ctx["schema"][i], SE_NAME, enc[name.encode("utf-8")])
     leaves = 0
     for rg in kv_items(meta, FMD_ROW_GROUPS):
         for cc in get(rg, RG_COLUMNS).items:
@@ -483,12 +536,299 @@ def rename_footer(footer: bytes, mapping: dict[str, str],
             if path[0] in enc:
                 path[0] = enc[path[0]]
                 leaves += 1
-    if arrow_kv is not None and mapping:
-        set_value(arrow_kv, KV_VALUE,
-                  encode_arrow_schema(renamed_arrow_schema(arrow_schema, mapping)))
+    if ctx["arrow_kv"] is not None and (mapping or drops):
+        set_value(ctx["arrow_kv"], KV_VALUE, encode_arrow_schema(
+            renamed_arrow_schema(ctx["arrow_schema"], mapping, drops)))
+    return leaves
+
+
+def rename_footer(footer: bytes, mapping: dict[str, str],
+                  allow_mentions: bool = False) -> tuple[bytes, dict]:
+    """Return the new footer bytes and a short report.
+
+    With an empty mapping the result is the input, after both round trips.
+    """
+    meta = parse_checked(footer)
+    ctx = prepare(meta, mapping, (), allow_mentions)
+    leaves = apply_renames(meta, ctx, mapping)
     new = encode(meta)
     return new, dict(renamed=dict(mapping), column_chunks_renamed=leaves,
-                     arrow_schema=arrow_kv is not None, mentions_kept=found)
+                     arrow_schema=ctx["arrow_kv"] is not None, mentions_kept=ctx["found"])
+
+
+# ---------------------------------------------------------- column drops --
+class Region:
+    """A byte range of the data part that the footer points at."""
+
+    __slots__ = ("kind", "off", "length", "rg", "col", "new_off", "data")
+
+    def __init__(self, kind, off, length, rg, col):
+        self.kind, self.off, self.length, self.rg, self.col = kind, off, length, rg, col
+        self.new_off = None
+        self.data = None  # re-encoded bytes (offset indexes only)
+
+
+def chunk_span(cmd: list) -> tuple[int, int]:
+    """(start, length) of a column chunk: its first page to the end of its pages."""
+    offs = [get(cmd, f) for f in (CMD_DICTIONARY_PAGE_OFFSET, CMD_INDEX_PAGE_OFFSET,
+                                  CMD_DATA_PAGE_OFFSET) if has(cmd, f)]
+    offs = [o for o in offs if o >= len(MAGIC)]
+    if not offs:
+        raise RenameError("a column chunk has no page offset")
+    return min(offs), get(cmd, CMD_TOTAL_COMPRESSED_SIZE)
+
+
+def struct_at(fd: int, off: int, limit: int = 4096) -> tuple[list, int]:
+    """Parse one Thrift struct at a file offset; return it and its length."""
+    r = Reader(os.pread(fd, limit, off))
+    try:
+        return r.struct(), r.p
+    except ValueError as e:
+        raise RenameError(f"no Thrift struct at offset {off}: {e}") from e
+
+
+def bloom_length(fd: int, off: int) -> int:
+    """Length of a Bloom filter (header + bitset) that has no bloom_filter_length."""
+    header, n = struct_at(fd, off)
+    return n + get(header, BF_NUM_BYTES)
+
+
+def collect_regions(meta: list, fd: int, footer_start: int) -> list[Region]:
+    """Every region the footer points at, in file order.
+
+    Refuses a file whose regions overlap or leave bytes of the data part that
+    no footer offset reaches: such bytes could not be carried over.
+    """
+    regions = []
+    for r, rg in enumerate(kv_items(meta, FMD_ROW_GROUPS)):
+        for c, cc in enumerate(get(rg, RG_COLUMNS).items):
+            if has(cc, CC_FILE_PATH):
+                raise RenameError("a column chunk lives in another file (file_path); refused")
+            cmd = get(cc, CC_META_DATA)
+            start, length = chunk_span(cmd)
+            regions.append(Region("chunk", start, length, r, c))
+            if has(cmd, CMD_BLOOM_FILTER_OFFSET):
+                off = get(cmd, CMD_BLOOM_FILTER_OFFSET)
+                n = (get(cmd, CMD_BLOOM_FILTER_LENGTH) if has(cmd, CMD_BLOOM_FILTER_LENGTH)
+                     else bloom_length(fd, off))
+                regions.append(Region("bloom", off, n, r, c))
+            for kind, fo, fl in (("column_index", CC_COLUMN_INDEX_OFFSET, CC_COLUMN_INDEX_LENGTH),
+                                 ("offset_index", CC_OFFSET_INDEX_OFFSET, CC_OFFSET_INDEX_LENGTH)):
+                if has(cc, fo):
+                    if not has(cc, fl):
+                        raise RenameError(f"a {kind} has no length; refused")
+                    regions.append(Region(kind, get(cc, fo), get(cc, fl), r, c))
+    regions.sort(key=lambda x: x.off)
+    pos = len(MAGIC)
+    for reg in regions:
+        if reg.off != pos:
+            raise RenameError(f"the data part is not tiled by the footer's regions at byte "
+                              f"{pos} (next {reg.kind} at {reg.off}); refused")
+        pos = reg.off + reg.length
+    if pos != footer_start:
+        raise RenameError(f"bytes [{pos}, {footer_start}) are not reached by the footer; refused")
+    return regions
+
+
+def parse_offset_index(raw: bytes) -> list:
+    try:
+        oi = parse_footer(raw)
+    except ValueError as e:
+        raise RenameError(f"an offset index does not decode: {e}") from e
+    if encode(oi) != raw:
+        raise RenameError("an offset index does not encode back to the same bytes; refused")
+    return oi
+
+
+def shift(struct_fields: list, fid: int, lo: int, hi: int, delta: int, what: str) -> None:
+    """Move an absolute offset that points into [lo, hi] by delta; keep a 0."""
+    for f in struct_fields:
+        if f.fid == fid:
+            if f.value == 0:
+                return
+            if not lo <= f.value <= hi:
+                raise RenameError(f"{what} {f.value} is outside its column chunk; refused")
+            f.value += delta
+            return
+
+
+def canonical_list(lst: TList, items: list) -> None:
+    lst.items = items
+    lst.short = len(items) < 15
+
+
+def leaf_plan(spans, drops) -> tuple[int, set, dict]:
+    """(leaf count, dropped leaf indexes, old -> new index of the kept leaves)."""
+    dropped, leaf = set(), 0
+    for _, _, name, n in spans:
+        if name in drops:
+            dropped.update(range(leaf, leaf + n))
+        leaf += n
+    kept = [c for c in range(leaf) if c not in dropped]
+    return leaf, dropped, {c: i for i, c in enumerate(kept)}
+
+
+def layout(kept: list[Region], chunks: dict, oi_raw: dict) -> int:
+    """Give every kept region its new offset; re-encode the offset indexes.
+
+    An offset index can change length when its page offsets change, which
+    moves the regions after it, so this repeats until the lengths settle.
+    Returns the end of the data part.
+    """
+    lengths = {id(reg): reg.length for reg in kept}
+    for _ in range(16):
+        pos = len(MAGIC)
+        for reg in kept:
+            reg.new_off = pos
+            pos += lengths[id(reg)]
+        changed = False
+        for reg in kept:
+            if reg.kind != "offset_index":
+                continue
+            ch = chunks[(reg.rg, reg.col)]
+            oi = parse_offset_index(oi_raw[id(reg)])
+            for loc in kv_items(oi, OI_PAGE_LOCATIONS):
+                shift(loc, PL_OFFSET, ch.off, ch.off + ch.length - 1,
+                      ch.new_off - ch.off, "a page location")
+            reg.data = encode(oi)
+            if len(reg.data) != lengths[id(reg)]:
+                lengths[id(reg)] = len(reg.data)
+                changed = True
+        if not changed:
+            return pos
+    raise RenameError("the offset index layout does not settle")  # pragma: no cover
+
+
+def check_total(rg: list, fid: int, cmds: list, size_fid: int, dropped: set, what: str) -> None:
+    if not has(rg, fid):
+        return
+    if get(rg, fid) != sum(get(m, size_fid) for m in cmds):
+        raise RenameError(f"a row group {what} is not the sum of its columns; refused")
+    set_value(rg, fid, sum(get(m, size_fid) for c, m in enumerate(cmds) if c not in dropped))
+
+
+def drop_footer(meta: list, ctx: dict, mapping, drops, regions: list[Region],
+                nleaves: int, dropped: set, new_index: dict) -> int:
+    """Edit the parsed footer for the drop: offsets, sizes, schema, orders."""
+    chunks = {(reg.rg, reg.col): reg for reg in regions if reg.kind == "chunk"}
+    by_key = {(reg.kind, reg.rg, reg.col): reg for reg in regions if reg.col not in dropped}
+    for r, rg in enumerate(kv_items(meta, FMD_ROW_GROUPS)):
+        cols = get(rg, RG_COLUMNS)
+        if len(cols.items) != nleaves:
+            raise RenameError("a row group does not have one column chunk per leaf")
+        for sc in kv_items(rg, RG_SORTING_COLUMNS):
+            idx = get(sc, SC_COLUMN_IDX)
+            if idx in dropped:
+                raise RenameError(f"leaf column {idx} is a sort column and would be dropped")
+            set_value(sc, SC_COLUMN_IDX, new_index[idx])
+        cmds = [get(cc, CC_META_DATA) for cc in cols.items]
+        check_total(rg, RG_TOTAL_BYTE_SIZE, cmds, CMD_TOTAL_UNCOMPRESSED_SIZE, dropped,
+                    "total_byte_size")
+        check_total(rg, RG_TOTAL_COMPRESSED_SIZE, cmds, CMD_TOTAL_COMPRESSED_SIZE, dropped,
+                    "total_compressed_size")
+        if has(rg, RG_FILE_OFFSET):
+            if get(rg, RG_FILE_OFFSET) != min(chunks[(r, c)].off for c in range(nleaves)):
+                raise RenameError("a row group file_offset is not its first chunk; refused")
+            set_value(rg, RG_FILE_OFFSET, min(chunks[(r, c)].new_off for c in new_index))
+        new_cols = []
+        for c, cc in enumerate(cols.items):
+            if c in dropped:
+                continue
+            ch = chunks[(r, c)]
+            lo, hi, d = ch.off, ch.off + ch.length, ch.new_off - ch.off
+            cmd = cmds[c]
+            for fid in (CMD_DATA_PAGE_OFFSET, CMD_INDEX_PAGE_OFFSET, CMD_DICTIONARY_PAGE_OFFSET):
+                shift(cmd, fid, lo, hi - 1, d, "a page offset")
+            shift(cc, CC_FILE_OFFSET, lo, hi, d, "a column chunk file_offset")
+            if ("bloom", r, c) in by_key:
+                set_value(cmd, CMD_BLOOM_FILTER_OFFSET, by_key[("bloom", r, c)].new_off)
+            if ("column_index", r, c) in by_key:
+                set_value(cc, CC_COLUMN_INDEX_OFFSET, by_key[("column_index", r, c)].new_off)
+            if ("offset_index", r, c) in by_key:
+                oi = by_key[("offset_index", r, c)]
+                set_value(cc, CC_OFFSET_INDEX_OFFSET, oi.new_off)
+                set_value(cc, CC_OFFSET_INDEX_LENGTH, len(oi.data))
+            new_cols.append(cc)
+        canonical_list(cols, new_cols)
+
+    orders = get(meta, FMD_COLUMN_ORDERS)
+    if orders is not None:
+        if len(orders.items) != nleaves:
+            raise RenameError("column_orders does not have one entry per leaf")
+        canonical_list(orders, [o for c, o in enumerate(orders.items) if c not in dropped])
+
+    renamed = apply_renames(meta, ctx, mapping, drops)
+    schema, spans = ctx["schema"], ctx["spans"]
+    kept_elems = [schema[0]]
+    for i, end, name, _ in spans:
+        if name not in drops:
+            kept_elems += schema[i:end]
+    set_value(schema[0], SE_NUM_CHILDREN, len(spans) - len(drops))
+    canonical_list(get(meta, FMD_SCHEMA), kept_elems)
+    return renamed
+
+
+def rewrite_with_drops(src: str, dst: str, mapping: dict[str, str], drops: list[str], *,
+                       copy: str = "auto", allow_mentions: bool = False,
+                       fsync: bool = True) -> dict:
+    """Write src without the dropped columns, and with the renames, to dst.
+
+    The kept column chunks, Bloom filters and column indexes are copied byte
+    for byte, in their original order; offset indexes are re-encoded with
+    their page offsets moved.  Page headers (data page V1 and V2, dictionary
+    page) hold sizes, counts, encodings and statistics but no file offset, so
+    no page changes.
+    """
+    size, start, footer = read_footer(src)
+    meta = parse_checked(footer)
+    ctx = prepare(meta, mapping, drops, allow_mentions)
+    nleaves, dropped, new_index = leaf_plan(ctx["spans"], drops)
+
+    sfd = os.open(src, os.O_RDONLY)
+    try:
+        regions = collect_regions(meta, sfd, start)
+        kept = [reg for reg in regions if reg.col not in dropped]
+        chunks = {(reg.rg, reg.col): reg for reg in regions if reg.kind == "chunk"}
+        oi_raw = {id(reg): os.pread(sfd, reg.length, reg.off)
+                  for reg in kept if reg.kind == "offset_index"}
+        data_end = layout(kept, chunks, oi_raw)
+        renamed = drop_footer(meta, ctx, mapping, drops, regions, nleaves, dropped, new_index)
+        new = encode(meta)
+        tail = new + struct.pack("<I", len(new)) + MAGIC
+
+        tmp = dst + ".tmp"
+        dfd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.pwrite(dfd, MAGIC, 0)
+            method = "copy_file_range" if copy == "auto" else "read-write"
+            copied = 0
+            for reg in kept:
+                if reg.data is not None:
+                    os.pwrite(dfd, reg.data, reg.new_off)
+                else:
+                    method = copy_range(sfd, dfd, reg.off, reg.new_off, reg.length, method)
+                    copied += reg.length
+            os.pwrite(dfd, tail, data_end)
+            os.ftruncate(dfd, data_end + len(tail))
+            if fsync:
+                os.fsync(dfd)
+        except BaseException:
+            os.close(dfd)
+            os.unlink(tmp)
+            raise
+        os.close(dfd)
+        os.replace(tmp, dst)
+    finally:
+        os.close(sfd)
+    kinds: dict[str, int] = {}
+    for reg in kept:
+        kinds[reg.kind] = kinds.get(reg.kind, 0) + 1
+    return dict(renamed=dict(mapping), dropped=list(drops), column_chunks_renamed=renamed,
+                arrow_schema=ctx["arrow_kv"] is not None, mentions_kept=ctx["found"],
+                src=src, dst=dst, in_size=size, in_footer_len=len(footer),
+                out_footer_len=len(new), out_size=data_end + len(tail),
+                columns_kept=len(ctx["spans"]) - len(drops), leaves_dropped=len(dropped),
+                regions_kept=kinds, bytes_copied=copied, copy=method)
 
 
 # ------------------------------------------------------------------ files --
@@ -521,12 +861,46 @@ def copy_prefix(src_fd: int, dst_fd: int, length: int, mode: str = "auto") -> st
     return "read-write"
 
 
-def rename_file(src: str, dst: str, mapping: dict[str, str], *, copy: str = "auto",
-                allow_mentions: bool = False, tail_only: bool = False,
+def copy_range(src_fd: int, dst_fd: int, src_off: int, dst_off: int, length: int,
+               method: str) -> str:
+    """Copy length bytes between offsets; returns the method that worked."""
+    if method == "copy_file_range":
+        done = 0
+        try:
+            while done < length:
+                n = os.copy_file_range(src_fd, dst_fd, length - done,
+                                       src_off + done, dst_off + done)
+                if n <= 0:
+                    raise OSError("copy_file_range returned 0")
+                done += n
+            return method
+        except OSError:  # pragma: no cover - file systems without copy_file_range
+            method = "read-write"
+    done = 0
+    while done < length:
+        buf = os.pread(src_fd, min(CHUNK, length - done), src_off + done)
+        if not buf:
+            raise OSError("short read of a column chunk")
+        os.pwrite(dst_fd, buf, dst_off + done)
+        done += len(buf)
+    return method
+
+
+def rename_file(src: str, dst: str, mapping: dict[str, str], *, drops=(),
+                copy: str = "auto", allow_mentions: bool = False, tail_only: bool = False,
                 fsync: bool = True) -> dict:
-    """Write the renamed file (or only its new tail) to dst."""
+    """Write the renamed file (or only its new tail) to dst.
+
+    With drops, the kept column chunks are copied to new offsets instead
+    (rewrite_with_drops); their pages still keep their bytes.
+    """
     if os.path.exists(dst) and os.path.samefile(src, dst):
         raise RenameError("the output is the input file; refused")
+    if drops:
+        if tail_only:
+            raise RenameError("--tail-only cannot drop columns: the data part changes")
+        return rewrite_with_drops(src, dst, mapping, list(drops), copy=copy,
+                                  allow_mentions=allow_mentions, fsync=fsync)
     size, start, footer = read_footer(src)
     new, report = rename_footer(footer, mapping, allow_mentions)
     tail = new + struct.pack("<I", len(new)) + MAGIC
@@ -581,6 +955,8 @@ def mapping_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--rename", action="append", default=[], metavar="OLD=NEW",
                     help="rename top-level column OLD to NEW (repeatable)")
     ap.add_argument("--map", metavar="JSON", help="a JSON object of old -> new names")
+    ap.add_argument("--drop", action="append", default=[], metavar="NAME",
+                    help="drop top-level column NAME (repeatable)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -599,7 +975,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     try:
         mapping = parse_mapping(a.rename, a.map)
-        rep = rename_file(a.src, a.dst, mapping, copy=a.copy,
+        rep = rename_file(a.src, a.dst, mapping, drops=a.drop, copy=a.copy,
                           allow_mentions=a.allow_mentions, tail_only=a.tail_only,
                           fsync=not a.no_fsync)
     except RenameError as e:
