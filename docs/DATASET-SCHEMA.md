@@ -86,14 +86,15 @@ a cregit checkout that has `rustTokenizer` and at an output directory.
 | Step | Command | Writes |
 | --- | --- | --- |
 | 1. Write the manifest | by hand, or with your own selection tool | `<run>.tsv` (five fields, `DESIGN.md` §2) |
-| 2. Write the sidecar | a JSON object keyed by manifest name, with the fields of `validate_schema.META_FIELDS` | `<sidecar>.json` |
-| 3. Build the domain→firm map | `./build_domain_map.py fetch` then `build --curated PATH` | `data/affiliation.merged.csv` |
-| 4. Run the pipeline | `./ctp.py run --manifest <run>.tsv --jobs N --skip-html --drop-memo --project-meta <sidecar>.json --firm-map data/affiliation.merged.csv --firm-canonical data/firm_canonical.csv` | one Parquet per project, plus a `.validated` stamp |
-| 5. Gate the schema | `./validate_schema.py <out>/*/*-dataset.parquet` | exit 1 on any drift |
-| 6. Build the index | `./consolidate.py --manifest <run>.tsv` (in `devenv shell`) | `ctp.duckdb` |
-| 7. Prune | `./retain.py --apply` | deletes `memo/` and `html/` only |
-| 8. Pseudonymize for release | `./anonymize_parquet.py OUTDIR <in>.parquet ...` (needs the private salt; exit 2 without one) | anonymized Parquets + JSON report |
-| 9. Verify the release | `./verify_anon.py OUTDIR` (needs no secret) | exit 1 on any residue |
+| 2. Filter by language (optional) | `./language_filter.py --manifest <pinned>.tsv --out-dir <dir> [--mode share --threshold X]` (needs a sixth field, the pinned commit, and tokei 14) | `<dir>/kept.tsv`, `dropped.tsv`, `languages.tsv` |
+| 3. Write the sidecar | a JSON object keyed by manifest name, with the fields of `validate_schema.META_FIELDS` | `<sidecar>.json` |
+| 4. Build the domain→firm map | `./build_domain_map.py fetch` then `build --curated PATH` | `data/affiliation.merged.csv` |
+| 5. Run the pipeline | `./ctp.py run --manifest <run>.tsv --jobs N --skip-html --drop-memo --project-meta <sidecar>.json --firm-map data/affiliation.merged.csv --firm-canonical data/firm_canonical.csv` | one Parquet per project, plus a `.validated` stamp |
+| 6. Gate the schema | `./validate_schema.py <out>/*/*-dataset.parquet` | exit 1 on any drift |
+| 7. Build the index | `./consolidate.py --manifest <run>.tsv` (in `devenv shell`) | `ctp.duckdb` |
+| 8. Prune | `./retain.py --apply` | deletes `memo/` and `html/` only |
+| 9. Pseudonymize for release | `./anonymize_parquet.py OUTDIR <in>.parquet ...` (needs the private salt; exit 2 without one) | anonymized Parquets + JSON report |
+| 10. Verify the release | `./verify_anon.py OUTDIR` (needs no secret) | exit 1 on any residue |
 
 **`--manifest` defaults to `manifest.tsv`, a 4-project example.**
 Name the manifest you mean on every `ctp.py` subcommand that takes one.
@@ -395,6 +396,7 @@ analyzing the data. The ones most likely to change a result:
 | every `.h` file was parsed with the C grammar | every header |
 | runs are not pinned to a commit | byte-for-byte reproduction |
 | a vendored dependency credits its whole library to the importing author | any per-org or per-author aggregate |
+| the language filter counts tokei code lines, not tokens | a manifest selected with `language_filter.py` |
 
 ---
 
