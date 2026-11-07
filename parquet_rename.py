@@ -45,11 +45,28 @@ chunk in another file, and a data part that the footer's regions do not tile
 exactly (gaps, overlaps, or bytes no offset reaches), or sizes and offsets
 that do not add up the way the format defines them.
 
+Replace values (with or without drops and renames, in the same pass): --set
+NAME=VALUE gives a top-level string column one value in every row, and
+--set-null NAME makes it null.  The tool re-encodes only that column's chunk
+in each row group, with pyarrow, and keeps the physical type, the logical
+type, the codec, the encoding family (dictionary, PLAIN or DELTA_*), the data
+page version, page checksums and the rows per page.  It writes a new
+statistics struct with the fields the old one had, a new column index and
+offset index if the old chunk had them, and a new Bloom filter if the old
+chunk had one.  Every other region is copied byte for byte as for a drop.
+The schema and ARROW:schema do not change, because the type does not change.
+A replacement refuses: a nested or repeated column, a column that is not a
+string (BYTE_ARRAY with STRING or UTF8), a null for a required column, a
+column that is also dropped, a column with more than one distinct value
+(unless --force-multi), and a file with no rows.
+
 Usage:
   parquet_rename.py SRC DST --rename OLD=NEW [--rename OLD=NEW ...]
   parquet_rename.py SRC DST --map mapping.json
   parquet_rename.py SRC DST --drop NAME [--drop NAME ...] [--rename OLD=NEW ...]
   parquet_rename.py SRC DST --set-kv KEY=VALUE [...]   with or without the above
+  parquet_rename.py SRC DST --set NAME=VALUE [--set-null NAME] [--drop ...] [--rename ...]
+  parquet_rename.py --values values.tsv --out-dir DIR [--drop ...] [--rename ...]
   parquet_rename.py SRC DST --tail-only ...   write only the new footer tail
 
 --set-kv KEY=VALUE changes the value of an existing file key-value in the
@@ -57,9 +74,13 @@ footer (alone, with renames or with drops, in the same pass).  It refuses an
 empty key, a key given twice, ARROW:schema (this tool manages it), a key the
 footer does not have and a key the footer has more than once.
 
+values.tsv has FILE<TAB>COLUMN<TAB>OLD<TAB>NEW lines; \\N is a null.  The
+output of FILE is DIR/<basename of FILE>.  A file is refused when its column
+does not hold OLD (with --force-multi: when OLD is not one of its values).
+
 With no mapping the output is byte-identical to the input.  One JSON line on
-stdout describes the result.  pyarrow is needed only when the file has an
-"ARROW:schema" key-value.
+stdout describes the result, one per file.  pyarrow is needed only when the
+file has an "ARROW:schema" key-value, or for a replacement.
 """
 
 from __future__ import annotations
@@ -101,6 +122,24 @@ PH_TYPE, PH_COMPRESSED_PAGE_SIZE = 1, 3
 PAGE_DATA, PAGE_DATA_V2 = 0, 3
 CI_NULL_PAGES = 1
 KV_KEY, KV_VALUE = 1, 2
+
+# More field ids and enum values, for value replacement.
+SE_TYPE, SE_REPETITION, SE_CONVERTED_TYPE, SE_LOGICAL_TYPE = 1, 3, 6, 10
+RG_NUM_ROWS = 3
+CMD_TYPE, CMD_ENCODINGS, CMD_CODEC, CMD_NUM_VALUES = 1, 2, 4, 5
+CMD_STATISTICS, CMD_ENCODING_STATS, CMD_SIZE_STATISTICS = 12, 13, 16
+ST_MAX, ST_MIN, ST_NULL_COUNT, ST_DISTINCT_COUNT, ST_MAX_VALUE, ST_MIN_VALUE = 1, 2, 3, 4, 5, 6
+ST_MAX_EXACT, ST_MIN_EXACT = 7, 8
+PH_CRC, PH_DATA_PAGE_HEADER, PH_DATA_PAGE_HEADER_V2 = 4, 5, 8
+DPH_NUM_VALUES, DPH2_NUM_ROWS = 1, 3
+PAGE_DICTIONARY = 2
+BYTE_ARRAY = 6
+REQUIRED, OPTIONAL, REPEATED = 0, 1, 2
+CONVERTED_UTF8, LOGICAL_STRING = 0, 1
+ENC_RLE, ENC_BIT_PACKED, ENC_PLAIN_DICTIONARY, ENC_RLE_DICTIONARY = 3, 4, 2, 8
+DATA_ENCODINGS = {0: "PLAIN", 6: "DELTA_LENGTH_BYTE_ARRAY", 7: "DELTA_BYTE_ARRAY"}
+CODEC_NAMES = {0: "NONE", 1: "SNAPPY", 2: "GZIP", 4: "BROTLI", 6: "ZSTD", 7: "LZ4"}
+NULL_TOKEN = "\\N"
 
 
 class RenameError(Exception):
@@ -612,12 +651,13 @@ def rename_footer(footer: bytes, mapping: dict[str, str],
 class Region:
     """A byte range of the data part that the footer points at."""
 
-    __slots__ = ("kind", "off", "length", "rg", "col", "new_off", "data")
+    __slots__ = ("kind", "off", "length", "rg", "col", "new_off", "data", "base")
 
     def __init__(self, kind, off, length, rg, col):
         self.kind, self.off, self.length, self.rg, self.col = kind, off, length, rg, col
         self.new_off = None
-        self.data = None  # re-encoded bytes (offset indexes only)
+        self.data = None  # new bytes (offset indexes, and the regions of a replaced column)
+        self.base = off  # the offset that the page offsets of this chunk's data count from
 
 
 def chunk_span(cmd: list) -> tuple[int, int]:
@@ -740,8 +780,8 @@ def layout(kept: list[Region], chunks: dict, oi_raw: dict) -> int:
             ch = chunks[(reg.rg, reg.col)]
             oi = parse_offset_index(oi_raw[id(reg)])
             for loc in kv_items(oi, OI_PAGE_LOCATIONS):
-                shift(loc, PL_OFFSET, ch.off, ch.off + ch.length - 1,
-                      ch.new_off - ch.off, "a page location")
+                shift(loc, PL_OFFSET, ch.base, ch.base + ch.length - 1,
+                      ch.new_off - ch.base, "a page location")
             reg.data = encode(oi)
             if len(reg.data) != lengths[id(reg)]:
                 lengths[id(reg)] = len(reg.data)
@@ -751,17 +791,23 @@ def layout(kept: list[Region], chunks: dict, oi_raw: dict) -> int:
     raise RenameError("the offset index layout does not settle")  # pragma: no cover
 
 
-def check_total(rg: list, fid: int, cmds: list, size_fid: int, dropped: set, what: str) -> None:
+def check_total(rg: list, fid: int, cmds: list, new_cmds: list, size_fid: int, dropped: set,
+                what: str) -> None:
     if not has(rg, fid):
         return
     if get(rg, fid) != sum(get(m, size_fid) for m in cmds):
         raise RenameError(f"a row group {what} is not the sum of its columns; refused")
-    set_value(rg, fid, sum(get(m, size_fid) for c, m in enumerate(cmds) if c not in dropped))
+    set_value(rg, fid, sum(get(m, size_fid) for c, m in enumerate(new_cmds) if c not in dropped))
 
 
 def drop_footer(meta: list, ctx: dict, mapping, drops, regions: list[Region],
-                nleaves: int, dropped: set, new_index: dict) -> int:
-    """Edit the parsed footer for the drop: offsets, sizes, schema, orders."""
+                nleaves: int, dropped: set, new_index: dict, repl: dict | None = None) -> int:
+    """Edit the parsed footer for the drop: offsets, sizes, schema, orders.
+
+    repl maps (row group, leaf) to the Encoded chunk of a replaced column;
+    its ColumnMetaData takes the place of the old one.
+    """
+    repl = repl or {}
     chunks = {(reg.rg, reg.col): reg for reg in regions if reg.kind == "chunk"}
     by_key = {(reg.kind, reg.rg, reg.col): reg for reg in regions if reg.col not in dropped}
     for r, rg in enumerate(kv_items(meta, FMD_ROW_GROUPS)):
@@ -774,10 +820,12 @@ def drop_footer(meta: list, ctx: dict, mapping, drops, regions: list[Region],
                 raise RenameError(f"leaf column {idx} is a sort column and would be dropped")
             set_value(sc, SC_COLUMN_IDX, new_index[idx])
         cmds = [get(cc, CC_META_DATA) for cc in cols.items]
-        check_total(rg, RG_TOTAL_BYTE_SIZE, cmds, CMD_TOTAL_UNCOMPRESSED_SIZE, dropped,
+        new_cmds = [merged_cmd(m, repl[(r, c)]) if (r, c) in repl else m
+                    for c, m in enumerate(cmds)]
+        check_total(rg, RG_TOTAL_BYTE_SIZE, cmds, new_cmds, CMD_TOTAL_UNCOMPRESSED_SIZE, dropped,
                     "total_byte_size")
-        check_total(rg, RG_TOTAL_COMPRESSED_SIZE, cmds, CMD_TOTAL_COMPRESSED_SIZE, dropped,
-                    "total_compressed_size")
+        check_total(rg, RG_TOTAL_COMPRESSED_SIZE, cmds, new_cmds, CMD_TOTAL_COMPRESSED_SIZE,
+                    dropped, "total_compressed_size")
         if has(rg, RG_FILE_OFFSET):
             if get(rg, RG_FILE_OFFSET) != min(chunks[(r, c)].off for c in range(nleaves)):
                 raise RenameError("a row group file_offset is not its first chunk; refused")
@@ -787,15 +835,21 @@ def drop_footer(meta: list, ctx: dict, mapping, drops, regions: list[Region],
             if c in dropped:
                 continue
             ch = chunks[(r, c)]
-            lo, hi, d = ch.off, ch.off + ch.length, ch.new_off - ch.off
-            cmd = cmds[c]
+            lo, hi, d = ch.base, ch.base + ch.length, ch.new_off - ch.base
+            cmd = new_cmds[c]
             for fid in (CMD_DATA_PAGE_OFFSET, CMD_INDEX_PAGE_OFFSET, CMD_DICTIONARY_PAGE_OFFSET):
                 shift(cmd, fid, lo, hi - 1, d, "a page offset")
-            shift(cc, CC_FILE_OFFSET, lo, hi, d, "a column chunk file_offset")
+            if (r, c) in repl:
+                set_value(cc, CC_META_DATA, cmd)
+                move_file_offset(cc, chunk_span(cmds[c]), ch)
+            else:
+                shift(cc, CC_FILE_OFFSET, lo, hi, d, "a column chunk file_offset")
             if ("bloom", r, c) in by_key:
                 set_value(cmd, CMD_BLOOM_FILTER_OFFSET, by_key[("bloom", r, c)].new_off)
             if ("column_index", r, c) in by_key:
-                set_value(cc, CC_COLUMN_INDEX_OFFSET, by_key[("column_index", r, c)].new_off)
+                ci = by_key[("column_index", r, c)]
+                set_value(cc, CC_COLUMN_INDEX_OFFSET, ci.new_off)
+                set_value(cc, CC_COLUMN_INDEX_LENGTH, ci.length)
             if ("offset_index", r, c) in by_key:
                 oi = by_key[("offset_index", r, c)]
                 set_value(cc, CC_OFFSET_INDEX_OFFSET, oi.new_off)
@@ -822,15 +876,19 @@ def drop_footer(meta: list, ctx: dict, mapping, drops, regions: list[Region],
 
 def rewrite_with_drops(src: str, dst: str, mapping: dict[str, str], drops: list[str], *,
                        copy: str = "auto", allow_mentions: bool = False,
-                       fsync: bool = True, kv_set: dict[str, str] | None = None) -> dict:
+                       fsync: bool = True, kv_set: dict[str, str] | None = None,
+                       values: dict | None = None, expect: dict | None = None,
+                       force_multi: bool = False) -> dict:
     """Write src without the dropped columns, and with the renames, to dst.
 
     The kept column chunks, Bloom filters and column indexes are copied byte
     for byte, in their original order; offset indexes are re-encoded with
     their page offsets moved.  Page headers (data page V1 and V2, dictionary
     page) hold sizes, counts, encodings and statistics but no file offset, so
-    no page changes.
+    no page changes.  The regions of a column in `values` are replaced by
+    new ones (replace_plan).
     """
+    values = values or {}
     size, start, footer = read_footer(src)
     meta = parse_checked(footer)
     ctx = prepare(meta, mapping, drops, allow_mentions)
@@ -843,8 +901,12 @@ def rewrite_with_drops(src: str, dst: str, mapping: dict[str, str], drops: list[
         chunks = {(reg.rg, reg.col): reg for reg in regions if reg.kind == "chunk"}
         oi_raw = {id(reg): os.pread(sfd, reg.length, reg.off)
                   for reg in kept if reg.kind == "offset_index"}
+        repl, replaced = replace_plan(src, sfd, meta, ctx, values, drops, expect or {},
+                                      force_multi)
+        put_replacements(kept, repl, oi_raw)
         data_end = layout(kept, chunks, oi_raw)
-        renamed = drop_footer(meta, ctx, mapping, drops, regions, nleaves, dropped, new_index)
+        renamed = drop_footer(meta, ctx, mapping, drops, regions, nleaves, dropped, new_index,
+                              repl)
         kv_done = apply_kv(meta, kv_set or {})
         kv_arrow = apply_kv_arrow(ctx, mapping, drops, kv_set or {})
         new = encode(meta)
@@ -877,13 +939,371 @@ def rewrite_with_drops(src: str, dst: str, mapping: dict[str, str], drops: list[
     kinds: dict[str, int] = {}
     for reg in kept:
         kinds[reg.kind] = kinds.get(reg.kind, 0) + 1
-    return dict(renamed=dict(mapping), dropped=list(drops), column_chunks_renamed=renamed,
-                arrow_schema=ctx["arrow_kv"] is not None, mentions_kept=ctx["found"],
-                src=src, dst=dst, in_size=size, in_footer_len=len(footer),
-                out_footer_len=len(new), out_size=data_end + len(tail),
-                columns_kept=len(ctx["spans"]) - len(drops), leaves_dropped=len(dropped),
-                regions_kept=kinds, bytes_copied=copied, copy=method,
-                **({"kv_set": kv_done, "kv_set_in_arrow_schema": kv_arrow} if kv_set else {}))
+    rep = dict(replaced=replaced) if values else {}
+    if values:
+        rep["regions_reencoded"] = sum(1 for reg in kept if (reg.rg, reg.col) in repl)
+    rep.update(renamed=dict(mapping), dropped=list(drops), column_chunks_renamed=renamed,
+               arrow_schema=ctx["arrow_kv"] is not None, mentions_kept=ctx["found"],
+               src=src, dst=dst, in_size=size, in_footer_len=len(footer),
+               out_footer_len=len(new), out_size=data_end + len(tail),
+               columns_kept=len(ctx["spans"]) - len(drops), leaves_dropped=len(dropped),
+               regions_kept=kinds, bytes_copied=copied, copy=method)
+    if kv_set:
+        rep.update(kv_set=kv_done, kv_set_in_arrow_schema=kv_arrow)
+    return rep
+
+
+# ------------------------------------------------------- value replacement --
+class Encoded:
+    """A column chunk that pyarrow wrote for a replaced column, cut from its file.
+
+    cmd is the encoded ColumnMetaData; its page offsets count from base, the
+    chunk's offset in pyarrow's file.  bloom, column_index and offset_index
+    are None when pyarrow wrote none.
+    """
+
+    __slots__ = ("cmd", "base", "chunk", "bloom", "column_index", "offset_index",
+                 "value", "rows")
+
+    def __init__(self, cmd, base, chunk, bloom, column_index, offset_index, value, rows):
+        self.cmd, self.base, self.chunk, self.bloom = cmd, base, chunk, bloom
+        self.column_index, self.offset_index = column_index, offset_index
+        self.value, self.rows = value, rows
+
+
+def parse_values(pairs: list[str], nulls: list[str]) -> dict:
+    """{name: value} from --set NAME=VALUE and --set-null NAME (value None)."""
+    values: dict = {}
+    for p in pairs:
+        name, sep, value = p.partition("=")
+        if not sep:
+            raise RenameError(f"--set {p!r}: expected NAME=VALUE")
+        if name in values:
+            raise RenameError(f"{name!r} is set twice")
+        values[name] = value
+    for name in nulls:
+        if name in values:
+            raise RenameError(f"{name!r} is set twice")
+        values[name] = None
+    return values
+
+
+def tsv_value(text: str):
+    return None if text == NULL_TOKEN else text
+
+
+def read_values_tsv(tsv: str) -> dict[str, dict[str, tuple]]:
+    """FILE -> {COLUMN: (OLD, NEW)} from FILE<TAB>COLUMN<TAB>OLD<TAB>NEW lines."""
+    out: dict[str, dict[str, tuple]] = {}
+    with open(tsv, encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) != 4:
+                raise RenameError(f"{tsv}:{n}: expected FILE<TAB>COLUMN<TAB>OLD<TAB>NEW")
+            file, col, old, new = parts
+            cols = out.setdefault(file, {})
+            if col in cols:
+                raise RenameError(f"{tsv}:{n}: {col!r} is set twice for one file")
+            cols[col] = (tsv_value(old), tsv_value(new))
+    return out
+
+
+def is_string_leaf(elem: list) -> bool:
+    """BYTE_ARRAY with the STRING logical type, or else the UTF8 converted type."""
+    if get(elem, SE_TYPE) != BYTE_ARRAY:
+        return False
+    logical = get(elem, SE_LOGICAL_TYPE)
+    if logical is not None:
+        return [f.fid for f in logical] == [LOGICAL_STRING]
+    return get(elem, SE_CONVERTED_TYPE) == CONVERTED_UTF8
+
+
+def arrow_string_field(schema, name: str) -> bool:
+    import pyarrow as pa
+
+    t = schema.field(name).type
+    if pa.types.is_dictionary(t):
+        t = t.value_type
+    return pa.types.is_string(t) or pa.types.is_large_string(t) or pa.types.is_string_view(t)
+
+
+def replace_targets(ctx: dict, values: dict, drops) -> dict[int, tuple]:
+    """Leaf index -> (name, value, nullable) of every replaced column.
+
+    Refuses a column that is not there, nested or repeated, also dropped, not
+    a string, or required when the value is a null.
+    """
+    schema, targets, leaf = ctx["schema"], {}, 0
+    for i, _, name, n in ctx["spans"]:
+        if name in values:
+            elem, value = schema[i], values[name]
+            if n != 1 or has(elem, SE_NUM_CHILDREN) or get(elem, SE_REPETITION) == REPEATED:
+                raise RenameError(f"{name!r} is a nested or repeated column; refused")
+            if name in drops:
+                raise RenameError(f"{name!r} is both set and dropped")
+            if not is_string_leaf(elem):
+                raise RenameError(f"{name!r} is not a string column; a string value does not fit")
+            nullable = get(elem, SE_REPETITION) == OPTIONAL
+            if value is None and not nullable:
+                raise RenameError(f"{name!r} is a required column; a null does not fit")
+            if value is not None:
+                try:
+                    value.encode("utf-8")
+                except UnicodeEncodeError as e:
+                    raise RenameError(f"the value for {name!r} is not valid UTF-8") from e
+            arrow = ctx["arrow_schema"]
+            if arrow is not None and not arrow_string_field(arrow, name):
+                raise RenameError(f"ARROW:schema does not give {name!r} a string type; refused")
+            targets[leaf] = (name, value, nullable)
+        leaf += n
+    missing = sorted(set(values) - {t[0] for t in targets.values()})
+    if missing:
+        raise RenameError(f"no top-level column {missing[0]!r} to set")
+    return targets
+
+
+def old_values(src: str, name: str) -> set:
+    """The distinct values of a column (None for a null), read with pyarrow."""
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(src)
+    seen: set = set()
+    for i in range(pf.metadata.num_row_groups):
+        seen.update(pc.unique(pf.read_row_group(i, columns=[name]).column(0)).to_pylist())
+    return seen
+
+
+def header_at(fd: int, off: int) -> tuple[list, int]:
+    """A page header; tries a larger read when the first one cuts it."""
+    try:
+        return struct_at(fd, off)
+    except RenameError:
+        return struct_at(fd, off, 1 << 20)
+
+
+def page_shape(fd: int, cmd: list) -> tuple[int, bool, int]:
+    """(data page version, page checksums, most rows in one data page) of a chunk."""
+    start, length = chunk_span(cmd)
+    pos, end = start, start + length
+    versions, crc, rows = set(), False, 0
+    while pos < end:
+        header, hlen = header_at(fd, pos)
+        kind = get(header, PH_TYPE)
+        crc = crc or has(header, PH_CRC)
+        if kind == PAGE_DATA:
+            versions.add(1)
+            rows = max(rows, get(get(header, PH_DATA_PAGE_HEADER) or [], DPH_NUM_VALUES) or 0)
+        elif kind == PAGE_DATA_V2:
+            versions.add(2)
+            rows = max(rows, get(get(header, PH_DATA_PAGE_HEADER_V2) or [], DPH2_NUM_ROWS) or 0)
+        pos += hlen + (get(header, PH_COMPRESSED_PAGE_SIZE) or 0)
+    if pos != end or len(versions) != 1:
+        raise RenameError("a chunk to replace mixes data page versions or its pages do not "
+                          "fill it; refused")
+    return versions.pop(), crc, rows
+
+
+def encoding_family(cmd: list) -> tuple[str, bool]:
+    """("dictionary", PLAIN_DICTIONARY only) or (PLAIN or DELTA_*, False)."""
+    encs = set(get(cmd, CMD_ENCODINGS).items)
+    if encs & {ENC_RLE_DICTIONARY, ENC_PLAIN_DICTIONARY}:
+        return "dictionary", ENC_RLE_DICTIONARY not in encs
+    data = encs - {ENC_RLE, ENC_BIT_PACKED}
+    if len(data) == 1 and min(data) in DATA_ENCODINGS:
+        return DATA_ENCODINGS[min(data)], False
+    raise RenameError(f"the encodings {sorted(encs)} of a chunk to replace are not supported")
+
+
+def encode_column(name: str, value, nullable: bool, shape: tuple) -> Encoded:
+    """Write one row group of the value with pyarrow, in memory, and cut out its chunk."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    rows, codec, family, plain_dict, version, crc, page_rows, bloom, page_index = shape
+    if codec not in CODEC_NAMES:
+        raise RenameError(f"codec {codec} of {name!r} cannot be written; refused")
+    typ = pa.string()
+    arr = pa.nulls(rows, typ) if value is None else pa.repeat(pa.scalar(value, typ), rows)
+    table = pa.Table.from_arrays([arr], schema=pa.schema([pa.field(name, typ, nullable)]))
+    kw = dict(row_group_size=rows, compression=CODEC_NAMES[codec],
+              use_dictionary=family == "dictionary", data_page_version=f"{version}.0",
+              version="1.0" if plain_dict else "2.6", write_statistics=True,
+              write_page_index=page_index, write_page_checksum=crc,
+              max_rows_per_page=page_rows, store_schema=False)
+    if family != "dictionary":
+        kw["column_encoding"] = {name: family}
+    if bloom:
+        kw["bloom_filter_options"] = {name: {"ndv": 1, "fpp": 0.001}}
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, **kw)
+    buf = sink.getvalue().to_pybytes()
+    meta = parse_footer(buf[-8 - struct.unpack("<I", buf[-8:-4])[0]:-8])
+    rgs = kv_items(meta, FMD_ROW_GROUPS)
+    if len(rgs) != 1 or get(rgs[0], RG_NUM_ROWS) != rows:
+        raise RenameError(f"pyarrow did not write {rows} rows of {name!r} in one row group")
+    cc = get(rgs[0], RG_COLUMNS).items[0]
+    cmd = get(cc, CC_META_DATA)
+    if encoding_family(cmd)[0] != family:
+        raise RenameError(f"pyarrow did not write {name!r} with {family} encoding; refused")
+    base, length = chunk_span(cmd)
+    bloom_bytes = None
+    if has(cmd, CMD_BLOOM_FILTER_OFFSET):
+        off = get(cmd, CMD_BLOOM_FILTER_OFFSET)
+        n = get(cmd, CMD_BLOOM_FILTER_LENGTH)
+        if n is None:
+            r = Reader(buf[off:])
+            n = r.p + get(r.struct(), BF_NUM_BYTES)
+        bloom_bytes = buf[off:off + n]
+
+    def cut(fo: int, fl: int):
+        return buf[get(cc, fo):get(cc, fo) + get(cc, fl)] if has(cc, fo) else None
+
+    return Encoded(encode(cmd), base, buf[base:base + length], bloom_bytes,
+                   cut(CC_COLUMN_INDEX_OFFSET, CC_COLUMN_INDEX_LENGTH),
+                   cut(CC_OFFSET_INDEX_OFFSET, CC_OFFSET_INDEX_LENGTH), value, rows)
+
+
+def normalized(fields: list) -> list:
+    """Fields in id order, each with the short header form where it fits."""
+    fields = sorted(fields, key=lambda f: f.fid)
+    last = 0
+    for f in fields:
+        f.short = 0 < f.fid - last <= 15
+        last = f.fid
+    return fields
+
+
+def rebuilt_statistics(old: list, value, rows: int) -> list:
+    """A Statistics struct with the old one's fields, for a column of one value."""
+    v = None if value is None else value.encode("utf-8")
+    out = []
+    for f in old:
+        if f.fid in (ST_MAX, ST_MIN, ST_MAX_VALUE, ST_MIN_VALUE):
+            if v is not None:
+                out.append(Field(f.fid, T_BINARY, v, True))
+        elif f.fid in (ST_MAX_EXACT, ST_MIN_EXACT):
+            if v is not None:
+                out.append(Field(f.fid, T_TRUE, None, True))
+        elif f.fid == ST_NULL_COUNT:
+            out.append(Field(f.fid, f.ttype, rows if v is None else 0, True))
+        elif f.fid == ST_DISTINCT_COUNT:
+            out.append(Field(f.fid, f.ttype, 0 if v is None else 1, True))
+        else:
+            raise RenameError(f"statistics field {f.fid} of a replaced column is not known")
+    return normalized(out)
+
+
+CMD_KEEP_OLD = (CMD_TYPE, CMD_PATH_IN_SCHEMA, CMD_CODEC, CMD_KV)
+CMD_FROM_NEW = (CMD_ENCODINGS, CMD_NUM_VALUES, CMD_TOTAL_UNCOMPRESSED_SIZE,
+                CMD_TOTAL_COMPRESSED_SIZE, CMD_DATA_PAGE_OFFSET, CMD_INDEX_PAGE_OFFSET,
+                CMD_DICTIONARY_PAGE_OFFSET)
+CMD_IF_BOTH = (CMD_ENCODING_STATS, CMD_BLOOM_FILTER_OFFSET, CMD_SIZE_STATISTICS)
+
+
+def merged_cmd(old: list, e: Encoded) -> list:
+    """The ColumnMetaData of a replaced chunk.
+
+    Type, path, codec and key-values stay; sizes, encodings, value count and
+    page offsets come from pyarrow; encoding_stats, size_statistics and the
+    Bloom filter fields stay present only where they were; the statistics
+    keep their fields with new values.
+    """
+    new = parse_footer(e.cmd)
+    for fid, what in ((CMD_TYPE, "type"), (CMD_CODEC, "codec"), (CMD_NUM_VALUES, "value count")):
+        if get(new, fid) != get(old, fid):
+            raise RenameError(f"pyarrow wrote another {what} for a replaced column; refused")
+    known = CMD_KEEP_OLD + CMD_FROM_NEW + CMD_IF_BOTH + (CMD_STATISTICS, CMD_BLOOM_FILTER_LENGTH)
+    unknown = sorted(f.fid for f in old if f.fid not in known)
+    if unknown:
+        raise RenameError(f"ColumnMetaData field {unknown[0]} of a replaced column is not known")
+    out = [f for f in old if f.fid in CMD_KEEP_OLD]
+    out += [f for f in new if f.fid in CMD_FROM_NEW or (f.fid in CMD_IF_BOTH and has(old, f.fid))]
+    if has(old, CMD_BLOOM_FILTER_LENGTH):
+        out.append(Field(CMD_BLOOM_FILTER_LENGTH, T_I32, len(e.bloom), True))
+    if has(old, CMD_STATISTICS):
+        out.append(Field(CMD_STATISTICS, T_STRUCT,
+                         rebuilt_statistics(get(old, CMD_STATISTICS), e.value, e.rows), True))
+    return normalized(out)
+
+
+def move_file_offset(cc: list, old_span: tuple[int, int], ch: Region) -> None:
+    """A replaced chunk's file_offset: 0, its start or its end, as it was."""
+    fo = get(cc, CC_FILE_OFFSET)
+    if not fo:
+        return
+    start, length = old_span
+    if fo == start:
+        set_value(cc, CC_FILE_OFFSET, ch.new_off)
+    elif fo == start + length:
+        set_value(cc, CC_FILE_OFFSET, ch.new_off + ch.length)
+    else:
+        raise RenameError("a column chunk file_offset is not its start or its end; refused")
+
+
+def replace_plan(src: str, fd: int, meta: list, ctx: dict, values: dict, drops, expect: dict,
+                 force_multi: bool) -> tuple[dict, dict]:
+    """(row group, leaf) -> Encoded for every chunk of a replaced column, and a report.
+
+    pyarrow writes one chunk per distinct row group shape (rows, codec,
+    encoding family, page version, checksums, rows per page, Bloom filter,
+    page index); row groups of the same shape share it.
+    """
+    if not values:
+        return {}, {}
+    targets = replace_targets(ctx, values, drops)
+    rgs = kv_items(meta, FMD_ROW_GROUPS)
+    if not rgs or not all(get(rg, RG_NUM_ROWS) for rg in rgs):
+        raise RenameError("the file or one of its row groups has no rows; refused")
+    repl, report, cache = {}, {}, {}
+    for leaf, (name, value, nullable) in targets.items():
+        seen = old_values(src, name)
+        if len(seen) > 1 and not force_multi:
+            raise RenameError(f"{name!r} has {len(seen)} distinct values; "
+                              "pass --force-multi to replace them all")
+        if name in expect:
+            want = expect[name]
+            if force_multi and want not in seen:
+                raise RenameError(f"{want!r} is not one of the {len(seen)} values of {name!r}")
+            if not force_multi and seen != {want}:
+                raise RenameError(f"the old value of {name!r} is {next(iter(seen))!r}, "
+                                  f"not {want!r}; refused")
+        report[name] = dict(new=value, old=next(iter(seen)) if len(seen) == 1 else None,
+                            old_distinct=len(seen))
+        for r, rg in enumerate(rgs):
+            cc = get(rg, RG_COLUMNS).items[leaf]
+            cmd = get(cc, CC_META_DATA)
+            version, crc, page_rows = page_shape(fd, cmd)
+            family, plain_dict = encoding_family(cmd)
+            shape = (get(rg, RG_NUM_ROWS), get(cmd, CMD_CODEC), family, plain_dict, version, crc,
+                     max(page_rows, 1), has(cmd, CMD_BLOOM_FILTER_OFFSET),
+                     has(cc, CC_OFFSET_INDEX_OFFSET) or has(cc, CC_COLUMN_INDEX_OFFSET))
+            if (name, shape) not in cache:
+                cache[(name, shape)] = encode_column(name, value, nullable, shape)
+            repl[(r, leaf)] = cache[(name, shape)]
+    return repl, report
+
+
+def put_replacements(kept: list[Region], repl: dict, oi_raw: dict) -> None:
+    """Point the kept regions of a replaced column at their new bytes."""
+    for reg in kept:
+        e = repl.get((reg.rg, reg.col))
+        if e is None:
+            continue
+        data = dict(chunk=e.chunk, bloom=e.bloom, column_index=e.column_index,
+                    offset_index=e.offset_index)[reg.kind]
+        if data is None:
+            raise RenameError(f"pyarrow wrote no {reg.kind} for a replaced column; refused")
+        reg.length = len(data)
+        if reg.kind == "offset_index":
+            oi_raw[id(reg)] = data
+        else:
+            reg.data = data
+        if reg.kind == "chunk":
+            reg.base = e.base
 
 
 # ------------------------------------------------------------------ files --
@@ -943,19 +1363,25 @@ def copy_range(src_fd: int, dst_fd: int, src_off: int, dst_off: int, length: int
 
 def rename_file(src: str, dst: str, mapping: dict[str, str], *, drops=(),
                 copy: str = "auto", allow_mentions: bool = False, tail_only: bool = False,
-                fsync: bool = True, kv_set: dict[str, str] | None = None) -> dict:
+                fsync: bool = True, kv_set: dict[str, str] | None = None,
+                values: dict | None = None, expect: dict | None = None,
+                force_multi: bool = False) -> dict:
     """Write the renamed file (or only its new tail) to dst.
 
-    With drops, the kept column chunks are copied to new offsets instead
-    (rewrite_with_drops); their pages still keep their bytes.
+    With drops or values, the kept column chunks are copied to new offsets
+    instead (rewrite_with_drops); their pages still keep their bytes, and only
+    the chunks of a column in values are new.  expect gives the old value
+    that each column in values must hold.
     """
     if os.path.exists(dst) and os.path.samefile(src, dst):
         raise RenameError("the output is the input file; refused")
-    if drops:
+    if drops or values:
         if tail_only:
-            raise RenameError("--tail-only cannot drop columns: the data part changes")
+            raise RenameError("--tail-only cannot drop columns or set values: the data part "
+                              "changes")
         return rewrite_with_drops(src, dst, mapping, list(drops), copy=copy,
-                                  allow_mentions=allow_mentions, fsync=fsync, kv_set=kv_set)
+                                  allow_mentions=allow_mentions, fsync=fsync, kv_set=kv_set,
+                                  values=values, expect=expect, force_multi=force_multi)
     size, start, footer = read_footer(src)
     new, report = rename_footer(footer, mapping, allow_mentions, kv_set)
     tail = new + struct.pack("<I", len(new)) + MAGIC
@@ -1033,11 +1459,46 @@ def mapping_args(ap: argparse.ArgumentParser) -> None:
                     help="set the value of the existing file key-value KEY (repeatable)")
 
 
+def value_args(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                    help="give string column NAME the value VALUE in every row (repeatable)")
+    ap.add_argument("--set-null", action="append", default=[], metavar="NAME",
+                    help="make column NAME null in every row (repeatable)")
+    ap.add_argument("--values", metavar="TSV",
+                    help="FILE<TAB>COLUMN<TAB>OLD<TAB>NEW lines; \\N is a null; needs --out-dir")
+    ap.add_argument("--out-dir", metavar="DIR", help="output folder for --values")
+    ap.add_argument("--force-multi", action="store_true",
+                    help="replace a column that holds more than one distinct value")
+
+
+def value_jobs(a) -> list[tuple[str, str, dict, dict]]:
+    """(src, dst, values, expected old values) for each file to write."""
+    if a.values:
+        if a.src or a.dst or a.set or a.set_null:
+            raise RenameError("--values takes no SRC DST, --set or --set-null")
+        if not a.out_dir:
+            raise RenameError("--values needs --out-dir")
+        jobs, names = [], set()
+        for src, cols in read_values_tsv(a.values).items():
+            dst = os.path.join(a.out_dir, os.path.basename(src))
+            if dst in names:
+                raise RenameError(f"two files in {a.values} have the name "
+                                  f"{os.path.basename(src)!r}")
+            names.add(dst)
+            jobs.append((src, dst, {c: new for c, (_, new) in cols.items()},
+                         {c: old for c, (old, _) in cols.items()}))
+        return jobs
+    if not a.src or not a.dst:
+        raise RenameError("give SRC and DST, or --values with --out-dir")
+    return [(a.src, a.dst, parse_values(a.set, a.set_null), {})]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("src")
-    ap.add_argument("dst")
+    ap.add_argument("src", nargs="?")
+    ap.add_argument("dst", nargs="?")
     mapping_args(ap)
+    value_args(ap)
     ap.add_argument("--copy", choices=("auto", "read-write"), default="auto",
                     help="auto: reflink, then copy_file_range, then read-write")
     ap.add_argument("--allow-mentions", action="store_true",
@@ -1050,15 +1511,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         mapping = parse_mapping(a.rename, a.map)
         kv_set = parse_kv(a.set_kv)
-        rep = rename_file(a.src, a.dst, mapping, drops=a.drop, copy=a.copy,
-                          allow_mentions=a.allow_mentions, tail_only=a.tail_only,
-                          fsync=not a.no_fsync, kv_set=kv_set)
+        jobs = value_jobs(a)
     except RenameError as e:
         print(json.dumps(dict(src=a.src, dst=a.dst, ok=False, error=str(e))))
         return 2
-    rep["ok"] = True
-    print(json.dumps(rep))
-    return 0
+    status = 0
+    for src, dst, values, expect in jobs:
+        try:
+            rep = rename_file(src, dst, mapping, drops=a.drop, copy=a.copy,
+                              allow_mentions=a.allow_mentions, tail_only=a.tail_only,
+                              fsync=not a.no_fsync, kv_set=kv_set, values=values,
+                              expect=expect, force_multi=a.force_multi)
+        except (RenameError, OSError) as e:
+            print(json.dumps(dict(src=src, dst=dst, ok=False, error=str(e))), flush=True)
+            status = 2
+            continue
+        rep["ok"] = True
+        print(json.dumps(rep), flush=True)
+    return status
 
 
 if __name__ == "__main__":

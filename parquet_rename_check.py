@@ -38,6 +38,25 @@ and for every pair:
             row group is probed in both files with DuckDB parquet_bloom_probe:
             the answers are equal and the first row group is not excluded.
 
+With replaced values (--set, --set-null or --values), the footer and chunks
+checks of a drop run, and for each replaced column:
+
+  footer    its ColumnChunks are left out of the field by field comparison and
+            the row group sizes are the sums of the new chunk sizes;
+  chunks    each new chunk has the old type, codec, path, key-values, value
+            count, encoding family, data page version, page checksums,
+            file_offset form, and the same Bloom filter, column index, offset
+            index and statistics fields present, with statistics that give
+            the new value;
+  values    pyarrow reads the new value in every row of NEW, and OLD holds the
+            expected old value (from --values);
+  duckdb    count(), count(DISTINCT), min() and max() of the column give the
+            new value in every row;
+  bloom     a probe finds the new value in every row group of NEW, and no
+            row group of NEW passes a probe of an old value.
+
+The pyarrow column hashes and the DuckDB sums leave the replaced columns out.
+
 One JSON line per pair on stdout.  The exit status is 1 when any pair has a
 difference, 2 on a usage error.
 
@@ -46,6 +65,8 @@ Usage:
   parquet_rename_check.py --map mapping.json --pairs pairs.tsv
   parquet_rename_check.py --drop NAME [...] [--rename OLD=NEW ...] OLD NEW
   parquet_rename_check.py ... --set-kv KEY=VALUE [...] OLD NEW
+  parquet_rename_check.py --set NAME=VALUE [--set-null NAME] [--drop ...] OLD NEW
+  parquet_rename_check.py --values values.tsv --out-dir DIR [--drop ...]
 
 With --set-kv, the expected footer has those values in place of the old ones;
 every other key-value must be unchanged (footer and pyarrow schema metadata).
@@ -240,7 +261,8 @@ def column_hashes(pf, names: list[str] | None = None) -> dict[str, str]:
     return {n: h.hexdigest() for n, h in zip(names, hashers)}
 
 
-def arrow_problems(old: str, new: str, mapping, rep: dict, drops=(), kv_set=None) -> list[str]:
+def arrow_problems(old: str, new: str, mapping, rep: dict, drops=(), kv_set=None,
+                   values=()) -> list[str]:
     import pyarrow.parquet as pq
 
     po, pn = pq.ParquetFile(old), pq.ParquetFile(new)
@@ -260,9 +282,9 @@ def arrow_problems(old: str, new: str, mapping, rep: dict, drops=(), kv_set=None
     if not pn.schema_arrow.equals(want, check_metadata=True):
         problems.append("pyarrow schema is not the old schema with the names mapped")
         return problems
-    kept = [n for n in po.schema_arrow.names if n not in drops]
+    kept = [n for n in po.schema_arrow.names if n not in drops and n not in values]
     ho = column_hashes(open_for_hashing(old), kept)
-    hn = column_hashes(open_for_hashing(new))
+    hn = column_hashes(open_for_hashing(new), [mapping.get(n, n) for n in kept])
     rep["column_sha256"] = hn
     for name, digest in ho.items():
         if hn.get(mapping.get(name, name)) != digest:
@@ -274,7 +296,7 @@ def q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def duckdb_problems(old: str, new: str, mapping, rep: dict, drops=()) -> list[str]:
+def duckdb_problems(old: str, new: str, mapping, rep: dict, drops=(), values=None) -> list[str]:
     import duckdb
 
     con = duckdb.connect()
@@ -292,12 +314,21 @@ def duckdb_problems(old: str, new: str, mapping, rep: dict, drops=()) -> list[st
         if got != [mapping.get(n, n) for n in names if n not in drops]:
             problems.append("DuckDB columns are not the old ones, dropped and renamed")
         for o, n in mapping.items():
+            if o in (values or {}):
+                continue
             a = con.execute(f"SELECT count({q(o)}), sum(hash({q(o)})) FROM read_parquet(?)",
                             [old]).fetchone()
             b = con.execute(f"SELECT count({q(n)}), sum(hash({q(n)})) FROM read_parquet(?)",
                             [new]).fetchone()
             if a != b:
                 problems.append(f"DuckDB column {o!r} -> {n!r}: {a} != {b}")
+        for o, value in (values or {}).items():
+            n = mapping.get(o, o)
+            got = con.execute(f"SELECT count({q(n)}), count(DISTINCT {q(n)}), min({q(n)}), "
+                              f"max({q(n)}) FROM read_parquet(?)", [new]).fetchone()
+            want = (0, 0, None, None) if value is None else (nn, 1, value, value)
+            if got != want:
+                problems.append(f"DuckDB column {n!r} does not hold the new value in every row")
     finally:
         con.close()
     return problems
@@ -318,15 +349,18 @@ def bloom_columns(meta: list) -> list[str]:
 
 
 def bloom_problems(old: str, new: str, old_meta: list, mapping, rep: dict,
-                   drops=()) -> list[str]:
+                   drops=(), values=None) -> list[str]:
     import duckdb
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
+    values = values or {}
     cols = [c for c in bloom_columns(old_meta) if c not in drops]
     rep["bloom_columns"] = [mapping.get(c, c) for c in cols]
     if not cols:
         return []
+    replaced = [c for c in cols if c in values]
+    cols = [c for c in cols if c not in values]
     pf = pq.ParquetFile(old)
     con = duckdb.connect()
     problems = []
@@ -345,8 +379,60 @@ def bloom_problems(old: str, new: str, old_meta: list, mapping, rep: dict,
                 problems.append(f"Bloom probe of {c!r} differs: {a} != {b}")
             elif not b or b[0] != (0, False):
                 problems.append(f"Bloom filter of {c!r} excludes a value of row group 0")
+        for c in replaced:
+            problems += replaced_bloom_problems(con, sql, old, new, c, mapping.get(c, c),
+                                                values[c], rep)
     finally:
         con.close()
+    return problems
+
+
+def old_probe_values(old: str, name: str, value) -> list:
+    """Up to three old values of a column, other than the new value and null."""
+    return sorted(v for v in pr.old_values(old, name) if v is not None and v != value)[:3]
+
+
+def replaced_bloom_problems(con, sql: str, old: str, new: str, o: str, n: str, value,
+                            rep: dict) -> list[str]:
+    problems = []
+    if value is not None:
+        got = con.execute(sql, [new, n, value]).fetchall()
+        if not got or any(excl for _, excl in got):
+            problems.append(f"Bloom filter of {n!r} does not find the new value in every "
+                            "row group")
+    probes = old_probe_values(old, o, value)
+    for v in probes:
+        got = con.execute(sql, [new, n, v]).fetchall()
+        if not got or not all(excl for _, excl in got):
+            problems.append(f"Bloom filter of {n!r} still finds an old value")
+    rep.setdefault("bloom_old_values_probed", {})[n] = len(probes)
+    return problems
+
+
+def value_problems(old: str, new: str, mapping, values: dict, expect: dict,
+                   force_multi: bool, rep: dict) -> list[str]:
+    """NEW holds the new value in every row; OLD held the expected old value."""
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    problems = []
+    pf = pq.ParquetFile(new)
+    for o, value in values.items():
+        n = mapping.get(o, o)
+        for i in range(pf.metadata.num_row_groups):
+            col = pf.read_row_group(i, columns=[n]).column(0)
+            if value is None:
+                ok = col.null_count == len(col)
+            else:
+                ok = col.null_count == 0 and pc.all(pc.equal(col, value)).as_py() is not False
+            if not ok:
+                problems.append(f"row group {i} of {n!r} does not hold the new value in every row")
+                break
+        if o in expect:
+            seen = pr.old_values(old, o)
+            if (expect[o] not in seen) if force_multi else (seen != {expect[o]}):
+                problems.append(f"OLD column {o!r} does not hold the expected old value")
+    rep["values_checked"] = len(values)
     return problems
 
 
@@ -370,7 +456,7 @@ def mask_offsets(meta: list) -> list:
             for f in cc:
                 if f.fid in MASKED["cc"]:
                     f.value = None
-            for f in pr.get(cc, pr.CC_META_DATA):
+            for f in pr.get(cc, pr.CC_META_DATA) or []:
                 if f.fid in MASKED["cmd"]:
                     f.value = None
     return meta
@@ -441,12 +527,96 @@ def relative(old_s, new_s, fid, o0, n0) -> bool:
     return a - o0 == b - n0
 
 
-def drop_footer_problems(old: str, new: str, old_footer: bytes, new_meta: list,
-                         mapping, drops, rep: dict, kv_set=None) -> list[str]:
+def replaced_leaves(meta: list, names) -> dict[int, str]:
+    """Leaf index -> name of the top-level leaf columns in names."""
+    out, leaf = {}, 0
+    for _, _, name, n in pr.schema_spans(pr.get(meta, pr.FMD_SCHEMA).items):
+        if name in names:
+            out[leaf] = name
+        leaf += n
+    return out
+
+
+def mask_replaced(meta: list, leaves) -> None:
+    """Blank the ColumnChunks of the replaced leaves and the row group sizes."""
+    for rg in pr.kv_items(meta, pr.FMD_ROW_GROUPS):
+        for f in rg:
+            if f.fid in (pr.RG_TOTAL_BYTE_SIZE, pr.RG_TOTAL_COMPRESSED_SIZE):
+                f.value = None
+        items = pr.get(rg, pr.RG_COLUMNS).items
+        for c in leaves:
+            if c < len(items):
+                items[c] = []
+
+
+def row_group_size_problems(rg: list, r: int) -> list[str]:
+    cmds = [pr.get(cc, pr.CC_META_DATA) for cc in pr.get(rg, pr.RG_COLUMNS).items]
     problems = []
+    for fid, size in ((pr.RG_TOTAL_BYTE_SIZE, pr.CMD_TOTAL_UNCOMPRESSED_SIZE),
+                      (pr.RG_TOTAL_COMPRESSED_SIZE, pr.CMD_TOTAL_COMPRESSED_SIZE)):
+        if pr.has(rg, fid) and pr.get(rg, fid) != sum(pr.get(m, size) for m in cmds):
+            problems.append(f"row group {r}: field {fid} is not the sum of its columns")
+    return problems
+
+
+def present(fields: list, fids) -> list[bool]:
+    return [pr.has(fields, f) for f in fids]
+
+
+def replaced_chunk_problems(fo: int, fn: int, occ: list, ncc: list, rows: int, value,
+                            name: bytes, where: str) -> list[str]:
+    """A replaced chunk keeps the old chunk's form and holds the new value."""
+    problems = []
+    ocmd, ncmd = pr.get(occ, pr.CC_META_DATA), pr.get(ncc, pr.CC_META_DATA)
+    for fid, what in ((pr.CMD_TYPE, "type"), (pr.CMD_CODEC, "codec"), (pr.CMD_KV, "key-values")):
+        if any(True for _ in diff_trees(pr.get(ocmd, fid), pr.get(ncmd, fid))):
+            problems.append(f"{where}: {what} differs")
+    if pr.get(ncmd, pr.CMD_PATH_IN_SCHEMA).items != [name]:
+        problems.append(f"{where}: path_in_schema is not the column name")
+    if pr.get(ncmd, pr.CMD_NUM_VALUES) != rows:
+        problems.append(f"{where}: num_values is not the row count")
+    if pr.encoding_family(ocmd)[0] != pr.encoding_family(ncmd)[0]:
+        problems.append(f"{where}: encoding family differs")
+    if pr.page_shape(fo, ocmd)[:2] != pr.page_shape(fn, ncmd)[:2]:
+        problems.append(f"{where}: data page version or page checksums differ")
+    cmd_fids = (pr.CMD_BLOOM_FILTER_OFFSET, pr.CMD_BLOOM_FILTER_LENGTH, pr.CMD_STATISTICS,
+                pr.CMD_ENCODING_STATS, pr.CMD_SIZE_STATISTICS)
+    cc_fids = (pr.CC_COLUMN_INDEX_OFFSET, pr.CC_OFFSET_INDEX_OFFSET)
+    if present(ocmd, cmd_fids) != present(ncmd, cmd_fids) or \
+            present(occ, cc_fids) != present(ncc, cc_fids):
+        problems.append(f"{where}: Bloom filter, page index or statistics presence differs")
+    if (pr.get(occ, pr.CC_FILE_OFFSET) == 0) != (pr.get(ncc, pr.CC_FILE_OFFSET) == 0):
+        problems.append(f"{where}: file_offset form differs")
+    ost, nst = pr.get(ocmd, pr.CMD_STATISTICS), pr.get(ncmd, pr.CMD_STATISTICS)
+    if ost is not None and nst is not None:
+        v = None if value is None else value.encode("utf-8")
+        want = {pr.ST_NULL_COUNT: rows if v is None else 0,
+                pr.ST_DISTINCT_COUNT: 0 if v is None else 1}
+        for fid in (pr.ST_MAX, pr.ST_MIN, pr.ST_MAX_VALUE, pr.ST_MIN_VALUE):
+            want[fid] = v
+        for fid, w in want.items():
+            if pr.has(nst, fid) and pr.get(nst, fid) != w:
+                problems.append(f"{where}: statistics field {fid} does not give the new value")
+        if v is not None and [f.fid for f in nst] != [f.fid for f in ost]:
+            problems.append(f"{where}: statistics fields differ")
+    return problems
+
+
+def drop_footer_problems(old: str, new: str, old_footer: bytes, new_meta: list,
+                         mapping, drops, rep: dict, kv_set=None, values=None) -> list[str]:
+    problems = []
+    values = values or {}
     want, dropped = expected_footer(old_footer, mapping, drops)
     expected_kv(want, kv_set)
     got = pr.parse_footer(pr.encode(new_meta))
+    leaves = replaced_leaves(want, {mapping.get(o, o) for o in values})
+    back = {mapping.get(o, o): o for o in values}
+    sizes = []
+    if values:
+        for r, rg in enumerate(pr.kv_items(got, pr.FMD_ROW_GROUPS)):
+            sizes += row_group_size_problems(rg, r)
+        mask_replaced(want, leaves)
+        mask_replaced(got, leaves)
     kvs = pr.kv_items(want, pr.FMD_KV)
     arrow_kv = {i for i, kv in enumerate(kvs) if pr.get(kv, pr.KV_KEY) == pr.ARROW_SCHEMA_KEY}
     for path, a, b in diff_trees(mask_offsets(want), mask_offsets(got)):
@@ -465,7 +635,7 @@ def drop_footer_problems(old: str, new: str, old_footer: bytes, new_meta: list,
 
     old_meta = pr.parse_footer(old_footer)
     fo, fn = os.open(old, os.O_RDONLY), os.open(new, os.O_RDONLY)
-    same = 0
+    same = reencoded = 0
     try:
         for r, (org, nrg) in enumerate(zip(pr.kv_items(old_meta, pr.FMD_ROW_GROUPS),
                                            pr.kv_items(new_meta, pr.FMD_ROW_GROUPS))):
@@ -478,6 +648,12 @@ def drop_footer_problems(old: str, new: str, old_footer: bytes, new_meta: list,
                 o0, n = pr.chunk_span(ocmd)
                 n0, _ = pr.chunk_span(ncmd)
                 starts.append(n0)
+                if c in leaves:
+                    problems += replaced_chunk_problems(
+                        fo, fn, occ, ncc, pr.get(org, pr.RG_NUM_ROWS), values[back[leaves[c]]],
+                        leaves[c].encode("utf-8"), where)
+                    reencoded += 1
+                    continue
                 if sha256_at(fo, o0, n) != sha256_at(fn, n0, n):
                     problems.append(f"{where}: column chunk bytes differ")
                     continue
@@ -516,7 +692,9 @@ def drop_footer_problems(old: str, new: str, old_footer: bytes, new_meta: list,
         os.close(fo)
         os.close(fn)
     rep["column_chunks_identical"] = same
-    return problems
+    if values:
+        rep["column_chunks_reencoded"] = reencoded
+    return problems + sizes
 
 
 def page_index_problems(path: str, meta: list, rep: dict) -> list[str]:
@@ -563,13 +741,17 @@ def page_index_problems(path: str, meta: list, rep: dict) -> list[str]:
 
 
 # ------------------------------------------------------------------ check --
-def check_pair(old: str, new: str, mapping: dict[str, str], drops=(), kv_set=None) -> dict:
+def check_pair(old: str, new: str, mapping: dict[str, str], drops=(), values=None,
+               expect=None, force_multi: bool = False, kv_set=None) -> dict:
     t0 = time.monotonic()
     drops = list(drops)
     kv_set = dict(kv_set or {})
+    values = dict(values or {})
     rep: dict = dict(old=old, new=new, renamed=dict(mapping), dropped=drops)
     if kv_set:
         rep["kv_set"] = kv_set
+    if values:
+        rep["replaced"] = values
     problems: list[str] = []
 
     def stage(name, fn, *args):
@@ -588,8 +770,9 @@ def check_pair(old: str, new: str, mapping: dict[str, str], drops=(), kv_set=Non
         return rep
 
     rep["old_size"], rep["new_size"] = os.path.getsize(old), nsize
-    if drops:
-        stage("footer", drop_footer_problems, old, new, ofooter, new_meta, mapping, drops, rep, kv_set)
+    if drops or values:
+        stage("footer", drop_footer_problems, old, new, ofooter, new_meta, mapping, drops, rep,
+              kv_set, values)
     elif nstart != ostart:
         problems.append(f"footer start {ostart} -> {nstart}")
     else:
@@ -603,12 +786,15 @@ def check_pair(old: str, new: str, mapping: dict[str, str], drops=(), kv_set=Non
         fh.seek(nsize - 8)
         if fh.read(8) != struct.pack("<I", len(nfooter)) + pr.MAGIC:
             problems.append("new tail is not footer length + PAR1")  # pragma: no cover
-    if not drops:
+    if not drops and not values:
         stage("footer", footer_problems, old_meta, new_meta, mapping, kv_set)
     stage("page index", page_index_problems, new, new_meta, rep)
-    stage("arrow", arrow_problems, old, new, mapping, rep, drops, kv_set)
-    stage("duckdb", duckdb_problems, old, new, mapping, rep, drops)
-    stage("bloom", bloom_problems, old, new, old_meta, mapping, rep, drops)
+    stage("arrow", arrow_problems, old, new, mapping, rep, drops, kv_set, values)
+    if values:
+        stage("values", value_problems, old, new, mapping, values, expect or {}, force_multi,
+              rep)
+    stage("duckdb", duckdb_problems, old, new, mapping, rep, drops, values)
+    stage("bloom", bloom_problems, old, new, old_meta, mapping, rep, drops, values)
     rep["ok"] = not problems
     rep["problems"] = problems
     rep["seconds"] = round(time.monotonic() - t0, 3)
@@ -633,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("files", nargs="*", metavar="OLD NEW")
     pr.mapping_args(ap)
+    pr.value_args(ap)
     ap.add_argument("--pairs", metavar="TSV", help="a file of OLD<TAB>NEW lines")
     a = ap.parse_args(argv)
     try:
@@ -640,17 +827,23 @@ def main(argv: list[str] | None = None) -> int:
         kv_set = pr.parse_kv(a.set_kv)
         if len(a.files) % 2:
             raise pr.RenameError("files must come in OLD NEW pairs")
-        pairs = list(zip(a.files[::2], a.files[1::2]))
+        values = pr.parse_values(a.set, a.set_null)
+        pairs = [(o, n, values, {}) for o, n in zip(a.files[::2], a.files[1::2])]
         if a.pairs:
-            pairs += read_pairs(a.pairs)
+            pairs += [(o, n, values, {}) for o, n in read_pairs(a.pairs)]
+        if a.values:
+            if pairs or values:
+                raise pr.RenameError("--values takes no pairs, --set or --set-null")
+            a.src = a.dst = None
+            pairs = pr.value_jobs(a)
         if not pairs:
             raise pr.RenameError("no pairs to check")
     except pr.RenameError as e:
         print(f"parquet_rename_check: {e}", file=sys.stderr)
         return 2
     bad = 0
-    for old, new in pairs:
-        rep = check_pair(old, new, mapping, a.drop, kv_set)
+    for old, new, vals, expect in pairs:
+        rep = check_pair(old, new, mapping, a.drop, vals, expect, a.force_multi, kv_set)
         bad += not rep["ok"]
         print(json.dumps(rep), flush=True)
     return 1 if bad else 0

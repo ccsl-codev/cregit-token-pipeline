@@ -50,7 +50,7 @@ def run(src, dst, kv, mapping=None, drops=()):
 
 
 def check(old, new, kv, mapping=None, drops=()):
-    return prc.check_pair(str(old), str(new), mapping or {}, drops, kv)
+    return prc.check_pair(str(old), str(new), mapping or {}, drops, kv_set=kv)
 
 
 # ----------------------------------------------------------------- set --
