@@ -459,3 +459,30 @@ def test_low_license_text_share_lowers_confidence():
     assert d.license == "MIT"
     assert d.confidence == "medium"
     assert "low-license-text:LICENSE:44.7" in d.flags
+
+
+def test_long_notice_rule_is_a_text_and_notice_file_chooses_an_or():
+    epl = m("EPL-2.0", "epl-2.0_10.RULE", kind="notice", matcher="3-seq", score=99.3, cov=99.3, start=2, end=285)
+    s = scan(f("LICENSE", epl, m("BSD-3-Clause", "edl-1.0_2.RULE", start=295, end=318)),
+             f("NOTICE.md", m("EPL-2.0 OR BSD-3-Clause", "epl-2.0_or_bsd-new_1.RULE", kind="notice", matcher="3-seq",
+                              score=94.6, cov=94.6, start=19, end=22),
+               m("EPL-2.0 OR BSD-3-Clause", "spdx-epl-or-bsd", kind="unknown", matcher="1-spdx-id", start=24, end=24)))
+    for r in s["license_rule_references"]:
+        if r["identifier"] == "epl-2.0_10.RULE":
+            r["length"] = 2119
+    d = R.decide(s, templates={"LICENSE": {"EPL-2.0": {"within": True}}})
+    assert d.license == "EPL-2.0 OR BSD-3-Clause"
+    assert d.evidence_kind == "text+notice"
+    idx = R.index_scan(s)
+    assert [x.kind for x in idx.matches if x.matcher == "1-spdx-id"] == ["tag"]
+
+
+def test_or_tag_in_the_license_file_and_a_notice_only_copying():
+    d = R.decide(scan(f("LICENSE", m("GPL-2.0-only OR BSD-2-Clause", "spdx-gpl-or-bsd", kind="unknown",
+                                     matcher="1-spdx-id", start=2, end=2),
+                        m("GPL-2.0-only", "gpl-2.0.LICENSE", start=4, end=300))))
+    assert d.license == "GPL-2.0-only OR BSD-2-Clause"
+    d = R.decide(scan(f("COPYING", m("GPL-2.0-only", "spdx-gpl", kind="unknown", matcher="1-spdx-id", start=3, end=3)),
+                      f("LICENSES/MIT", MIT)))
+    assert d.license == "GPL-2.0-only"
+    assert d.evidence_kind == "license-file-notice"

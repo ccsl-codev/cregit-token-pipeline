@@ -418,6 +418,7 @@ class Match:
     start_line: int = 0
     end_line: int = 0
     text: str = ""
+    rule_length: int = 0
 
     @property
     def exact(self) -> bool:
@@ -466,13 +467,14 @@ def index_scan(scan: dict, role_of=path_role) -> ScanIndex:
         for det in f.get("license_detections") or []:
             for m in det.get("matches") or []:
                 ref = rules.get(m.get("rule_identifier"))
+                kind = "tag" if m.get("matcher") == "1-spdx-id" else _rule_kind(ref)
                 idx.matches.append(Match(
                     path=path, role=role, spdx=m.get("license_expression_spdx") or "",
                     key=m.get("license_expression") or "", matcher=m.get("matcher") or "",
                     score=float(m.get("score") or 0), coverage=float(m.get("match_coverage") or 0),
-                    rule=m.get("rule_identifier") or "", kind=_rule_kind(ref),
+                    rule=m.get("rule_identifier") or "", kind=kind,
                     start_line=int(m.get("start_line") or 0), end_line=int(m.get("end_line") or 0),
-                    text=m.get("matched_text") or ""))
+                    text=m.get("matched_text") or "", rule_length=int((ref or {}).get("length") or 0)))
         for pd in f.get("package_data") or []:
             dec = pd.get("declared_license_expression_spdx") or ""
             raw = pd.get("extracted_license_statement")
@@ -616,8 +618,12 @@ def _weak(m: Match) -> bool:
     return m.score < WEAK_SCORE or (m.matcher == "3-seq" and m.coverage < WEAK_SCORE)
 
 
+LONG_RULE = 300      # tokens: a "notice" rule this long holds a license text (epl-2.0_10.RULE has 2,119)
+
+
 def _text_like(m: Match) -> bool:
-    return m.kind in ("text", "unknown") or m.matcher == "1-hash"
+    return m.kind in ("text", "unknown") or m.matcher == "1-hash" or (
+        m.rule_length >= LONG_RULE and m.coverage >= 80)
 
 
 def _template_outcome(path: str, lic: str, templates: dict) -> tuple[str | None, str]:
@@ -720,7 +726,7 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
                         if how == "no-template-result" and (path, relatives(lic)) not in d.template_requests:
                             d.template_requests.append((path, relatives(lic)))
                         got, how = lic, "near"
-                        title = _title_relative(info["matches"], lic, idx)
+                        title = _title_relative(info["matches"], m, lic, idx)
                         if title:
                             got, how = title, "title-relative"
                             info["terms"] = [_replace_lic(t, lic, got) for t in info["terms"]]
@@ -770,7 +776,9 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
     if primary_text:
         deciding, kind = dict(primary_text), "text"
         deciding.update(alt)
-    elif reuse_ok:
+    elif primary_notice and not (alt or named):
+        deciding, kind = dict(primary_notice), "license-file-notice"
+    elif reuse_ok and not primary_notice:
         deciding, kind = {p: file_info[p] for p in reuse_ok}, "reuse"
     elif alt or named:
         deciding, kind = dict(alt), "text"
@@ -823,11 +831,12 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
         role = info["role"]
         if role == "manifest" and ("/" in path or path.lower() in BUILD_SCRIPTS):
             continue
-        if role not in ("manifest", "readme") and not (role == "primary" and path in primary_notice):
+        if role not in ("manifest", "readme", "notice") and not (role == "primary" and path in primary_notice):
             continue
         cands, ids = [], []
+        # an SPDX-License-Identifier line in a README or NOTICE is the license of that file (REUSE headers)
         good = [m for m in info["matches"] if not _text_like(m) and m.kind in ("notice", "reference", "tag")
-                and m.score >= 90 and m.coverage >= 90]
+                and m.score >= 90 and m.coverage >= 90 and not (m.matcher == "1-spdx-id" and role != "manifest")]
         for m in sorted(info["matches"], key=lambda m: (m.start_line, m.end_line)):
             if m not in good:
                 continue
@@ -843,9 +852,28 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
         if ids:
             cands.append(join_and(ids))
         if cands:
-            level = {"manifest": "manifest", "readme": "readme"}.get(role, "license-file-notice")
+            level = {"manifest": "manifest", "readme": "readme", "notice": "notice-file"}.get(role, "license-file-notice")
             sources.append((level, path, cands))
-    order = {"manifest": 0, "readme": 1, "license-file-notice": 2}
+    # an OR declaration inside a root license text file ("SPDX-License-Identifier: GPL-2.0-only OR
+    # BSD-2-Clause" above the GPL text): it may name a license whose text is not in the root
+    for path, info in sorted(primary_text.items()):
+        first = _first_text_term(info, idx)
+        text_lines = [m.start_line for m in info["matches"] if _text_like(m)]
+        first_line = min(text_lines) if text_lines else 0
+        ors = []
+        for m in info["matches"]:
+            if _text_like(m) or m.score < 90 or m.coverage < 90 or m.start_line > first_line:
+                continue
+            try:
+                node = parse(m.spdx)
+            except ExpressionError:
+                continue
+            if isinstance(node, tuple) and node[0] == "OR" and first is not None and \
+                    strip_choice(term_license(first)) in {strip_choice(i) for i in license_ids(m.spdx)}:
+                ors.append(node)
+        if ors:
+            sources.append(("license-file-or", path, ors[:1]))
+    order = {"manifest": 0, "license-file-or": 1, "readme": 2, "notice-file": 3, "license-file-notice": 4}
     sources.sort(key=lambda x: order[x[0]])
     chosen = None
     root_keys = {strip_choice(term_license(t)) for t, _ in all_root_texts.values()}
@@ -860,6 +888,9 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
             ids = [i for i in license_ids(render(node)) if i not in idx.ignored_spdx]
             keys = {strip_choice(i) for i in ids if not _is_exception(i, idx)}
             is_or = isinstance(node, tuple) and node[0] == "OR"
+            if level == "license-file-or" and primary_keys <= keys:
+                chosen = (level, path, node)
+                break
             if keys and keys <= root_keys and primary_keys <= keys and (len(keys) < len(root_keys) or is_or):
                 chosen = (level, path, node)
                 break
@@ -890,7 +921,7 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
     else:
         final = None
         for level, path, expr in notices:
-            if level in ("manifest", "readme", "license-file-notice"):
+            if level in ("manifest", "readme", "license-file-notice", "notice-file"):
                 try:
                     node = parse(expr)
                 except ExpressionError:
@@ -955,12 +986,15 @@ def _first_text_term(info, idx):
     return None
 
 
-def _title_relative(matches, lic, idx):
-    """A near text of lic, and an exact notice in the same file that names a close relative of lic (the
-    title line "BSD 3-Clause Clear License" above a near BSD-3-Clause text): the relative."""
+def _title_relative(matches, near, lic, idx):
+    """A near text of lic, and an exact notice just above it (at most 6 lines) that names a close relative
+    of lic (the title line "BSD 3-Clause Clear License" above a near BSD-3-Clause text): the relative."""
     rel = set(relatives(lic)) - {lic}
+    if gnu_base(lic):
+        return None
     for m in matches:
-        if m.exact and not _text_like(m):
+        if m.exact and not _text_like(m) and m.start_line <= near.start_line and \
+                near.start_line - m.end_line <= 6:
             for i in _usable_ids(m.spdx, idx):
                 if i in rel:
                     return i
