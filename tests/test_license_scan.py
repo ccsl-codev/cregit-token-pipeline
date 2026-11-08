@@ -389,3 +389,22 @@ def test_run_licensee_and_askalono_errors(tmp_path):
     assert S.run_askalono(t, [f], tmp_path) == {}
     t.java = sys.executable
     assert S.run_templates(t, tmp_path, [("missing.txt", ["MIT"])]) == {}
+
+
+def test_kernel_projects_and_stored_texts(tmp_path):
+    import tarfile as _tar
+    assert S.is_kernel_project("torvalds__linux") and S.is_kernel_project("raspberrypi__linux")
+    assert S.is_kernel_project("ROCm__amdgpu") and S.is_kernel_project("NetApp__netapp-lustre")
+    assert not S.is_kernel_project("KDE__powerdevil") and not S.is_kernel_project("Cisco-Talos__clamav")
+    stage = tmp_path / "stage"
+    (stage / "docs").mkdir(parents=True)
+    (stage / "README.md").write_text("MIT or Apache-2.0")
+    (stage / "LICENSE").write_text("MIT text")
+    (stage / "logo.png").write_bytes(b"\x89PNG\0\0")
+    (stage / "docs" / "README.md").write_text("not root")
+    texts = S.stage_texts(stage)
+    assert texts == {"LICENSE": "MIT text", "README.md": "MIT or Apache-2.0"}
+    tar = tmp_path / "stage.tar.gz"
+    S._tar_stage(stage, tar)
+    assert S.stored_texts(tar) == texts
+    assert S.stored_texts(tmp_path / "missing.tar.gz") == {}

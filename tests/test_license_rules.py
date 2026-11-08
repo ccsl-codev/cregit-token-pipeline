@@ -486,3 +486,83 @@ def test_or_tag_in_the_license_file_and_a_notice_only_copying():
                       f("LICENSES/MIT", MIT)))
     assert d.license == "GPL-2.0-only"
     assert d.evidence_kind == "license-file-notice"
+
+
+# --- prose and pattern rules -----------------------------------------------------------------------
+
+RUST_README = "# x\n\n## License\n\nLicensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your option.\n"
+
+
+def test_weak_readme_match_confirmed_by_a_root_text_and_prose_or():
+    s = scan(f("LICENSE-MIT", MIT), f("LICENSE-APACHE", APACHE),
+             f("README.md", m("Apache-2.0", "apache-2.0_456.RULE", kind="notice", score=52.0, cov=52.0, start=5, end=5),
+               m("MIT", "mit_27.RULE", kind="reference", start=5, end=5)))
+    d = R.decide(s, texts={"README.md": RUST_README})
+    assert d.license == "MIT OR Apache-2.0"
+    assert d.evidence_kind == "text+notice"
+
+
+def test_readme_names_without_a_choice_word_give_and_for_review():
+    text = "a\nb\nc\nd\nThe code is under the MIT license.\n" + "x\n" * 10 + "The docs are under the Apache License.\n"
+    s = scan(f("LICENSE", MIT), f("LICENSE-APACHE", APACHE), f("LICENSE-BSD", m("BSD-3-Clause", "bsd-new.LICENSE")),
+             f("README.md", m("MIT", "mit_27.RULE", kind="reference", start=5, end=5),
+               m("Apache-2.0", "apache-2.0_7.RULE", kind="reference", start=16, end=16)))
+    d = R.decide(s, texts={"README.md": text})
+    assert d.license == "Apache-2.0 AND MIT"
+    assert "review-and-from-notice:README.md" in d.flags
+
+
+def test_gnu_or_later_is_not_a_choice():
+    assert not R.notice_says_choice("under the GNU GPL, either version 2 of the License, or (at your option) any "
+                                    "later version", 1, 1)
+    assert not R.notice_says_choice("LGPL v2.1 (or later). Some parts GPL v2 (or later)", 1, 1)
+    assert not R.notice_says_choice("you can redistribute it and/or modify it under the MIT License", 1, 1)
+    assert R.notice_says_choice("This project is licensed under the MIT or Apache 2.0 license.", 1, 1)
+    assert R.notice_says_choice("Dual-licensed under MIT and Apache-2.0.", 1, 1)
+    assert R.notice_says_choice(None, 1, 1) is None
+
+
+def test_two_root_texts_mit_apache_with_prose_or_without():
+    texts = {"README.md": "## License\nThis crate is MIT/Apache-2.0 licensed.\n"}
+    d = R.decide(scan(f("LICENSE-MIT", MIT), f("LICENSE-APACHE", APACHE)), texts=texts)
+    assert d.license == "MIT OR Apache-2.0"
+    assert "prose-or:README.md" in d.flags
+    d2 = R.decide(scan(f("LICENSE-MIT", MIT), f("LICENSE-APACHE", APACHE)),
+                  texts={"README.md": "Licensed under the Apache License 2.0 as well as the MIT license."})
+    assert d2.license == "Apache-2.0 AND MIT"
+    assert "review-two-texts-mit-apache" in d2.flags
+
+
+def test_notice_that_drops_a_root_text_of_a_mit_apache_pair():
+    s = scan(f("LICENSE", MIT), f("LICENSE-APACHE", APACHE),
+             f("README.md", m("MIT", "mit_27.RULE", kind="reference", start=3, end=3)))
+    d = R.decide(s, texts={"README.md": "x\n[![MIT licensed][badge]][url]\nMIT\n"})
+    assert d.license == "MIT"
+    assert "review-notice-drops-root-text:README.md" in d.flags
+    d2 = R.decide(s, texts={"README.md": "x\nx\nMIT\n\nThe crate is dual licensed: MIT or Apache-2.0, at your option.\n"})
+    assert d2.license == "MIT OR Apache-2.0"
+
+
+def test_lgpl_text_next_to_gpl_copying_when_the_readme_names_the_lgpl():
+    s = scan(f("COPYING", GPL2_TEXT), f("COPYING.LESSER", m("LGPL-2.1-only", "lgpl-2.1.LICENSE")),
+             f("README.rst", m("LGPL-2.1-or-later", "lgpl-2.1-plus_179.RULE", kind="notice", score=84.0, cov=84.0,
+                               start=2, end=2),
+               m("GPL-2.0-or-later", "gpl-2.0-plus_31.RULE", kind="notice", start=3, end=3)))
+    text = "x\nThe C API is under the GNU LGPL v2.1 (or later).\nSome tools may have the GNU GPL v2 (or later).\n"
+    d = R.decide(s, texts={"README.rst": text})
+    assert d.license == "LGPL-2.1-or-later"
+    assert "lgpl-with-gpl-text" in d.flags
+    assert "GPL-2.0" in d.other_licenses
+    d2 = R.decide(scan(f("COPYING", GPL2_TEXT), f("COPYING.LESSER", m("LGPL-2.1-only", "lgpl-2.1.LICENSE"))))
+    assert d2.license == "GPL-2.0 AND LGPL-2.1"
+
+
+def test_linux_syscall_note_only_in_kernel_projects():
+    note = m("GPL-2.0-only WITH Linux-syscall-note", "gpl-2.0_with_linux-syscall-exception-gpl_2.RULE")
+    d = R.decide(scan(f("COPYING", note)))
+    assert d.license == "GPL-2.0"
+    assert "dropped-linux-syscall-note" in d.flags
+    d2 = R.decide(scan(f("COPYING", note)), kernel=True)
+    assert d2.license == "GPL-2.0 WITH Linux-syscall-note"
+    assert R.render(R._drop_exception(R.parse("GPL-2.0-or-later AND GPL-2.0-or-later WITH Linux-syscall-note"),
+                                      "Linux-syscall-note")) == "GPL-2.0-or-later"

@@ -20,6 +20,14 @@ The rules (each one fixes a failure of the earlier licensee/askalono rescan):
 - "X AND exception" becomes "X WITH exception".
 - REUSE `LICENSES/<id>` files count only where ScanCode finds the license text of that id.
 - askalono's AGPL-1.0 is dropped unless ScanCode agrees.
+- A notice with several license names is an OR only when its lines say a choice ("X or Y", "either",
+  "at your option", "dual licensed"; GNU "or later" phrases do not count); else an AND with a review flag.
+  A weaker notice match counts when a root license text confirms its id.
+- MIT and Apache-2.0 root texts give "MIT OR Apache-2.0" when a README or manifest says the choice; with
+  no such notice the AND gets a review flag, and a notice that drops one of the two texts too.
+- An LGPL text next to a GPL COPYING gives the LGPL when a notice names the LGPL.
+- "WITH Linux-syscall-note" (a copied kernel COPYING) stays only in kernel projects.
+- Flags that start with "review-" mark values for a hand check before publication.
 
 The module is stdlib Python only, so that it runs with any Python 3.9+ (the EC2 machine uses the
 Python of the scanner Nix environment).
@@ -684,13 +692,82 @@ def _manifest_choice(raw: str, base: str) -> str | None:
     return None
 
 
+NOTICE_CONFIRMED_SCORE = 50.0   # a weaker notice match counts when a root license text confirms its id
+# GNU version phrases: their "or" is not a choice between licenses
+_GNU_LATER = re.compile(
+    r"(?is)\b(either\s+)?version\s+[\d.]+(\s+of\s+the\s+licen[cs]e)?\s*,?\s*\(?\s*or\s*\(?\s*at\s+your\s+option\s*\)?"
+    r"\s*(any\s+)?(later|newer)(\s+version)?\s*\)?"
+    r"|\(?\s*\bor\s+(any\s+)?(later|newer|greater|above)(\s+versions?)?\s*\)?|-or-later|\band/or\b")
+_MD_LINK = re.compile(r"\]\([^)]*\)")
+_LIC_WORD = (r"(licen[cs]es?|\bmit\b|apache|a?l?gpl[\w.+-]*|bsd[\w.-]*|mpl[\w.-]*|epl[\w.-]*|cc0|cc-by[\w.-]*|isc|zlib|"
+             r"unlicense|boost|bsl[\w.-]*|eupl[\w.-]*|cddl|artistic|[0-9](\.[0-9])+)")
+_CHOICE = re.compile(r"(?i)\beither\b|\bat\s+(your|the\s+user'?s?|their|its)\s+(option|choice|discretion)\b|"
+                     r"\bdual[\s-]+licen[cs]|" + _LIC_WORD + r"\W{0,3}\s+or\s+(the\s+)?(\w+\s+){0,4}?" + _LIC_WORD)
+KERNEL_NOTE = "Linux-syscall-note"
+NOTICE_CONTEXT = 3   # lines before and after a notice match ("Licensed under either of" ... "at your option")
+
+
+def _clean_prose(s: str) -> str:
+    s = _MD_LINK.sub("]", s).replace("[", " ").replace("]", " ")
+    return _GNU_LATER.sub(" ", s)
+
+
+def notice_says_choice(text: str | None, start: int, end: int) -> bool | None:
+    """True when the notice lines start..end say a choice ("X or Y", "either", "at your option", "dual
+    licensed") between licenses; None when the text is not known."""
+    if text is None:
+        return None
+    lines = text.splitlines()
+    region = " ".join(lines[max(start - 1 - NOTICE_CONTEXT, 0):max(end, start) + NOTICE_CONTEXT])
+    return bool(_CHOICE.search(_clean_prose(region)))
+
+
+_MIT_RE = re.compile(r"\bMIT\b")
+_APACHE_RE = re.compile(r"(?i)\bapache\b")
+
+
+def dual_mit_apache(text: str | None) -> bool:
+    """A declaration of the MIT/Apache-2.0 choice in a README or manifest: both names within 300 characters
+    with a choice word around or between them ("either", "or", "/", "at your option", "dual")."""
+    if not text:
+        return False
+    s = _clean_prose(text)
+    for a in _MIT_RE.finditer(s):
+        for b in _APACHE_RE.finditer(s):
+            lo, hi = sorted((a.start(), b.start()))
+            if hi - lo > 300:
+                continue
+            between = s[lo:hi + 6]
+            around = s[max(lo - 80, 0):hi + 80]
+            if re.search(r"(?i)\bor\b|/", between) or re.search(
+                    r"(?i)\beither\b|\bat\s+your\s+(option|choice)\b|\bdual[\s-]+licen[cs]", around):
+                return True
+    return False
+
+
+def _drop_exception(node, exc: str):
+    if isinstance(node, str):
+        return node
+    if node[0] == "WITH":
+        return node[1] if node[2] == exc else node
+    kids = [_drop_exception(k, exc) for k in node[1]]
+    if node[0] == "AND":
+        return join_and(kids)
+    uniq = list({render(k): k for k in kids}.values())
+    return uniq[0] if len(uniq) == 1 else (node[0], uniq)
+
+
 def decide(scan: dict, templates: dict | None = None, headers: dict | None = None,
-           second: dict | None = None) -> Decision:
+           second: dict | None = None, texts: dict | None = None, kernel: bool = False) -> Decision:
     """One decision for a project from its key-file scan.
 
     templates: path -> {spdx id: {"match": bool, "within": bool}} (SpdxTemplateDiff results)
     headers: the ScanCode JSON of the header pass (or None)
     second: {"licensee": [ids], "askalono": {path: [(id, score)]}}
+    texts: path -> text of the root key files (READMEs, notices, license files, manifests); without it the
+      prose rules cannot read "X or Y" and flag the case for review
+    kernel: the project is an operating-system kernel; else "WITH Linux-syscall-note" from a copied kernel
+      COPYING text is dropped
     """
     templates = templates or {}
     idx = index_scan(scan)
@@ -821,6 +898,8 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
     # 3. root notices that may choose among the root texts: manifests, READMEs, root license files
     #    with notices only. Per source: each OR expression alone, then all its ids together.
     sources = []  # (level, path, [candidate trees])
+    root_keys = {strip_choice(term_license(t)) for t, _ in all_root_texts.values()}
+    and_notices = set()   # notices with 2+ ids and no choice word (or no text to read)
     for path, dec, raw in idx.packages:
         if path_role(path) == "manifest" and "/" not in path and dec:
             try:
@@ -849,7 +928,28 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
             for i in license_ids(m.spdx):
                 if i not in idx.ignored_spdx and not _is_exception(i, idx) and i not in ids:
                     ids.append(i)
-        if ids:
+        used_ms = list(good)
+        # a weaker notice match ("licensed under either of Apache License 2.0 or MIT"): its id counts when a
+        # root license text confirms it
+        if role in ("readme", "notice") or (role == "primary" and path in primary_notice):
+            for m in idx.matches:
+                if m.path != path or m in good or _text_like(m) or m.score < NOTICE_CONFIRMED_SCORE:
+                    continue
+                for i in _usable_ids(m.spdx, idx):
+                    if strip_choice(i) in root_keys and not _is_exception(i, idx) and \
+                            strip_choice(i) not in {strip_choice(x) for x in ids}:
+                        ids.append(i)
+                        used_ms.append(m)
+        if len(ids) >= 2 and role != "manifest":
+            lo = min(m.start_line for m in used_ms)
+            hi = max(m.end_line for m in used_ms)
+            says = notice_says_choice((texts or {}).get(path), lo, hi)
+            if says:
+                cands.append(("OR", list(ids)))
+            else:
+                cands.append(join_and(ids))
+                and_notices.add(path)
+        elif ids:
             cands.append(join_and(ids))
         if cands:
             level = {"manifest": "manifest", "readme": "readme", "notice": "notice-file"}.get(role, "license-file-notice")
@@ -876,7 +976,6 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
     order = {"manifest": 0, "license-file-or": 1, "readme": 2, "notice-file": 3, "license-file-notice": 4}
     sources.sort(key=lambda x: order[x[0]])
     chosen = None
-    root_keys = {strip_choice(term_license(t)) for t, _ in all_root_texts.values()}
     # the license of a plain LICENSE/COPYING text stays: a notice may drop other root texts only
     primary_keys = set()
     for i in primary_text.values():
@@ -897,6 +996,17 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
         if chosen:
             break
     notices = [(level, path, render(c)) for level, path, cands in sources for c in cands[-1:]]
+    mit_apache = {"MIT", "Apache-2.0"}
+    dual_paths = [p for p, t in sorted((texts or {}).items()) if "/" not in p and
+                  path_role(p) in ("readme", "manifest", "notice", "primary") and dual_mit_apache(t)]
+    if chosen and root_keys == mit_apache:
+        keys = {strip_choice(i) for i in license_ids(render(chosen[2]))}
+        if keys < root_keys:
+            if dual_paths:
+                chosen = ("readme", dual_paths[0], ("OR", ["MIT", "Apache-2.0"]))
+                d.flags.append(f"prose-or:{dual_paths[0]}")
+            else:
+                d.flags.append(f"review-notice-drops-root-text:{chosen[1]}")
 
     if chosen:
         level, path, node = chosen
@@ -913,11 +1023,34 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
         if {"GPL-3.0", "LGPL-3.0"} <= keys:
             terms = [t for t in terms if strip_choice(term_license(t)) != "GPL-3.0"]
             d.flags.append("lgpl-3.0-with-gpl-3.0-text")
+        elif kind == "text":
+            # an LGPL text next to a GPL COPYING: the GPL text is the base of the LGPL when the notices
+            # name the LGPL (libvirt: COPYING GPL-2.0, COPYING.LESSER LGPL-2.1, README "LGPL v2.1 or later")
+            gpl = {k for k in keys if re.fullmatch(r"GPL-\d\.\d", k)}
+            lgpl = {k for k in keys if re.fullmatch(r"LGPL-\d\.\d", k)}
+            named = set()
+            for _, _, e in notices:
+                try:
+                    named |= {strip_choice(i) for i in license_ids(e)}
+                except ExpressionError:
+                    pass
+            if gpl and lgpl & named:
+                terms = [t for t in terms if strip_choice(term_license(t)) not in gpl]
+                d.flags.append("lgpl-with-gpl-text")
         final = join_and(terms)
         d.evidence_kind = kind
         for k, (t, p) in text_terms.items():
             if t in terms:
                 d.evidence.append(_ev(p, file_info.get(p), accepted, t))
+        if {strip_choice(term_license(t)) for t in terms} == mit_apache and len(terms) == 2:
+            if dual_paths:
+                final = ("OR", sorted(terms, key=lambda t: strip_choice(term_license(t)) != "MIT"))
+                d.evidence_kind = "text+notice"
+                d.evidence.insert(0, {"path": dual_paths[0], "role": path_role(dual_paths[0]),
+                                      "expression": render(final), "use": "chooses"})
+                d.flags.append(f"prose-or:{dual_paths[0]}")
+            else:
+                d.flags.append("review-two-texts-mit-apache")
     else:
         final = None
         for level, path, expr in notices:
@@ -960,6 +1093,13 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
 
     # 4. the GNU version choice from notices only
     final = _apply_choices(d, final, file_info, idx, headers, reuse_ok)
+    if not kernel and KERNEL_NOTE in render(final):
+        final = _drop_exception(final, KERNEL_NOTE)
+        d.flags.append("dropped-linux-syscall-note")
+    if " AND " in render(final):
+        for e in d.evidence:
+            if e.get("use") in ("chooses", "declares") and e.get("path") in and_notices:
+                d.flags.append(f"review-and-from-notice:{e['path']}")
     d.license = render(final)
     used = {base_id(term_license(t)) for t in leaves(final)}
     _bundled(d, file_info, idx, used)

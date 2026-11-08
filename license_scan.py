@@ -441,6 +441,51 @@ def _second(tools: Tools, stage: Path, staged_files: list[dict]) -> dict:
     return second
 
 
+TEXT_ROLES = ("readme", "notice", "primary", "alt", "named", "manifest")
+TEXT_BYTES = 262_144
+KERNEL_RE = re.compile(r"(?i)(^|__|[-_.])(linux|kernel|lustre|amdgpu)([-_.]|$)")
+
+
+def is_kernel_project(name: str) -> bool:
+    """An operating-system kernel or a kernel module tree (the syscall note of COPYING applies)."""
+    return bool(KERNEL_RE.search(name))
+
+
+def _root_text(name: str, data: bytes) -> str | None:
+    if "/" in name or rules.path_role(name) not in TEXT_ROLES or b"\0" in data[:4096]:
+        return None
+    return data[:TEXT_BYTES].decode("utf-8", errors="replace")
+
+
+def stage_texts(stage: Path) -> dict:
+    """path -> text of the root key files of a staged folder (READMEs, notices, license files, manifests)."""
+    out = {}
+    for p in sorted(stage.iterdir()) if stage.exists() else []:
+        if p.is_file() and not p.is_symlink():
+            t = _root_text(p.name, p.read_bytes()[:TEXT_BYTES])
+            if t is not None:
+                out[p.name] = t
+    return out
+
+
+def stored_texts(stage_tar: Path) -> dict:
+    """The same texts from a stored stage.tar.gz (no extraction to disk)."""
+    out = {}
+    if not stage_tar.exists():
+        return out
+    with tarfile.open(stage_tar, "r:gz") as t:
+        for m in t.getmembers():
+            if not m.isfile() or "/" in m.name or m.size > 4 * TEXT_BYTES:
+                continue
+            f = t.extractfile(m)
+            if f is None:
+                continue
+            txt = _root_text(m.name, f.read(TEXT_BYTES))
+            if txt is not None:
+                out[m.name] = txt
+    return out
+
+
 def _second_for_rules(second: dict) -> dict:
     return {"licensee": (second.get("licensee") or {}).get("licenses") or [],
             "askalono": second.get("askalono") or {}}
@@ -452,7 +497,8 @@ def decide_stored(pdir: Path) -> dict:
     headers = _load_gz_json(pdir / "headers.json.gz") if (pdir / "headers.json.gz").exists() else None
     templates = json.loads((pdir / "templates.json").read_text()) if (pdir / "templates.json").exists() else {}
     second = json.loads((pdir / "second.json").read_text()) if (pdir / "second.json").exists() else {}
-    return rules.decide(scan, templates=templates, headers=headers, second=_second_for_rules(second)).as_dict()
+    return rules.decide(scan, templates=templates, headers=headers, second=_second_for_rules(second),
+                        texts=stored_texts(pdir / "stage.tar.gz"), kernel=is_kernel_project(pdir.name)).as_dict()
 
 
 def scan_project(row: dict, out_dir: Path, tools: Tools, work: Path, keep_stage=False) -> dict:
@@ -521,13 +567,15 @@ def scan_project(row: dict, out_dir: Path, tools: Tools, work: Path, keep_stage=
         second = _second(tools, stage, fetch_info["files"])
         (pdir / "second.json").write_text(json.dumps(second, indent=1))
         times["second"] = round(time.time() - t1, 1)
-        d = rules.decide(scan, second=_second_for_rules(second))
+        texts, kernel = stage_texts(stage), is_kernel_project(name)
+        d = rules.decide(scan, second=_second_for_rules(second), texts=texts, kernel=kernel)
         templates = {}
         if d.template_requests and tools.java and tools.template_classpath:
             t1 = time.time()
             templates = run_templates(tools, stage, d.template_requests)
             times["template"] = round(time.time() - t1, 1)
-            d = rules.decide(scan, templates=templates, second=_second_for_rules(second))
+            d = rules.decide(scan, templates=templates, second=_second_for_rules(second), texts=texts,
+                             kernel=kernel)
         (pdir / "templates.json").write_text(json.dumps(templates, indent=1))
         headers = None
         if d.needs_header_pass:
@@ -538,7 +586,7 @@ def scan_project(row: dict, out_dir: Path, tools: Tools, work: Path, keep_stage=
                 _gz_json(pdir / "headers.json.gz", headers)
             times["headers"] = round(time.time() - t1, 1)
             d = rules.decide(scan, templates=templates, headers=headers or {"files": []},
-                             second=_second_for_rules(second))
+                             second=_second_for_rules(second), texts=texts, kernel=kernel)
         res["status"] = "ok"
         res["decision"] = d.as_dict()
         res["scancode_summary"] = {k: (scan.get("summary") or {}).get(k) for k in
