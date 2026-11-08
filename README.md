@@ -141,6 +141,35 @@ fields, so cut the sixth before a run (`cut -f1-5`); the run then clones HEAD,
 not the measured commit. The limits are in
 [`docs/LIMITATIONS.md` §8](docs/LIMITATIONS.md#8-language-filter).
 
+## License pass (optional)
+
+`license_scan.py` gives one license value for each project at its pinned commit.
+It does not change the token files. The input is a TSV list with the columns
+`project`, `clone_url`, `run_commit` and an optional `fetch_urls` (more URLs,
+space-separated).
+
+1. It fetches only the key files of the commit with git: a blobless depth-1
+   fetch, then the needed blobs by id. It uses no API and no token. The key files
+   are the root and depth-2 license files, the root READMEs, `LICENSES/`,
+   `REUSE.toml`, `.reuse/dep5`, the package manifests and spec files, and
+   `debian/copyright`. It resolves symlinks.
+2. It runs ScanCode on the key files, the SPDX template diff
+   (`license_tools/SpdxTemplateDiff.java`, spdx tools-java) on near text matches,
+   and a header pass when the `-only`/`-or-later` choice of a GNU license is
+   still unknown.
+3. `license_rules.py` gives the SPDX expression, the evidence, a confidence
+   class and the agreement with licensee and askalono (second opinions).
+
+```sh
+./license_scan.py scan --list list.tsv --out-dir out/ --tools tools.json --jobs 8
+./license_scan.py decide --out-dir out/      # the rule layer again on the stored scans
+./license_scan.py collect --out-dir out/     # out/results.tsv, out/results.jsonl
+```
+
+`tools.json` names the programs (`scancode`, `askalono`, `ruby` and `licensee`
+with `gem_home`, `java` and `template_classpath`, `git`). A missing program skips
+its step. The rules and their reasons are in the docstring of `license_rules.py`.
+
 ## Architecture
 
 ```
