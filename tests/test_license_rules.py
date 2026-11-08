@@ -450,3 +450,12 @@ def test_primary_notice_file_chooses_among_alt_texts():
                       f("LICENSE-APACHE", APACHE), f("LICENSE-MIT", MIT)))
     assert d.license == "Apache-2.0 AND MIT"
     assert d.evidence_kind == "text"
+
+
+def test_low_license_text_share_lowers_confidence():
+    s = scan(f("LICENSE", m("MIT", "mit.LICENSE", start=71, end=90)))
+    s["files"][0]["percentage_of_license_text"] = 44.7
+    d = R.decide(s)
+    assert d.license == "MIT"
+    assert d.confidence == "medium"
+    assert "low-license-text:LICENSE:44.7" in d.flags

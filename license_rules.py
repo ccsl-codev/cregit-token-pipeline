@@ -608,6 +608,7 @@ def _group(matches):
 
 
 WEAK_SCORE = 60.0
+LOW_TEXT_PCT = 50.0   # ScanCode percentage_of_license_text under this: much text that no rule matches
 
 
 def _weak(m: Match) -> bool:
@@ -918,6 +919,14 @@ def decide(scan: dict, templates: dict | None = None, headers: dict | None = Non
         _confidence(d, second)
         return d
 
+    # a license file with much text that no rule matches (a custom license around a known text)
+    for e in d.evidence:
+        f = idx.files.get(e.get("path"), {})
+        pct = f.get("percentage_of_license_text")
+        if e.get("role") in ("primary", "alt", "named", "secondary") and isinstance(pct, (int, float)) \
+                and pct < LOW_TEXT_PCT and f"low-license-text:{e['path']}:{pct:g}" not in d.flags:
+            d.flags.append(f"low-license-text:{e['path']}:{pct:g}")
+
     # 4. the GNU version choice from notices only
     final = _apply_choices(d, final, file_info, idx, headers, reuse_ok)
     d.license = render(final)
@@ -1158,7 +1167,7 @@ def _confidence(d: Decision, second: dict | None) -> None:
     if d.evidence_kind == "license-file-notice":
         d.confidence = "low" if disagree else "medium"
     elif d.evidence_kind in ("text", "text+notice", "reuse") and exact_only and not unpaired:
-        aggregate = any(f.startswith("aggregate-license-file") for f in d.flags)
+        aggregate = any(f.startswith(("aggregate-license-file", "low-license-text")) for f in d.flags)
         d.confidence = "medium" if disagree or unknown_ref or aggregate else "high"
     elif d.evidence_kind in ("text", "text+notice", "reuse", "manifest", "license-file"):
         d.confidence = "low" if (disagree or unpaired) else "medium"
