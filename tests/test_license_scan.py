@@ -354,6 +354,13 @@ def test_commands_scan_decide_collect(origin, tmp_path, tools, capsys):
     rec = dict(zip(S.TSV_COLS, rows[1].split("\t")))
     assert rec["license"] == "MIT" and rec["status"] == "ok" and rec["licensee_agreement"] == "agree"
     assert json.loads((out / "results.jsonl").read_text().splitlines()[0])["project"] == "p1"
+    bad = tmp_path / "bad.tsv"
+    bad.write_text("project\tclone_url\trun_commit\nz\tfile:///nonexistent\t" + "c" * 40 + "\n")
+    assert S.main(["scan", "--list", str(bad), "--out-dir", str(out)]) == 0
+    assert json.loads((out / "projects" / "z" / "result.json").read_text())["status"] == "fetch-error"
+    assert S.main(["scan", "--list", str(bad), "--out-dir", str(out), "--redo-status", "fetch-error,error"]) == 0
+    assert (out / "projects" / "z" / "result.json.try1").exists()
+    assert (out / "projects" / "z" / "result.json").exists()
     stop = tmp_path / "STOP"
     stop.write_text("")
     lp2 = tmp_path / "l2.tsv"

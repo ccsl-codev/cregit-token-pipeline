@@ -616,6 +616,13 @@ def cmd_scan(args) -> int:
     work = Path(args.work_dir or out / "work")
     work.mkdir(parents=True, exist_ok=True)
     tools = Tools.load(args.tools)
+    redo = set(filter(None, (args.redo_status or "").split(",")))
+    if redo:
+        for r in rows:
+            rp = out / "projects" / r["project"] / "result.json"
+            if rp.exists() and json.loads(rp.read_text()).get("status") in redo:
+                n_try = len(list(rp.parent.glob("result.json.try*"))) + 1
+                rp.replace(rp.parent / f"result.json.try{n_try}")
     todo = [r for r in rows if not (out / "projects" / r["project"] / "result.json").exists()]
     print(f"[{time.strftime('%H:%M:%S')}] {len(rows)} projects, {len(rows) - len(todo)} done, {len(todo)} to do, "
           f"jobs {args.jobs}", flush=True)
@@ -735,6 +742,8 @@ def main(argv=None) -> int:
     s.add_argument("--only", nargs="*")
     s.add_argument("--stop-file")
     s.add_argument("--keep-stage", action="store_true")
+    s.add_argument("--redo-status", help="run again the projects whose result has one of these statuses "
+                   "(comma list, e.g. fetch-error,error); the old result.json is kept as result.json.tryN")
     d = sub.add_parser("decide")
     d.add_argument("--out-dir", required=True)
     d.add_argument("--only", nargs="*")
