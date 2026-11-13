@@ -92,8 +92,8 @@ a cregit checkout that has `rustTokenizer` and at an output directory.
 | 5. Gate the schema | `./validate_schema.py <out>/*/*-dataset.parquet` | exit 1 on any drift |
 | 6. Build the index | `./consolidate.py --manifest <run>.tsv` (in `devenv shell`) | `ctp.duckdb` |
 | 7. Prune | `./retain.py --apply` | deletes `memo/` and `html/` only |
-| 8. Pseudonymize for release | `./anonymize_parquet.py OUTDIR <in>.parquet ...` | anonymized Parquets + JSON report |
-| 9. Verify the release | `./verify_anon.py OUTDIR` | exit 1 on any residue |
+| 8. Pseudonymize for release | `./anonymize_parquet.py OUTDIR <in>.parquet ...` (needs the private salt; exit 2 without one) | anonymized Parquets + JSON report |
+| 9. Verify the release | `./verify_anon.py OUTDIR` (needs no secret) | exit 1 on any residue |
 
 **`--manifest` defaults to `manifest.tsv`, a 4-project example.**
 Name the manifest you mean on every `ctp.py` subcommand that takes one.

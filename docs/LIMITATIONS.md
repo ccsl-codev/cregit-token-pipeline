@@ -252,14 +252,45 @@ next build. Put a fix in `data/affiliation.corrections.csv`, which
 
 **A Parquet as it stands holds contributors' e-mail addresses.** `person_email`
 holds real addresses. `anonymize_parquet.py` changes the local part of an address
-to `author_NNNN` and a name to `Author N`. It has no salt and no key: the ids come
-from the sorted distinct values, and the registry covers one invocation, so the
-pseudonyms are not stable across runs with other input. The e-mail domain stays
-on purpose, because it is the firm signal. `owner`, `repo_name` and `clone_url`
+to `author_<token>` and a name to `Author <token>`. The e-mail domain stays on
+purpose, because it is the firm signal. `owner`, `repo_name` and `clone_url`
 carry the GitHub namespace. `source_text` and `token_value` are not changed.
 
 * **Detect**: run `verify_anon.py` over the output directory. It checks the
-  published files alone.
+  published files alone and needs no salt.
+
+**A pseudonym is a salted keyed hash, and the salt is the only protection.** The
+token is a function of the value and the salt only. So a release that adds or
+drops a project changes no pseudonym, and two releases with the same salt diff
+cleanly. But a person who gets the salt can hash candidate addresses and rebuild
+the mapping, and nothing in the output shows that leak. Keep the salt out of the
+release and out of git.
+
+* A missing salt, or a salt shorter than 32 bytes, stops the run with exit
+  status 2. The tools never make a salt.
+* If you lose the salt or change it, every pseudonym changes. A later release
+  then does not link to an earlier one.
+* A token has 14 hex characters (56 bits). If two values get the same token, the
+  run stops. It does not merge two persons into one.
+
+**The release tool `pseudonymize.py` writes a registry that holds real
+identities.** The registry table maps each real address, name and trailer
+element to its pseudonym. Keep it as private as the salt. The tool refuses a
+registry path under `--outdir` or under a release root. `anonymize_parquet.py`
+keeps its map in memory only and writes no registry.
+
+**By default `pseudonymize.py` does not change `commit_summary`.** The commit
+subject is published as git has it, so a name or an address that a person wrote
+into a subject stays. `--commit-summary pseudonym`, `scrub` or `null` change
+this. The leak scan counts the matches in this column, but they do not fail the
+run.
+
+**The domain rule of `pseudonymize.py` depends on a Public Suffix List.** The
+domain of an address is the first part after an at sign that ends in a public
+suffix. With no `--psl`, the tool takes the newest list that it finds in
+`/nix/store`. Another list can give another domain. The registry records the
+sha256 of the list, and a write with another list stops. Record the list with
+any release.
 
 **Nothing runs the anonymizer automatically.** `run_pipeline_process.sh`,
 `ctp.py` and `consolidate.py` do not call `anonymize_parquet.py`. Its `OUTDIR` is
@@ -268,9 +299,11 @@ it overwrites the raw Parquet. Always write to a new directory, and run
 `verify_anon.py` as an independent check.
 
 **A domain with one contributor can identify that person.** The domain stays, so
-a rare or a personal domain can narrow a pseudonym to one person. An analysis
-that reports results per domain must treat such a domain as identifying. A
-release that cannot accept this must aggregate the domains first.
+a rare or a personal domain can narrow a pseudonym to one person. In a dataset
+of many small projects, most domains have one contributor, and this share does
+not become smaller when the dataset grows. An analysis that reports results per
+domain must treat such a domain as identifying. A release that cannot accept
+this must aggregate the domains first.
 
 ## 7. Reproducibility and validation
 

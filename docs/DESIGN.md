@@ -169,16 +169,62 @@ Built:
    silent exclusion is worse than the crash it replaces — the row count then
    looks plausible.
 3. **`anonymize_parquet.py`** / **`verify_anon.py`** — the release path. The
-   e-mail local part becomes `author_NNNN` and names become `Author N`, through a
-   single registry so one person has one pseudonym everywhere, including inside
-   the trailer arrays. **The e-mail domain is preserved on purpose**: firm
-   attribution resolves from the domain, so replacing it would collapse every
-   firm to unknown and destroy the analysis the dataset exists to support. Column
-   handling is fail-closed. There is no salt and no key — ids come from sorting
-   the distinct values, so output is reproducible and two releases diff cleanly,
-   and the protection is simply not publishing the registry. `verify_anon.py`
-   checks the published files alone, needs no secrets, and is therefore the check
-   worth putting in a release script.
+   e-mail local part becomes `author_<token>` and names become `Author <token>`,
+   through a single registry so one person has one pseudonym everywhere,
+   including inside the trailer arrays. **The e-mail domain is preserved on
+   purpose**: firm attribution resolves from the domain, so replacing it would
+   collapse every firm to unknown and destroy the analysis the dataset exists to
+   support. Column handling is fail-closed.
+
+   **A pseudonym is a salted keyed hash, and it is STABLE across releases.**
+   `token = blake2b(space || NUL || lowercased value, key = salt)` taken to 14
+   lowercase hex characters, so it depends on the value and the salt and on
+   nothing else. Two releases whose file sets differ therefore diff cleanly, and
+   a reader can follow one contributor from one release to the next.
+
+   - **The salt is private, held outside this repository, and never published.**
+     It is read from `--salt-file`, `$CTP_ANON_SALT_FILE`, `$CTP_ANON_SALT` or
+     `~/.config/cregit-token-pipeline/anon-salt`, in that order; `.gitignore`
+     carries patterns for it as a second line of defense. A missing or
+     under-32-byte salt exits **2** with the remedy printed. Nothing ever
+     generates one, because a fresh salt per run would renumber every pseudonym
+     on every run and say nothing.
+   - **The reverse map — real value → pseudonym — is never published and never
+     written to disk.** It lives in memory for the length of one run. The
+     `--report` JSON carries counts and shapes only. So unlike the superseded
+     scheme, the release is **not** reversible from public inputs.
+   - **Rotating the salt renumbers everybody.** That is the cost, and it is the
+     whole cost: a rotation makes the next release unlinkable to every release
+     before it. Rotate only on a suspected salt leak or a pseudonym collision.
+     Losing the salt has the same effect as rotating it, without the choice, so
+     back it up wherever the release itself is backed up.
+   - **A collision fails the run.** 14 hex characters is 56 bits. For n distinct
+     values the chance that any two share a pseudonym is about n(n−1)/2 ÷ 2^56.
+     At 30,000 values that is about **6 × 10⁻⁹**, and at 300,000 values about
+     6 × 10⁻⁷. 48 bits gives about 1.6 × 10⁻⁶ at 30,000 values, too coarse for
+     something that blocks a release; 64 bits costs two characters per id and
+     buys nothing usable. If a collision occurs, `build_registry` raises
+     `CollisionError` and the release stops rather than merging two
+     contributors and quietly lowering the distinct-person count.
+   - **The hash is fast on purpose.** Keyed blake2b costs less than one
+     microsecond per value. A deliberately slow password KDF (bcrypt, scrypt,
+     argon2, high-iteration PBKDF2) would raise the cost of a brute-force guess
+     of the inputs *by an adversary who already has the salt* — a threat
+     addressed here by keeping the salt out of the release, not by burning
+     wall-clock time. If that trade is ever revisited, this is the paragraph to
+     argue with.
+
+   **Why this replaced sequential ids.** An earlier design used the ordinal
+   position of a value in the sorted distinct set of one invocation as the id.
+   That is deterministic but not stable: one new value shifts every value after
+   it, so a release that adds or drops one file renumbers almost every
+   pseudonym. With the hash, adding or dropping a file renumbers nobody.
+   `tests/test_anonymize_parquet_e2e.py` requirement 7 pins this.
+
+   `verify_anon.py` checks the published files alone, **needs no salt and no
+   secret**, and is therefore still the check worth putting in a release script.
+   Moving to a hash cost it one widening: `author_\d+` became
+   `author_[0-9a-f]+`. See `LIMITATIONS.md`.
 
 Not built. Each is a gap, not a plan:
 
