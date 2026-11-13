@@ -1178,3 +1178,156 @@ def test_without_procfs_even_the_callers_own_lock_reads_as_live(out, monkeypatch
 
     assert (workdir / "memo" / "blob0001").exists()
     assert "SKIP: LIVE" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# clean_workdir: the cleanup after a validated project
+# --------------------------------------------------------------------------- #
+
+def full_workdir(out: Path, name: str = "proj") -> Path:
+    """Every kind of entry the runner leaves, on top of make_project's."""
+    workdir = make_project(out, name)
+    for clone in (f"{name}-original.git", f"{name}-original", f"{name}-cregit.git",
+                  f"{name}-cregit"):
+        (workdir / clone / ".git").mkdir(parents=True)
+        (workdir / clone / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        # A source tree may hold files named like keepers; they go with the clone.
+        (workdir / clone / "fixture.parquet").write_bytes(b"x")
+    (workdir / "blame").mkdir()
+    (workdir / "blame" / "a.c.blame").write_text("blame\n")
+    for db in ("blobmap", "cregit", "original", "persons"):
+        (workdir / f"{name}-{db}.db").write_bytes(b"d" * 3000)
+    (workdir / f"{name}-persons.xls").write_bytes(b"xls")
+    (workdir / "pipeline.log").write_text("log\n")
+    return workdir
+
+
+def ctp_log(name: str = "proj") -> None:
+    logs = retain.STATE / name / "logs"
+    logs.mkdir(parents=True)
+    (logs / "pipeline-latest.log").write_text("the same lines\n")
+
+
+def test_clean_workdir_keeps_only_the_keepers(out):
+    workdir = full_workdir(out)
+    ctp_log()
+    result = retain.clean_workdir("proj")
+    assert sorted(p.name for p in workdir.iterdir()) == [
+        "html", "proj-dataset.parquet", "proj-persons.db", "proj-persons.xls",
+        "proj.validated"]
+    removed = {r["entry"] for r in result["removed"]}
+    assert {"memo", "blame", "proj-original.git", "proj-cregit", "proj-blobmap.db",
+            "pipeline.log", "metrics.tsv", "runs.log"} <= removed
+    assert result["errors"] == [] and result["bytes_freed"] > 0
+    assert sorted(result["kept"]) == sorted(p.name for p in workdir.iterdir())
+
+
+def test_clean_workdir_drops_html_only_when_asked(out):
+    workdir = full_workdir(out)
+    retain.clean_workdir("proj", drop_html=True)
+    assert not (workdir / "html").exists()
+    assert (workdir / "proj-dataset.parquet").exists()
+
+
+def test_clean_workdir_keeps_pipeline_log_when_ctp_has_no_copy(out):
+    workdir = full_workdir(out)
+    retain.clean_workdir("proj")
+    assert (workdir / "pipeline.log").exists()
+
+
+def test_clean_workdir_keeps_the_anonymizer_output(out):
+    workdir = full_workdir(out)
+    (workdir / "anon").mkdir()
+    (workdir / "anon" / "proj-dataset.parquet").write_bytes(b"PAR1")
+    retain.clean_workdir("proj")
+    assert (workdir / "anon" / "proj-dataset.parquet").exists()
+
+
+def test_clean_workdir_refuses_an_unfinished_project(out):
+    workdir = full_workdir(out)
+    (workdir / "proj.validated").unlink()
+    before = snapshot(workdir)
+    result = retain.clean_workdir("proj")
+    assert result["errors"] and result["removed"] == []
+    assert snapshot(workdir) == before
+
+
+def test_clean_workdir_refuses_a_live_project(out):
+    workdir = full_workdir(out)
+    before = snapshot(workdir)
+    retain.lock_path("proj").parent.mkdir(parents=True)
+    retain.lock_path("proj").touch()
+    with foreign_lock(retain.lock_path("proj")):
+        result = retain.clean_workdir("proj")
+    assert result["errors"] and snapshot(workdir) == before
+
+
+def test_clean_workdir_refuses_a_symlinked_workdir(out, tmp_path):
+    real = full_workdir(tmp_path / "elsewhere", "proj")
+    (out / "proj").symlink_to(real)
+    (retain.STATE / "proj").mkdir()
+    result = retain.clean_workdir("proj")
+    assert result["errors"] and (real / "memo").exists()
+
+
+def test_clean_workdir_unlinks_a_symlink_without_following_it(out, tmp_path):
+    workdir = full_workdir(out)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "precious").write_text("keep me")
+    (workdir / "link").symlink_to(victim)
+    retain.clean_workdir("proj")
+    assert not (workdir / "link").exists() and (victim / "precious").exists()
+
+
+def test_clean_workdir_reports_what_it_could_not_remove(out, monkeypatch):
+    workdir = full_workdir(out)
+    real_remove = retain.remove_tree
+    monkeypatch.setattr(retain, "remove_tree", lambda target: (
+        [f"{target} (Permission denied)"] if target.name == "memo" else real_remove(target)))
+    result = retain.clean_workdir("proj")
+    assert result["errors"] == [f"{workdir / 'memo'} (Permission denied)"]
+    assert "memo" not in {r["entry"] for r in result["removed"]}
+    assert not (workdir / "blame").exists()
+
+
+def test_clean_workdir_reports_a_file_it_could_not_unlink(out, monkeypatch):
+    full_workdir(out)
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name == "proj-blobmap.db":
+            raise PermissionError("read-only")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    result = retain.clean_workdir("proj")
+    assert len(result["errors"]) == 1 and "proj-blobmap.db" in result["errors"][0]
+
+
+def test_disk_bytes_counts_a_tree_and_survives_a_missing_path(out):
+    workdir = full_workdir(out)
+    assert retain.disk_bytes(workdir / "memo") >= 14000
+    assert retain.disk_bytes(workdir / "absent") == 0
+
+
+# --------------------------------------------------------------------------- #
+# config_path: pipeline.cfg, or the file CTP_CONFIG names
+# --------------------------------------------------------------------------- #
+
+def test_config_path_defaults_to_the_repository_file(monkeypatch):
+    monkeypatch.delenv("CTP_CONFIG", raising=False)
+    assert retain.config_path() == retain.CORPUS / "pipeline.cfg"
+
+
+def test_config_path_follows_ctp_config(monkeypatch, tmp_path):
+    cfg = tmp_path / "e2e.cfg"
+    cfg.write_text("[paths]\n")
+    monkeypatch.setenv("CTP_CONFIG", str(cfg))
+    assert retain.config_path() == cfg.resolve()
+
+
+def test_a_ctp_config_that_names_no_file_stops(monkeypatch, tmp_path):
+    """The defaults point at a live dataset, so a typo must not fall back to them."""
+    monkeypatch.setenv("CTP_CONFIG", str(tmp_path / "typo.cfg"))
+    with pytest.raises(SystemExit, match="is not a file"):
+        retain.config_path()

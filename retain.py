@@ -16,8 +16,24 @@ from pathlib import Path
 
 # Resolved exactly as ctp.py resolves it: the guards compare these path strings.
 CORPUS = Path(__file__).resolve().parent
+
+
+def config_path() -> Path:
+    """pipeline.cfg in this repository, or the file CTP_CONFIG names. A CTP_CONFIG
+    that names no file stops the import: the defaults point at a live dataset."""
+    raw = os.environ.get("CTP_CONFIG")
+    if not raw:
+        return CORPUS / "pipeline.cfg"
+    path = Path(raw).expanduser().resolve()
+    if not path.is_file():
+        raise SystemExit(f"CTP_CONFIG={raw} is not a file. Unset it to use "
+                         f"{CORPUS / 'pipeline.cfg'}.")
+    return path
+
+
+CONFIG = config_path()
 _cfg = configparser.ConfigParser()
-_cfg.read(CORPUS / "pipeline.cfg")
+_cfg.read(CONFIG)
 
 
 def _cfg_path(key: str, default: str) -> Path:
@@ -257,6 +273,75 @@ def _prune_keeper(name: str) -> str | None:
         say(f"{name} — SKIP: not finished ({why})")
         return None
     return why
+
+
+# What a finished project keeps: the Parquet, its stamp, the small identity
+# tables, and the anonymizer's output. html/ stays unless the caller drops it.
+ANON_DIR = "anon"
+
+
+def keepers(name: str, drop_html: bool) -> frozenset[str]:
+    keep = {f"{name}-dataset.parquet", f"{name}.validated",
+            f"{name}-persons.db", f"{name}-persons.xls", ANON_DIR}
+    if not drop_html:
+        keep.add("html")
+    return frozenset(keep)
+
+
+def disk_bytes(path: Path) -> int:
+    """What `du` counts under path, without following a symlink."""
+    try:
+        total = path.lstat().st_blocks * 512
+    except OSError:
+        return 0
+    if path.is_dir() and not path.is_symlink():
+        for root, dirs, files in os.walk(path):
+            for entry in dirs + files:
+                try:
+                    total += os.lstat(os.path.join(root, entry)).st_blocks * 512
+                except OSError:
+                    pass
+    return total
+
+
+def clean_workdir(name: str, *, drop_html: bool = False) -> dict:
+    """Delete every entry of a finished project's workdir except the keepers.
+    Returns {"removed": [{"entry", "bytes"}], "kept": [...], "errors": [...],
+    "bytes_freed": n}. Errors are collected, never raised: a failed cleanup must
+    leave the Parquet and say what it could not delete.
+
+    pipeline.log goes only when ctp's own log of the pipeline exists, because
+    ctp's log holds every line the runner tees into it."""
+    result: dict = {"removed": [], "kept": [], "errors": [], "bytes_freed": 0}
+    if _prune_keeper(name) is None:
+        result["errors"].append(f"{name} is not a finished, idle project (see the log)")
+        return result
+    workdir = OUT / name
+    if workdir.is_symlink() or workdir.resolve().parent != OUT:
+        result["errors"].append(f"{workdir} is not a directory directly inside {OUT}")
+        return result
+    keep = set(keepers(name, drop_html))
+    if not (state_dir(name) / "logs" / "pipeline-latest.log").exists():
+        keep.add("pipeline.log")
+    for entry in sorted(workdir.iterdir()):
+        if entry.name in keep:
+            result["kept"].append(entry.name)
+            continue
+        size = disk_bytes(entry)
+        if entry.is_dir() and not entry.is_symlink():
+            errors = remove_tree(entry)
+        else:
+            try:
+                entry.unlink()
+                errors = []
+            except OSError as exc:
+                errors = [f"{entry} ({exc})"]
+        if errors:
+            result["errors"].extend(errors)
+        else:
+            result["removed"].append({"entry": entry.name, "bytes": size})
+            result["bytes_freed"] += size
+    return result
 
 
 def _measure_subtree(name: str, workdir: Path, subtree: str, apply: bool):

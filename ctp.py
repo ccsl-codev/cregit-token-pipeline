@@ -8,20 +8,27 @@ from __future__ import annotations
 import argparse
 import fcntl
 import functools
+import hashlib
+import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
 import configparser
 
+import ledger
+import pin
 import retain
 from retain import lock_path, state_dir
 from file_mask import UNIVERSAL_MASK
@@ -30,7 +37,8 @@ from file_mask import UNIVERSAL_MASK
 # resume if the command path string drifts (/home vs /local/home symlink alias).
 CORPUS = Path(__file__).resolve().parent
 _cfg = configparser.ConfigParser()
-_cfg.read(CORPUS / "pipeline.cfg")
+# pipeline.cfg here, or the file CTP_CONFIG names; retain and consolidate read the same.
+_cfg.read(retain.CONFIG)
 
 
 def _cfg_path(key: str, default: str) -> Path:
@@ -43,6 +51,8 @@ OUT = _cfg_path("output_dir", "../cregit-workspace/corpus-files")
 # Not created at import: cmd_run and cmd_db create it when they need it.
 METRICS = CORPUS / "metrics.tsv"
 RUNS_LOG = CORPUS / "runs.log"
+# The audit ledger: one JSON row per project and per step, append-only.
+LEDGER = CORPUS / "ledger.jsonl"
 
 
 DEVENV = Path.home() / ".nix-profile/bin/devenv"
@@ -68,6 +78,10 @@ REQUIRED_RUNNER_FLAGS = ("--repo-url", "--repo-name", "--work", "--mask")
 DATASET_STEP = 10
 
 MANIFEST_FIELDS = ("name", "url", "category", "file_filter", "size_class")
+# An optional sixth column pins the commit to analyse. A five-column row runs the
+# remote's HEAD at clone time, and the record says "unpinned".
+PINNED_FIELD = "commit"
+UNPINNED = "unpinned"
 SIZE_CLASSES = ("S", "M", "L")
 
 _metrics_lock = threading.Lock()
@@ -91,10 +105,16 @@ def read_manifest(path: Path, only: set | None) -> list[dict]:
         if not line.strip() or line.startswith("#"):
             continue
         fields = line.split("\t")
-        if len(fields) != len(MANIFEST_FIELDS):
+        if len(fields) not in (len(MANIFEST_FIELDS), len(MANIFEST_FIELDS) + 1):
             raise ValueError(f"{path}:{lineno}: expected {len(MANIFEST_FIELDS)} tab-separated"
-                             f" fields, got {len(fields)}: {line!r}")
+                             f" fields, or {len(MANIFEST_FIELDS) + 1} with a pinned commit,"
+                             f" got {len(fields)}: {line!r}")
         row = dict(zip(MANIFEST_FIELDS, fields))
+        if len(fields) > len(MANIFEST_FIELDS):
+            row[PINNED_FIELD] = fields[-1]
+            if not pin.SHA_RE.match(row[PINNED_FIELD]):
+                raise ValueError(f"{path}:{lineno}: commit {row[PINNED_FIELD]!r} is not a"
+                                 " 40-character lowercase hex SHA")
         if row["size_class"] not in SIZE_CLASSES:
             raise ValueError(f"{path}:{lineno}: size_class {row['size_class']!r}"
                              f" is not one of {', '.join(SIZE_CLASSES)}")
@@ -121,6 +141,9 @@ _ENV: dict = {}
 
 # Set once by cmd_run: run_project goes through pool.map and takes only the project.
 _OPTS: dict = {}
+
+# Set once per run: run_id, tools and flags, copied into every ledger row.
+_RUN: dict = {}
 
 
 @functools.lru_cache(maxsize=None)
@@ -342,7 +365,7 @@ def unique_log_name(logdir: Path, phase: str) -> Path:
     return logfile
 
 
-def run_phase(project: dict, phase: str, args: list[str]) -> int:
+def run_phase(project: dict, phase: str, args: list[str], keep_fds: tuple = ()) -> int:
     name, cls = project["name"], project["size_class"]
     logdir = state_dir(name) / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
@@ -360,12 +383,21 @@ def run_phase(project: dict, phase: str, args: list[str]) -> int:
     sampler = ResourceSampler(project, phase)
     # Popen, not run: the sampler needs the child's pid to attribute RSS to this project.
     with logfile.open("wb") as lf:
+        # keep_fds hands the project's flock to the child, so a process tree that
+        # outlives this runner still holds the lock, and no second run can start.
+        # A census child gets its own session: Ctrl-C reaches only ctp, which
+        # then lets the running projects finish instead of killing them mid-step.
+        extra = {"pass_fds": keep_fds} if keep_fds else {}
+        if _OPTS.get("own_session"):
+            extra["start_new_session"] = True
         proc = subprocess.Popen(args, cwd=CREGIT, env=_ENV,
-                                stdout=lf, stderr=subprocess.STDOUT)
+                                stdout=lf, stderr=subprocess.STDOUT, **extra)
+        _procs[name] = proc
         sampler.start(proc.pid)
         try:
             rc = proc.wait()
         finally:
+            _procs.pop(name, None)
             peak = sampler.stop()
     duration = int(time.time() - start)
 
@@ -382,13 +414,15 @@ class RunOutcome(StrEnum):
     """The result of one run_project call. Values match the strings already
     written to metrics.tsv and runs.log."""
     DONE = "done"
+    DONE_DIRTY = "done-dirty"
     SKIPPED = "skipped"
     FAILED = "failed"
     DEFERRED = "deferred"
 
     @property
     def is_success(self) -> bool:
-        return self in (RunOutcome.DONE, RunOutcome.SKIPPED)
+        """The Parquet is valid. done-dirty is a success that left work files behind."""
+        return self in (RunOutcome.DONE, RunOutcome.DONE_DIRTY, RunOutcome.SKIPPED)
 
 
 def check_memo_dir(name: str, opts: dict, workdir: Path) -> bool:
@@ -408,7 +442,8 @@ def check_memo_dir(name: str, opts: dict, workdir: Path) -> bool:
 
 
 _SWITCH_FLAGS = (("skip_html", "--skip-html"), ("reblame", "--reblame"),
-                 ("mask_widened", "--mask-widened"))
+                 ("mask_widened", "--mask-widened"), ("force_clean", "--force-clean"),
+                 ("tokenizer_worker", "--tokenizer-worker"))
 # The runner calls blame_jobs --jobs; ctp's own --jobs means concurrent projects.
 _VALUE_FLAGS = (("gc", "--gc"), ("blame_jobs", "--jobs"),
                 ("memory_limit", "--memory-limit"), ("duckdb_threads", "--duckdb-threads"))
@@ -419,17 +454,72 @@ def value_args(opts: dict, table: tuple) -> list[str]:
     return [arg for opt, flag in table if opts.get(opt) for arg in (flag, str(opts[opt]))]
 
 
+def pinned_clone_path(name: str) -> Path:
+    """Where the clone step stages a pinned project. Outside the workdir, because
+    the runner deletes the workdir at step 1."""
+    return OUT / pin.STAGING_DIR / f"{name}.git"
+
+
+def pin_result_path(name: str) -> Path:
+    return state_dir(name) / "pin.json"
+
+
+def commit_url(url: str) -> str:
+    """The runner's own default, from the real URL rather than the staging path."""
+    return url.removesuffix(".git").rstrip("/") + "/commit/"
+
+
+def pin_args(project: dict, commit: str = "") -> list[str]:
+    """pin.py for this attempt: `commit` (the --latest choice) or the manifest commit."""
+    name = project["name"]
+    return ["python3", str(CORPUS / "pin.py"),
+            "--url", project["url"], "--commit", commit or project[PINNED_FIELD],
+            "--dest", str(pinned_clone_path(name)), "--result", str(pin_result_path(name))]
+
+
+def git_head(repo: Path) -> str:
+    """HEAD of repo, or "" when repo is absent or git cannot read it."""
+    if not repo.exists():
+        return ""
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD^{commit}"],
+                              env=_ENV or None, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    out = (getattr(proc, "stdout", "") or "").strip() if proc.returncode == 0 else ""
+    return out if pin.SHA_RE.match(out) else ""
+
+
+def runner_checkout(name: str, workdir: Path) -> str:
+    """The commit the runner checked out for blame (step 6), from its working clone."""
+    return git_head(workdir / f"{name}-original")
+
+
+def drop_pinned_clone(name: str) -> list[str]:
+    """Delete the staging clone. Returns the errors, empty when it is gone."""
+    target = pinned_clone_path(name)
+    if not target.exists() and not target.is_symlink():
+        return []
+    if target.is_symlink() or target.resolve().parent != (OUT / pin.STAGING_DIR).resolve():
+        return [f"refusing to delete {target}: not a directory inside {OUT / pin.STAGING_DIR}"]
+    return retain.remove_tree(target)
+
+
 def build_pipeline_args(project: dict, opts: dict, workdir: Path) -> list[str]:
     """The run_pipeline_process.sh argv for one project. Assumes check_memo_dir
     has already refused an unsafe --memo-dir."""
     name = project["name"]
+    pinned = bool(project.get(PINNED_FIELD))
     pipeline_args = [
         "./run_pipeline_process.sh",
-        "--repo-url", project["url"],
+        "--repo-url", str(pinned_clone_path(name)) if pinned else project["url"],
         "--repo-name", name,
         "--work", str(workdir),
         "--mask", opts.get("mask") or project["file_filter"],
     ]
+    if pinned:
+        # The runner derives commit links from --repo-url, which is now a local path.
+        pipeline_args += ["--commit-url", commit_url(project["url"])]
     pipeline_args += [flag for opt, flag in _SWITCH_FLAGS if opts.get(opt)]
     pipeline_args += value_args(opts, (("retokenize", "--retokenize"),))
     # One subdirectory per project: tokenBySha.pl keys the memo on the content
@@ -463,21 +553,417 @@ def project_phases(project: dict, opts: dict, workdir: Path, stamp: Path) -> lis
     ]
 
 
-def run_phases(project: dict, phases: list[tuple]) -> int:
-    """The first non-zero return code, or 0 when every phase passed."""
-    for phase, args in phases:
-        rc = run_phase(project, phase, args)
+def checkout_matches(name: str, workdir: Path, pinned: str) -> tuple[bool, str]:
+    """(ok, sha): which commit the runner blamed. ok is False when a pinned
+    project's checkout is not the pinned commit, or cannot be read."""
+    seen = runner_checkout(name, workdir)
+    if not pinned:
+        say(f"{name} — unpinned, checked out {seen or 'an unreadable HEAD'}")
+        return True, seen
+    if seen != pinned:
+        say(f"{name} ✗ pinned {pinned}, but the runner checked out "
+            f"{seen or 'an unreadable HEAD'}")
+        return False, seen
+    say(f"{name} — checked out the pinned commit {pinned}")
+    return True, seen
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def parquet_info(name: str) -> dict:
+    """Path, size, sha256 and validated row count of a project's Parquet."""
+    workdir = OUT / name
+    parquet = workdir / f"{name}-dataset.parquet"
+    stamp = workdir / f"{name}.validated"
+    info: dict = {"path": str(parquet)}
+    try:
+        info["bytes"] = parquet.stat().st_size
+        info["sha256"] = sha256_file(parquet)
+    except OSError as exc:
+        info["error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        kv = dict(l.split("=", 1) for l in stamp.read_text().splitlines() if "=" in l)
+        info["rows"] = int(kv["rows"])
+    except (OSError, KeyError, ValueError):
+        info["rows"] = None
+    return info
+
+
+def latest_log(name: str, phase: str) -> str:
+    link = state_dir(name) / "logs" / f"{phase}-latest.log"
+    try:
+        return str(link.resolve(strict=True))
+    except OSError:
+        return ""
+
+
+def utc(ts: float) -> str:
+    """ISO 8601 in UTC, the same shape as now_iso()."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(ts))
+
+
+@dataclass
+class ProjectRun:
+    """One attempt at one project, and the context every ledger row carries."""
+    project: dict
+    queue_pos: int | None = None
+    queue_total: int | None = None
+    attempt: int = 1
+    checked_out_sha: str = ""
+    latest: str = ""  # --latest: the remote head this attempt pins, else ""
+    parquet: dict | None = None
+    failed_step: str = ""
+    started: float = field(default_factory=time.time)
+
+    @property
+    def name(self) -> str:
+        return self.project["name"]
+
+    @property
+    def pinned(self) -> str:
+        return self.latest or self.project.get(PINNED_FIELD, "")
+
+    def base(self) -> dict:
+        mask = _OPTS.get("mask") or self.project["file_filter"]
+        return {
+            "v": ledger.VERSION, "run_id": _RUN.get("run_id", ""),
+            "project": self.name,
+            "queue_pos": self.queue_pos, "queue_total": self.queue_total,
+            "attempt": self.attempt,
+            "manifest_row": dict(self.project),
+            "pinned_sha": self.pinned or UNPINNED,
+            # The manifest commit, when --latest pinned another one.
+            **({"snapshot_sha": self.project.get(PINNED_FIELD, "")} if self.latest else {}),
+            "checked_out_sha": self.checked_out_sha,
+            "file_mask_sha256": sha256_text(mask),
+            "tools": _RUN.get("tools", {}),
+            "flags": _RUN.get("flags", {}),
+        }
+
+    def record(self, step: str, status: str, start: float, end: float, **extra) -> None:
+        row = self.base()
+        row.update(step=step, status=status, start_utc=utc(start), end_utc=utc(end),
+                   duration_s=round(end - start, 3))
+        row.update(extra)
+        try:
+            ledger.append(LEDGER, row)
+        except OSError as exc:
+            # The audit trail is the point of the run: stop handing out new projects.
+            _RUN["ledger_broken"] = f"{type(exc).__name__}: {exc}"
+            say(f"{self.name} ✗ LEDGER WRITE FAILED ({exc}); the run stops dispatching")
+
+    def finish(self, state: str, **extra) -> RunOutcome:
+        if state == ledger.FAILED:
+            extra.setdefault("failed_step", self.failed_step)
+        if self.parquet is not None:
+            extra.setdefault("parquet", self.parquet)
+        self.record(ledger.FINAL_STEP, state, self.started, time.time(), state=state, **extra)
+        return RunOutcome(state)
+
+
+def run_step(ctx: ProjectRun, step: str, argv: list[str],
+             after=None) -> int:
+    """Run one phase and append its ledger rows: one when it starts, so a crash shows
+    which step was running, and one when it ends. `after(rc)` may veto a success and
+    add fields: it returns (rc, extra). Re-raises OSError after recording it."""
+    start = time.time()
+    ctx.record(step, "started", start, start, argv=argv)
+    try:
+        rc = run_phase(ctx.project, step, argv, keep_fds=_held_fds(ctx.name))
+    except OSError as exc:
+        ctx.record(step, "failed", start, time.time(), exit_code=None, argv=argv,
+                   detail=f"could not start: {exc}")
+        ctx.failed_step = step
+        raise
+    extra: dict = {}
+    if after is not None:
+        rc, extra = after(rc)
+    ctx.record(step, "ok" if rc == 0 else "failed", start, time.time(), exit_code=rc,
+               argv=argv, log=latest_log(ctx.name, step), **extra)
+    if rc != 0:
+        ctx.failed_step = step
+    return rc
+
+
+# name -> the fd of the project's held lock, so each phase's process tree keeps it.
+_lock_fds: dict = {}
+
+
+def _held_fds(name: str) -> tuple:
+    fd = _lock_fds.get(name)
+    return (fd,) if fd is not None else ()
+
+
+LATEST_TIMEOUT_S = 300
+
+
+def latest_path(name: str) -> Path:
+    return state_dir(name) / "latest.json"
+
+
+def recorded_latest(name: str) -> str:
+    """The commit an earlier --latest attempt chose for this project, or ""."""
+    try:
+        sha = json.loads(latest_path(name).read_text()).get("resolved_sha", "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return sha if pin.SHA_RE.match(sha) else ""
+
+
+def resolve_latest(ctx: ProjectRun) -> bool:
+    """--latest: pin this attempt to the remote head of the project's default branch.
+    The first attempt reads it with `git ls-remote` and keeps the choice in
+    state/<name>/latest.json; a later attempt reuses it, so a resumed run keeps its
+    finished work at one commit. Records a 'resolve' ledger row. False on a failure."""
+    start = time.time()
+    path = latest_path(ctx.name)
+    reused = True
+    try:
+        rec = json.loads(path.read_text())
+        if not pin.SHA_RE.match(rec.get("resolved_sha", "")):
+            raise ValueError(f"no resolved_sha in {path}")
+    except (OSError, ValueError):
+        reused = False
+        try:
+            branch, sha = pin.remote_head(ctx.project["url"], timeout=LATEST_TIMEOUT_S)
+        except pin.PinError as exc:
+            sha, branch, error = "", "", str(exc)
+        else:
+            error = "" if pin.SHA_RE.match(sha) else "the remote gave no HEAD commit"
+        if error:
+            ctx.record("resolve", "failed", start, time.time(), detail=error)
+            ctx.failed_step = "resolve"
+            return False
+        rec = {"url": ctx.project["url"], "snapshot_sha": ctx.project.get(PINNED_FIELD, ""),
+               "resolved_sha": sha, "branch": branch, "resolved_at": now_iso()}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rec) + "\n")
+        tmp.replace(path)
+    ctx.latest = rec["resolved_sha"]
+    say(f"{ctx.name} — latest: {'reusing' if reused else 'resolved'} {ctx.latest} "
+        f"(snapshot {rec.get('snapshot_sha') or 'none'})")
+    ctx.record("resolve", "ok", start, time.time(), resolve={**rec, "reused": reused})
+    return True
+
+
+def stale_workdir(name: str, workdir: Path, pinned: str) -> str:
+    """The commit an earlier attempt left in the workdir when it is not the pinned
+    one, else "". Such a workdir holds work for another commit, so the runner may
+    wipe it even when its memo is large (--force-clean)."""
+    head = git_head(workdir / f"{name}-original.git")
+    return head if head and pinned and head != pinned else ""
+
+
+def resume_step(name: str, workdir: Path, pinned: str) -> int:
+    """2 when an earlier attempt left a clone of the right commit and a blob map, so
+    the runner can resume tokenizing instead of refusing to wipe a big memo; else 1."""
+    bare = workdir / f"{name}-original.git"
+    if not (workdir / f"{name}-blobmap.db").is_file() or not bare.is_dir():
+        return 1
+    head = git_head(bare)
+    if not head or (pinned and head != pinned):
+        return 1
+    return 2
+
+
+def derived_artifacts(name: str) -> tuple[str, ...]:
+    """What steps 3 to 10 rebuild from the tokenized repo. The same list as the
+    runner's drop_refold_derived_artifacts: step 6 cannot clone over an existing
+    working clone, and blame of a stale sha must not survive."""
+    return ("blame", "html", f"{name}-original", f"{name}-cregit",
+            f"{name}-original.db", f"{name}-cregit.db", f"{name}-persons.db",
+            f"{name}-persons.xls", f"{name}-dataset.parquet")
+
+
+def drop_derived(name: str, workdir: Path) -> tuple[list[str], list[str]]:
+    """Delete the derived artifacts, keeping the bare repos, the blob map and the memo.
+    Returns (dropped, errors)."""
+    dropped, errors = [], []
+    for entry in derived_artifacts(name):
+        path = workdir / entry
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_dir() and not path.is_symlink():
+            errs = retain.remove_tree(path)
+        else:
+            try:
+                path.unlink()
+                errs = []
+            except OSError as exc:
+                errs = [f"{path} ({exc})"]
+        (errors.extend(errs) if errs else dropped.append(entry))
+    return dropped, errors
+
+
+def build_steps(ctx: ProjectRun, workdir: Path, stamp: Path) -> bool:
+    """clone (when pinned), pipeline, firm, validate. True when the project validated."""
+    name = ctx.name
+
+    def after_clone(rc: int):
         if rc != 0:
-            return rc
-    return 0
+            return rc, {}
+        try:
+            result = json.loads(pin_result_path(name).read_text())
+        except (OSError, ValueError) as exc:
+            return 1, {"detail": f"no pin result: {exc}"}
+        return rc, {"pin": result}
+
+    def after_pipeline(rc: int):
+        if rc != 0:
+            return rc, {}
+        ok, seen = checkout_matches(name, workdir, ctx.pinned)
+        ctx.checked_out_sha = seen
+        if not ok:
+            return 1, {"detail": f"checked out {seen or 'nothing readable'}, "
+                                 f"not the pinned {ctx.pinned}"}
+        return rc, {}
+
+    def after_validate(rc: int):
+        if rc != 0:
+            return rc, {}
+        ctx.parquet = parquet_info(name)
+        return rc, {"parquet": ctx.parquet}
+
+    if ctx.pinned and _OPTS.get("latest") and not resolve_latest(ctx):
+        return False
+    if ctx.pinned and run_step(ctx, "clone", pin_args(ctx.project, ctx.latest),
+                               after_clone) != 0:
+        return False
+    opts = _OPTS
+    resume: dict = {}
+    stale = stale_workdir(name, workdir, ctx.pinned)
+    if stale:
+        say(f"{name} — the workdir holds commit {stale}, not {ctx.pinned}; "
+            "the runner wipes it (--force-clean)")
+        resume = {"stale_workdir": stale}
+        opts = {**_OPTS, "force_clean": True}
+    if _OPTS.get("auto_resume") and _OPTS.get("from_step", 1) == 1:
+        step = 1 if stale else resume_step(name, workdir, ctx.pinned)
+        if step > 1:
+            dropped, errors = drop_derived(name, workdir)
+            say(f"{name} — an earlier attempt left its clone and blob map; resuming the "
+                f"runner at step {step}" + (f", after dropping {', '.join(dropped)}"
+                                            if dropped else ""))
+            resume = {"from_step": step, "dropped": dropped}
+            if errors:
+                now = time.time()
+                ctx.record("pipeline", "failed", now, now, exit_code=None, resume=resume,
+                           detail=f"could not drop the derived artifacts: {errors}")
+                ctx.failed_step = "pipeline"
+                return False
+            opts = {**_OPTS, "from_step": step}
+
+    def after_pipeline_resumed(rc: int):
+        rc, extra = after_pipeline(rc)
+        return rc, ({**extra, "resume": resume} if resume else extra)
+
+    if run_step(ctx, "pipeline", build_pipeline_args(ctx.project, opts, workdir),
+                after_pipeline_resumed) != 0:
+        return False
+    # firm adds the 3 firm columns to cregit's 67; validate gates the 70.
+    later = dict(project_phases(ctx.project, _OPTS, workdir, stamp))
+    if run_step(ctx, "firm", later["firm"]) != 0:
+        return False
+    return run_step(ctx, "validate", later["validate"], after_validate) == 0
 
 
-def run_project(project: dict) -> RunOutcome:
-    """Runs one project's pipeline, firm and validate phases. Returns a RunOutcome."""
+def anon_outputs(name: str) -> list[dict]:
+    anon = OUT / name / retain.ANON_DIR
+    if not anon.is_dir():
+        return []
+    return [{"path": str(f), "bytes": f.stat().st_size, "sha256": sha256_file(f)}
+            for f in sorted(anon.glob("*.parquet"))]
+
+
+def publish_steps(ctx: ProjectRun) -> bool:
+    """schema (validate_schema.py), anonymize (only with --anonymize), then join
+    (an incremental consolidate into ctp.duckdb). True when every step passes."""
+    name = ctx.name
+    parquet = OUT / name / f"{name}-dataset.parquet"
+    if _OPTS.get("join") and run_step(ctx, "schema", [
+            "python3", str(CORPUS / "validate_schema.py"), str(parquet)]) != 0:
+        return False
+    if _OPTS.get("anonymize"):
+        def after_anonymize(rc: int):
+            outputs = anon_outputs(name)
+            if rc == 0 and not outputs:
+                return 1, {"detail": f"the anonymizer wrote no Parquet to {retain.ANON_DIR}/"}
+            return rc, {"anonymized": outputs}
+        # The interface of anonymize_parquet.py: an output directory, then the inputs.
+        if run_step(ctx, "anonymize", ["python3", _OPTS["anonymize"],
+                                       str(OUT / name / retain.ANON_DIR), str(parquet)],
+                    after_anonymize) != 0:
+            return False
+    if not _OPTS.get("join"):
+        return True
+    return run_step(ctx, "join", ["python3", str(CORPUS / "consolidate.py"),
+                                  "--join", name, "--manifest", _OPTS["manifest"]]) == 0
+
+
+def cleanup_step(ctx: ProjectRun) -> bool:
+    """Remove the staging clone; then, with --cleanup, every bulky work file (the
+    clones, memo/, blame/, the work databases), or only memo/ under --drop-memo.
+    The Parquet, its stamp, the logs and the ledger stay. True when clean."""
+    name = ctx.name
+    start = time.time()
+    errors = drop_pinned_clone(name)
+    removed = [] if errors else ([str(pinned_clone_path(name))] if ctx.pinned else [])
+    for err in errors:
+        say(f"{name} — staging clone not fully removed: {err}")
+    if _OPTS.get("cleanup"):
+        result = retain.clean_workdir(name, drop_html=bool(_OPTS.get("drop_html")))
+        removed += [r["entry"] for r in result["removed"]]
+        errors += result["errors"]
+        for err in result["errors"]:
+            say(f"{name} — cleanup could not remove: {err}")
+        say(f"{name} — cleanup freed {retain.human(result['bytes_freed'])}, kept "
+            f"{', '.join(result['kept']) or 'nothing'}")
+        ctx.record("cleanup", "ok" if not errors else "failed", start, time.time(),
+                   cleanup={"removed": removed, "errors": errors, "kept": result["kept"],
+                            "bytes_freed": result["bytes_freed"],
+                            "removed_bytes": {r["entry"]: r["bytes"]
+                                              for r in result["removed"]}})
+        return not errors
+    if _OPTS.get("drop_memo"):
+        # prune checks the keepers itself.
+        _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
+        if ok:
+            removed.append("memo")
+        else:
+            errors.append("retain refused to prune memo/ (see the run log)")
+            say(f"{name} — memo/ kept, retain refused the prune (see above)")
+    ctx.record("cleanup", "ok" if not errors else "failed", start, time.time(),
+               cleanup={"removed": removed, "errors": errors})
+    return not errors
+
+
+def run_project(project: dict, queue_pos: int | None = None,
+                queue_total: int | None = None, attempt: int = 1,
+                resume_validated: bool = False) -> RunOutcome:
+    """Runs one project's steps and appends a ledger row for each. Returns a RunOutcome.
+    A validated project is skipped, unless resume_validated: then only the steps after
+    validation run (schema, join, cleanup), as after a crash between them."""
+    ctx = ProjectRun(project, queue_pos, queue_total, attempt)
     name = project["name"]
+    if _OPTS.get("latest") and project.get(PINNED_FIELD):
+        # An attempt that only runs the steps after validation clones nothing, so
+        # its rows carry the commit the validated run chose.
+        ctx.latest = recorded_latest(name)
     workdir = OUT / name
     stamp = workdir / f"{name}.validated"
-    if stamp.exists():
+    post_only = stamp.exists()
+    if post_only and not resume_validated:
         say(f"{name} — already validated, skip")
         return RunOutcome.SKIPPED
 
@@ -489,31 +975,40 @@ def run_project(project: dict) -> RunOutcome:
             fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             say(f"{name} — another run holds the lock, skipping")
-            return RunOutcome.DEFERRED
+            return ctx.finish(ledger.DEFERRED, detail="another process holds the project lock")
 
+        _lock_fds[name] = lockfile.fileno()
         try:
-            if shutil.disk_usage(OUT).free < DISK_FLOOR_GB * 2**30:
+            if not post_only and shutil.disk_usage(OUT).free < DISK_FLOOR_GB * 2**30:
                 say(f"{name} — disk below {DISK_FLOOR_GB}G floor, deferred")
-                return RunOutcome.DEFERRED
+                return ctx.finish(ledger.DEFERRED, detail=f"disk below {DISK_FLOOR_GB}G")
 
-            if not check_memo_dir(name, _OPTS, workdir):
-                return RunOutcome.FAILED
+            if not post_only and not check_memo_dir(name, _OPTS, workdir):
+                ctx.failed_step = "preflight"
+                return ctx.finish(ledger.FAILED, detail="--memo-dir is inside the workdir")
 
             try:
-                rc = run_phases(project, project_phases(project, _OPTS, workdir, stamp))
+                if post_only:
+                    say(f"{name} — validated earlier; resuming at the steps after validation")
+                    ctx.parquet = parquet_info(name)
+                    ctx.checked_out_sha = runner_checkout(name, workdir)
+                elif not build_steps(ctx, workdir, stamp):
+                    return ctx.finish(ledger.FAILED)
+                if (_OPTS.get("join") or _OPTS.get("anonymize")) and not publish_steps(ctx):
+                    return ctx.finish(ledger.FAILED)
             except OSError as exc:
                 say(f"{name} ✗ a phase could not start: {exc}")
-                return RunOutcome.FAILED
-            if rc != 0:
-                return RunOutcome.FAILED
+                return ctx.finish(ledger.FAILED)
 
-            if _OPTS.get("drop_memo"):
-                # prune checks the keepers itself.
-                _reclaimed, ok = retain.prune(name, ("memo",), apply=True)
-                if not ok:
-                    say(f"{name} — memo/ kept, retain refused the prune (see above)")
-            return RunOutcome.DONE
+            clean = cleanup_step(ctx)
+            return ctx.finish(ledger.DONE if clean else ledger.DONE_DIRTY)
+        except Exception as exc:
+            # A bug here must not leave the attempt without its final row.
+            say(f"{name} ✗ internal error: {type(exc).__name__}: {exc}")
+            ctx.failed_step = ctx.failed_step or "internal"
+            return ctx.finish(ledger.FAILED, detail=f"internal error: {type(exc).__name__}: {exc}")
         finally:
+            _lock_fds.pop(name, None)
             _live.pop(name, None)
 
 
@@ -546,6 +1041,9 @@ REQUIRES: dict[str, str] = {
     "--mask-widened": ("That checkout would drop the flag, and blobExec would then refuse "
                         "every project whose recorded mask differs from the manifest's "
                         "(exit 3)."),
+    "--tokenizer-worker": ("That checkout has no tokenizer worker pool, so step 2 would "
+                           "start one tokenizer process per blob. Point pipeline.cfg at a "
+                           "checkout with cregit #102 or later."),
     "--retokenize": ("That checkout would drop the flag, step 2 would reuse the cached "
                       "tokenizations you asked to discard, and the run would exit 0 having "
                       "changed nothing. Check pipeline.cfg points at a checkout that has it."),
@@ -573,6 +1071,9 @@ def preflight_runner_flags(args: argparse.Namespace) -> tuple[bool, str]:
                  "The re-blame happens inside step 7; from step 8 the flag is skipped and\n"
                  "step 10 rebuilds the Parquet from the blame already on disk.")
     refuse_memo_conflicts(args)
+    if getattr(args, "tokenizer_worker", False) and args.shards > 1:
+        sys.exit("--tokenizer-worker needs the runner's pipeline mode, and --shards runs "
+                 "sharded mode. Use one of them.")
     # Our own values before the runner probe, so a typo is not reported as "not implemented".
     refuse_bad_values(args)
 
@@ -631,6 +1132,7 @@ def requested_runner_flags(args: argparse.Namespace, mask_widened: bool,
         "--duckdb-threads": bool(args.duckdb_threads),
         "--mask-widened": mask_widened,
         "--retokenize": bool(retokenize),
+        "--tokenizer-worker": bool(getattr(args, "tokenizer_worker", False)),
     }
     return [flag for flag in REQUIRES if requested[flag]]
 
@@ -778,8 +1280,26 @@ def announce_run(opts: dict, jobs: int) -> None:
             f"{'es' if len(opts['shard_classes']) > 1 else ''} {', '.join(opts['shard_classes'])}")
 
 
+def resolve_anonymizer(path: str) -> str:
+    if not path:
+        return ""
+    if not Path(path).is_file():
+        sys.exit(f"--anonymize {path} is not a file. It is run as "
+                 "`python3 SCRIPT <outdir> <dataset.parquet>`, the interface of "
+                 "anonymize_parquet.py.")
+    return str(Path(path).resolve())
+
+
+def refuse_cleanup_conflicts(args: argparse.Namespace) -> None:
+    if getattr(args, "drop_html", False) and not getattr(args, "cleanup", False):
+        sys.exit("--drop-html deletes html/ in the cleanup step. Add --cleanup, or use "
+                 "--skip-html to not write the HTML at all.")
+
+
 def run_options(args: argparse.Namespace) -> dict:
     """The checked options run_project reads through _OPTS. Exits on a refusal."""
+    refuse_cleanup_conflicts(args)
+    anonymize = resolve_anonymizer(getattr(args, "anonymize", "") or "")
     mask_widened, retokenize = preflight_runner_flags(args)
     project_meta = resolve_project_meta(args.project_meta) if args.project_meta else ""
     enforce_provenance(provenance_gaps(project_meta), args)
@@ -791,11 +1311,117 @@ def run_options(args: argparse.Namespace) -> dict:
                 from_step=args.from_step, gc=args.gc,
                 mask_widened=mask_widened,
                 retokenize=retokenize,
+                tokenizer_worker=bool(getattr(args, "tokenizer_worker", False)),
                 blame_jobs=args.blame_jobs,
                 memory_limit=args.memory_limit,
                 duckdb_threads=args.duckdb_threads,
                 mask=args.mask,
-                project_meta=project_meta)
+                project_meta=project_meta,
+                join=bool(getattr(args, "join", False)),
+                manifest=str((CORPUS / args.manifest).resolve()),
+                cleanup=bool(getattr(args, "cleanup", False)),
+                drop_html=bool(getattr(args, "drop_html", False)),
+                anonymize=anonymize)
+
+
+BLOBEXEC_JAR = Path("blobExec/target/scala-2.13/blobExec-0.1.0-assembly.jar")
+
+
+def _capture(cmd: list[str], cwd: Path | None = None) -> str:
+    """stdout of cmd under the cregit environment, or "" when it fails."""
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, env=_ENV or None, capture_output=True,
+                              text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (proc.stdout or "").strip() if proc.returncode == 0 else ""
+
+
+def git_describe(repo: Path) -> str:
+    """HEAD sha of repo, with -dirty when a tracked file differs from it."""
+    head = _capture(["git", "-C", str(repo), "rev-parse", "HEAD"])
+    if not head:
+        return ""
+    dirty = _capture(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"])
+    return head + ("-dirty" if dirty else "")
+
+
+def tool_versions() -> dict:
+    """What produced this run's Parquets. Read once per run, after the devenv capture."""
+    jar = CREGIT / BLOBEXEC_JAR
+    srcml = shutil.which("srcml", path=_ENV.get("PATH")) if _ENV else shutil.which("srcml")
+    srcml_out = _capture(["srcml", "--version"])
+    return {
+        "ctp_commit": git_describe(CORPUS),
+        "cregit_commit": git_describe(CREGIT),
+        # srcML builds from one release line print one version; the path names the build.
+        "srcml_version": srcml_out.splitlines()[0] if srcml_out else "",
+        "srcml_path": str(Path(srcml).resolve()) if srcml else "",
+        "blobexec_jar_sha256": sha256_file(jar) if jar.is_file() else "",
+        "git_version": _capture(["git", "--version"]),
+        "ctp_python": sys.version.split()[0],
+    }
+
+
+def run_flags(args: argparse.Namespace, manifest: Path) -> dict:
+    """Every option of this run, JSON-safe, with the manifest it read. `effective` is
+    what run_project reads after the checks; `cli` is what was typed."""
+    flags: dict = {
+        "effective": {k: (list(v) if isinstance(v, tuple) else v)
+                      for k, v in sorted(_OPTS.items())},
+        "cli": {k: v for k, v in sorted(vars(args).items()) if k != "fn"},
+        "argv": sys.argv[1:],
+    }
+    flags["manifest_path"] = str(manifest)
+    flags["config_path"] = str(retain.CONFIG)
+    flags["config_sha256"] = sha256_file(retain.CONFIG) if retain.CONFIG.is_file() else ""
+    flags["cregit_dir"] = str(CREGIT)
+    flags["output_dir"] = str(OUT)
+    try:
+        flags["manifest_sha256"] = sha256_file(manifest)
+    except OSError:
+        flags["manifest_sha256"] = ""
+    return flags
+
+
+def forward_config() -> None:
+    """A step that reads the config (the join, a rebuild) must read this run's file."""
+    if os.environ.get("CTP_CONFIG"):
+        _ENV["CTP_CONFIG"] = str(retain.CONFIG)
+
+
+def start_ledger_run(args: argparse.Namespace, manifest: Path, command: str) -> None:
+    """Fill _RUN, then append the run-start row."""
+    forward_config()
+    _RUN.clear()
+    _RUN["run_id"] = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
+    _RUN["tools"] = tool_versions()
+    _RUN["flags"] = run_flags(args, manifest)
+    now = time.time()
+    try:
+        ledger.append(LEDGER, {"v": ledger.VERSION, "run_id": _RUN["run_id"],
+                               "step": "run-start", "command": command,
+                               "start_utc": utc(now), "tools": _RUN["tools"],
+                               "flags": _RUN["flags"]})
+    except OSError as exc:
+        sys.exit(f"cannot write the ledger {LEDGER}: {exc}")
+    say(f"ledger: {LEDGER} (run {_RUN['run_id']})")
+
+
+def end_ledger_run(rc: int, started: float, results: dict) -> None:
+    counts: dict = {}
+    for outcome in results.values():
+        counts[str(outcome)] = counts.get(str(outcome), 0) + 1
+    try:
+        ledger.append(LEDGER, {"v": ledger.VERSION, "run_id": _RUN.get("run_id", ""),
+                               "step": "run-end", "exit_code": rc,
+                               "start_utc": utc(started), "end_utc": utc(time.time()),
+                               "duration_s": round(time.time() - started, 3),
+                               "outcomes": counts,
+                               **({"stop_reason": _RUN["stop_reason"]}
+                                  if _RUN.get("stop_reason") else {})})
+    except OSError as exc:
+        say(f"WARNING: cannot write the run-end row to {LEDGER}: {exc}")
 
 
 def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
@@ -806,7 +1432,7 @@ def run_passes(projects: list[dict], jobs: int, retries: int) -> dict:
     try:
         for attempt in range(1 + retries):
             todo = [p for p in projects
-                    if results.get(p["name"]) not in (RunOutcome.DONE, RunOutcome.SKIPPED)]
+                    if not (results.get(p["name"]) and results[p["name"]].is_success)]
             if not todo:
                 break
             if attempt:
@@ -827,23 +1453,284 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     _OPTS.update(run_options(args))
+    if any(p.get(PINNED_FIELD) for p in projects):
+        refuse_unless_runner_accepts(
+            "a pinned manifest", ("--commit-url",),
+            " Pinned projects run from a local staging clone, so the runner needs "
+            "--commit-url to keep the real commit links.")
     announce_run(_OPTS, args.jobs)
 
     run_start = time.time()
     say("capturing devenv environment (once)...")
     _ENV.update(capture_devenv_env())
+    # A deleted or private repository must fail its clone, not wait for a password.
+    _ENV.setdefault("GIT_TERMINAL_PROMPT", "0")
     say(f"devenv environment captured ({len(_ENV)} vars)")
+    start_ledger_run(args, CORPUS / args.manifest, "run")
     with RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-start\tjobs={args.jobs}\tprojects={len(projects)}\n")
 
     results = run_passes(projects, args.jobs, args.retries)
 
     rc = 0 if all(v.is_success for v in results.values()) else 1
+    end_ledger_run(rc, run_start, results)
     with RUNS_LOG.open("a") as f:
         f.write(f"{now_iso()}\trun-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
 
     say(f"run finished rc={rc} — " + " ".join(f"{n}:{v}" for n, v in sorted(results.items())))
     return rc
+
+
+# --------------------------------------------------------------------------- #
+# census: the scheduler for a long end-to-end run
+# --------------------------------------------------------------------------- #
+
+STOP_NAME = "STOP"
+MIN_FREE_MEM_GB = 8
+POLL_S = 15
+# Set by a signal or a broken ledger: no new project starts, running ones finish.
+_STOP = threading.Event()
+# name -> the Popen of its running phase, for the second signal.
+_procs: dict = {}
+
+
+def mem_available_gb(meminfo: Path = Path("/proc/meminfo")) -> float | None:
+    """MemAvailable in GiB, or None where the kernel does not say."""
+    try:
+        for line in meminfo.read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 2**20
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def gate_reason(opts: dict) -> str | None:
+    """Why a new project may not start now, or None."""
+    free_gb = shutil.disk_usage(OUT).free / 2**30
+    if free_gb < DISK_FLOOR_GB:
+        return f"disk {free_gb:.0f}G free, below the {DISK_FLOOR_GB}G floor"
+    mem = mem_available_gb()
+    floor = opts.get("min_free_mem_gb", MIN_FREE_MEM_GB)
+    if mem is not None and mem < floor:
+        return f"memory {mem:.1f}G available, below the {floor}G floor"
+    return None
+
+
+def stop_reason(stop_file: Path) -> str | None:
+    if _STOP.is_set():
+        return _RUN.get("stop_reason") or "stop requested"
+    if _RUN.get("ledger_broken"):
+        return f"the ledger cannot be written: {_RUN['ledger_broken']}"
+    if stop_file.exists():
+        return f"{stop_file} exists"
+    return None
+
+
+# What the scheduler does with a project, from its ledger history and its stamp.
+SKIP, POST, RUN, GIVE_UP = "skip", "post", "run", "give-up"
+
+
+def plan(project: dict, history: ledger.History, retries: int) -> str:
+    name = project["name"]
+    stamped = (OUT / name / f"{name}.validated").exists()
+    if history.state == ledger.DONE and stamped:
+        return SKIP
+    if history.failures + history.interrupted > retries:
+        return GIVE_UP
+    # Validated but not done: a crash after validation, a done-dirty cleanup, or
+    # a project an earlier `ctp.py run` validated. Only the later steps run.
+    return POST if stamped else RUN
+
+
+@dataclass
+class Job:
+    """One queued project of a census."""
+    pos: int
+    project: dict
+    attempt: int
+    failures: int
+    post: bool
+    defers: int = 0
+    not_before: float = 0.0
+
+
+# A deferred project (its lock is held elsewhere) waits poll * 2**defers, up to this.
+DEFER_MAX_S = 600
+
+
+def next_job(queue: deque, now: float) -> Job | None:
+    """The first job whose wait is over, taken out of the queue; None if all wait."""
+    for i, job in enumerate(queue):
+        if job.not_before <= now:
+            del queue[i]
+            return job
+    return None
+
+
+def schedule(projects: list[dict], workers: int, retries: int, stop_file: Path,
+             poll: float = POLL_S) -> dict:
+    """Run projects in manifest order with up to `workers` at once. Returns name -> outcome."""
+    total = len(projects)
+    histories = ledger.histories(ledger.read(LEDGER))
+    results: dict = {}
+    queue: deque = deque()
+    for pos, project in enumerate(projects, 1):
+        name = project["name"]
+        h = histories.get(name, ledger.History())
+        decision = plan(project, h, retries)
+        if decision == SKIP:
+            results[name] = RunOutcome.SKIPPED
+        elif decision == GIVE_UP:
+            say(f"{name} — failed {h.failures + h.interrupted} times "
+                f"(last at {h.last_failed_step or '?'}), more than --retries {retries}; "
+                "not retried")
+            results[name] = RunOutcome.FAILED
+        else:
+            queue.append(Job(pos, project, h.attempts + 1, h.failures + h.interrupted,
+                             decision == POST))
+    skipped = sum(1 for v in results.values() if v == RunOutcome.SKIPPED)
+    say(f"census: {total} projects, {skipped} already done, {len(queue)} to run, "
+        f"{workers} workers")
+
+    stop_heartbeat = threading.Event()
+    threading.Thread(target=heartbeat, args=(stop_heartbeat, results), daemon=True).start()
+    running: dict = {}
+    waiting_since: float | None = None
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while queue or running:
+                reason = stop_reason(stop_file)
+                if reason and not _RUN.get("stop_reason"):
+                    _RUN["stop_reason"] = reason
+                    say(f"stopping: {reason}. No new project starts; "
+                        f"{len(running)} running will finish")
+                if not reason and queue and len(running) < workers:
+                    gate = gate_reason(_OPTS)
+                    job = next_job(queue, time.time()) if gate is None else None
+                    if job is not None:
+                        waiting_since = None
+                        fut = pool.submit(run_project, job.project, job.pos, total,
+                                          job.attempt, job.post)
+                        running[fut] = job
+                        continue
+                    if gate is not None and waiting_since is None:
+                        waiting_since = time.time()
+                        say(f"waiting to start {queue[0].project['name']}: {gate}")
+                if not running:
+                    if reason or not queue:
+                        break
+                    time.sleep(poll)
+                    continue
+                done, _ = wait(list(running), timeout=poll, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    job = running.pop(fut)
+                    name = job.project["name"]
+                    try:
+                        outcome = fut.result()
+                    except Exception as exc:              # one project must not end the run
+                        say(f"{name} ✗ crashed the worker: {type(exc).__name__}: {exc}")
+                        outcome = RunOutcome.FAILED
+                    results[name] = outcome
+                    if outcome == RunOutcome.FAILED:
+                        job.failures += 1
+                        if job.failures <= retries:
+                            say(f"{name} — failed, retry {job.failures} of {retries} queued")
+                            job.attempt += 1
+                            job.post = (OUT / name / f"{name}.validated").exists()
+                            queue.append(job)
+                    elif outcome == RunOutcome.DEFERRED:
+                        # Another process holds it: try again later, waiting longer each time.
+                        job.defers += 1
+                        wait_s = min(poll * 2 ** job.defers, DEFER_MAX_S)
+                        job.not_before = time.time() + wait_s
+                        say(f"{name} — deferred; next try in {wait_s:.0f}s")
+                        queue.append(job)
+    finally:
+        stop_heartbeat.set()
+    return results
+
+
+def install_signal_handlers() -> None:
+    """First SIGINT or SIGTERM: stop starting projects. Second: also terminate the
+    running ones, whose rows then record the failure."""
+    def handler(signum, _frame):
+        if not _STOP.is_set():
+            _RUN["stop_reason"] = f"signal {signal.Signals(signum).name}"
+            _STOP.set()
+            say(f"{signal.Signals(signum).name}: finishing the running projects; "
+                "send it again to terminate them")
+            return
+        for name, proc in list(_procs.items()):
+            say(f"terminating {name} (process group {proc.pid})")
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+
+
+def cmd_census(args: argparse.Namespace) -> int:
+    """Every project of the manifest, end to end, in manifest order."""
+    global DISK_FLOOR_GB
+    stop_file = Path(args.stop_file).resolve() if args.stop_file else CORPUS / STOP_NAME
+    if stop_file.exists():
+        sys.exit(f"{stop_file} exists, so the census would stop at once. Remove it to start.")
+    if args.workers < 1:
+        sys.exit("--workers must be at least 1")
+    OUT.mkdir(parents=True, exist_ok=True)
+    manifest = CORPUS / args.manifest
+    projects = read_manifest(manifest, set(args.only.split(",")) if args.only else None)
+    if not projects:
+        say("nothing to run (empty manifest / --only filter matched nothing)")
+        return 0
+    unpinned = sum(1 for p in projects if not p.get(PINNED_FIELD))
+    if unpinned:
+        say(f"WARNING: {unpinned} of {len(projects)} projects are unpinned: each runs the "
+            "remote HEAD of its clone day, and the ledger says so")
+
+    args.join, args.cleanup = True, True
+    _OPTS.update(run_options(args))
+    _OPTS.update(own_session=True, min_free_mem_gb=args.min_free_mem_gb, auto_resume=True,
+                 latest=bool(getattr(args, "latest", False)))
+    if _OPTS["latest"]:
+        say("--latest: each project pins the remote head of its default branch when its "
+            "first attempt starts; the ledger records it and the manifest commit")
+    DISK_FLOOR_GB = args.disk_floor_gb
+    if len(projects) > unpinned:
+        refuse_unless_runner_accepts(
+            "a pinned manifest", ("--commit-url",),
+            " Pinned projects run from a local staging clone, so the runner needs "
+            "--commit-url to keep the real commit links.")
+    announce_run(_OPTS, args.workers)
+    say(f"stop file: {stop_file} (touch it to stop after the running projects)")
+
+    run_start = time.time()
+    say("capturing devenv environment (once)...")
+    _ENV.update(capture_devenv_env())
+    _ENV.setdefault("GIT_TERMINAL_PROMPT", "0")
+    start_ledger_run(args, manifest, "census")
+    install_signal_handlers()
+    with RUNS_LOG.open("a") as f:
+        f.write(f"{now_iso()}\tcensus-start\tworkers={args.workers}\tprojects={len(projects)}\n")
+
+    results = schedule(projects, args.workers, args.retries, stop_file, args.poll)
+
+    stopped = bool(_RUN.get("stop_reason"))
+    rc = 0 if all(v.is_success for v in results.values()) and not stopped else 1
+    if stopped and all(v.is_success for v in results.values()):
+        rc = 3
+    end_ledger_run(rc, run_start, results)
+    with RUNS_LOG.open("a") as f:
+        f.write(f"{now_iso()}\tcensus-end\trc={rc}\tduration_s={int(time.time() - run_start)}\n")
+    counts: dict = {}
+    for v in results.values():
+        counts[str(v)] = counts.get(str(v), 0) + 1
+    say(f"census finished rc={rc}: " + ", ".join(f"{k} {n}" for k, n in sorted(counts.items()))
+        + (f" (stopped: {_RUN['stop_reason']})" if stopped else ""))
+    return rc
+
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -930,12 +1817,129 @@ def print_listing(title: str, rows: list[str]) -> None:
             print(f"  {row}")
 
 
+AUDIT_FIELDS = ("start_utc", "step", "status", "exit_code", "duration_s")
+
+
+def audit_line(row: dict) -> str:
+    cells = [str(row.get(k, "")) for k in AUDIT_FIELDS]
+    notes = []
+    if row.get("step") == ledger.FINAL_STEP:
+        notes.append(f"state={row.get('state')}")
+        if row.get("failed_step"):
+            notes.append(f"failed_step={row['failed_step']}")
+    if row.get("parquet", {}).get("sha256") and row.get("step") in ("validate", ledger.FINAL_STEP):
+        pq = row["parquet"]
+        notes.append(f"parquet rows={pq.get('rows')} sha256={pq['sha256'][:16]}")
+    if row.get("step") == "pipeline" and row.get("checked_out_sha"):
+        notes.append(f"checked_out={row['checked_out_sha']} pinned={row.get('pinned_sha')}")
+    if row.get("cleanup"):
+        c = row["cleanup"]
+        notes.append(f"removed={len(c.get('removed', []))} errors={len(c.get('errors', []))}")
+    if row.get("detail"):
+        notes.append(str(row["detail"]))
+    return "  ".join(cells + notes)
+
+
+def interrupted(rows: list[dict]) -> list[dict]:
+    """rows without each started row whose step ended; one that never ended is kept,
+    marked interrupted: its process died mid-step."""
+    ended = {(r.get("run_id"), r.get("attempt"), r.get("step"))
+             for r in rows if r.get("status") != "started"}
+    out = []
+    for r in rows:
+        if r.get("status") != "started":
+            out.append(r)
+        elif (r.get("run_id"), r.get("attempt"), r.get("step")) not in ended:
+            out.append({**r, "status": "interrupted",
+                        "detail": "started, and no end row: the run died here"})
+    return out
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Print one project's ledger rows; --json prints every row whole."""
+    rows = ledger.project_rows(ledger.read(LEDGER), args.project)
+    if not rows:
+        print(f"{args.project}: no rows in {LEDGER}", file=sys.stderr)
+        return 1
+    for row in (rows if args.json else interrupted(rows)):
+        print(json.dumps(row, ensure_ascii=False) if args.json else audit_line(row))
+    return 0
+
+
 def cmd_db(args: argparse.Namespace) -> int:
     """Rebuild ctp.duckdb (derived index over stamps/metrics/parquets)."""
     OUT.mkdir(parents=True, exist_ok=True)
     _ENV.update(capture_devenv_env())
-    return subprocess.run(["python3", str(CORPUS / "consolidate.py")],
+    forward_config()
+    manifests = [arg for m in (getattr(args, "manifest", None) or [])
+                 for arg in ("--manifest", str((CORPUS / m).resolve()))]
+    return subprocess.run(["python3", str(CORPUS / "consolidate.py"), *manifests],
                           cwd=CREGIT, env=_ENV).returncode
+
+
+def add_project_options(p: argparse.ArgumentParser) -> None:
+    """The options of one project run, shared by run and census."""
+    p.add_argument("--skip-html", action="store_true",
+                       help="never generate the HTML views (94-255 MB per project)")
+    p.add_argument("--tokenizer-worker", action="store_true",
+                       help="tokenize in step 2 with the runner's worker pool (long-lived "
+                            "tokenizer processes) instead of one process per blob")
+    p.add_argument("--reblame", action="store_true",
+                       help="re-blame every file in step 7 instead of skipping those "
+                            "with .blame output, after the blame itself changed. "
+                            "Not for resuming an interrupted run")
+    p.add_argument("--drop-memo", "--no-memo", action="store_true",
+                       help="delete memo/ (45-88%% of the workdir) once a project "
+                            "validates. The tokenizer still writes it first")
+    p.add_argument("--memo-dir", default="", metavar="DIR",
+                       help="keep each project's memo in DIR/<project>, outside the "
+                            "workdir a step-1 run deletes. DIR must exist. "
+                            "Cannot be combined with --drop-memo")
+    p.add_argument("--shards", type=int, default=0,
+                       help="tokenize in N shards (needs >1). Costs transient disk, "
+                            "so it is limited to --shard-classes")
+    p.add_argument("--shard-classes", default="L",
+                       help="comma-separated size classes to shard (default L)")
+    p.add_argument("--from-step", type=int, default=1, metavar="N",
+                       help="resume the runner at step N. Only step 1 wipes the "
+                            "workdir, so N>1 keeps finished work")
+    p.add_argument("--retokenize", metavar="EXTS", default="",
+                       help="re-tokenize only these extensions (comma separated, no "
+                            "dots), after a tokenizer fix. Needs --from-step 2 "
+                            "exactly; not with --mask-widened or sharding")
+    p.add_argument("--mask-widened", action="store_true",
+                       help="reuse existing tokenizations across a mask change. "
+                            "Needs --from-step 2 or more; blobExec verifies each project")
+    p.add_argument("--gc", choices=("none", "plain", "aggressive"),
+                       help="how the runner packs the generated repo. Omit for "
+                            "the runner's default")
+    p.add_argument("--memory-limit", metavar="SIZE",
+                       help="DuckDB memory limit for step 10, an absolute size such "
+                            "as 3GB. The process settles at about 1.4x, so budget "
+                            "1.4 x --jobs x SIZE. Omit for the generator's 8GB")
+    p.add_argument("--duckdb-threads", type=int, default=0, metavar="N",
+                       help="DuckDB threads for step 10; fewer lower the peak. "
+                            "Omit for the generator's default")
+    p.add_argument("--project-meta", default="", metavar="PATH",
+                       help="JSON provenance sidecar keyed by project name (format: "
+                            "validate_schema.py, above CREGIT_COLUMNS). Without it "
+                            "29 columns are blank and ctp refuses the run")
+    p.add_argument("--allow-empty-provenance", action="store_true",
+                       help="publish with blank provenance columns, e.g. "
+                            "for a fixture or a smoke run. Refused when nothing "
+                            "would be blank")
+    p.add_argument("--mask", default="", metavar="REGEX",
+                       help="tokenize these files instead of the manifest's mask. "
+                            "Use with --only: a changed mask forces a full rebuild")
+    p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
+                       help="parallel blame workers; the output does not depend "
+                            "on N. Omit for the runner's default of 1")
+    p.add_argument("--drop-html", action="store_true",
+                       help="with --cleanup, delete html/ too. Off by default: an open "
+                            "decision")
+    p.add_argument("--anonymize", metavar="SCRIPT", default="",
+                       help="run `python3 SCRIPT <workdir>/anon <parquet>` after the "
+                            "schema check. Off by default: an open decision")
 
 
 def main() -> int:
@@ -947,59 +1951,42 @@ def main() -> int:
     run_p.add_argument("--retries", type=int, default=1, help="extra passes over failed projects")
     run_p.add_argument("--only", help="comma-separated project names to restrict to")
     run_p.add_argument("--manifest", default="manifest.tsv")
-    run_p.add_argument("--skip-html", action="store_true",
-                       help="never generate the HTML views (94-255 MB per project)")
-    run_p.add_argument("--reblame", action="store_true",
-                       help="re-blame every file in step 7 instead of skipping those "
-                            "with .blame output, after the blame itself changed. "
-                            "Not for resuming an interrupted run")
-    run_p.add_argument("--drop-memo", "--no-memo", action="store_true",
-                       help="delete memo/ (45-88%% of the workdir) once a project "
-                            "validates. The tokenizer still writes it first")
-    run_p.add_argument("--memo-dir", default="", metavar="DIR",
-                       help="keep each project's memo in DIR/<project>, outside the "
-                            "workdir a step-1 run deletes. DIR must exist. "
-                            "Cannot be combined with --drop-memo")
-    run_p.add_argument("--shards", type=int, default=0,
-                       help="tokenize in N shards (needs >1). Costs transient disk, "
-                            "so it is limited to --shard-classes")
-    run_p.add_argument("--shard-classes", default="L",
-                       help="comma-separated size classes to shard (default L)")
-    run_p.add_argument("--from-step", type=int, default=1, metavar="N",
-                       help="resume the runner at step N. Only step 1 wipes the "
-                            "workdir, so N>1 keeps finished work")
-    run_p.add_argument("--retokenize", metavar="EXTS", default="",
-                       help="re-tokenize only these extensions (comma separated, no "
-                            "dots), after a tokenizer fix. Needs --from-step 2 "
-                            "exactly; not with --mask-widened or sharding")
-    run_p.add_argument("--mask-widened", action="store_true",
-                       help="reuse existing tokenizations across a mask change. "
-                            "Needs --from-step 2 or more; blobExec verifies each project")
-    run_p.add_argument("--gc", choices=("none", "plain", "aggressive"),
-                       help="how the runner packs the generated repo. Omit for "
-                            "the runner's default")
-    run_p.add_argument("--memory-limit", metavar="SIZE",
-                       help="DuckDB memory limit for step 10, an absolute size such "
-                            "as 3GB. The process settles at about 1.4x, so budget "
-                            "1.4 x --jobs x SIZE. Omit for the generator's 8GB")
-    run_p.add_argument("--duckdb-threads", type=int, default=0, metavar="N",
-                       help="DuckDB threads for step 10; fewer lower the peak. "
-                            "Omit for the generator's default")
-    run_p.add_argument("--project-meta", default="", metavar="PATH",
-                       help="JSON provenance sidecar keyed by project name (format: "
-                            "validate_schema.py, above CREGIT_COLUMNS). Without it "
-                            "29 columns are blank and ctp refuses the run")
-    run_p.add_argument("--allow-empty-provenance", action="store_true",
-                       help="publish with blank provenance columns, e.g. "
-                            "for a fixture or a smoke run. Refused when nothing "
-                            "would be blank")
-    run_p.add_argument("--mask", default="", metavar="REGEX",
-                       help="tokenize these files instead of the manifest's mask. "
-                            "Use with --only: a changed mask forces a full rebuild")
-    run_p.add_argument("--blame-jobs", type=int, default=0, metavar="N",
-                       help="parallel blame workers; the output does not depend "
-                            "on N. Omit for the runner's default of 1")
+    add_project_options(run_p)
+    run_p.add_argument("--join", action="store_true",
+                       help="after each validated project, check its schema with "
+                            "validate_schema.py and join it into ctp.duckdb")
+    run_p.add_argument("--cleanup", action="store_true",
+                       help="after each validated project, delete the clones, memo/, "
+                            "blame/ and work databases; keep the Parquet, stamp and logs")
     run_p.set_defaults(fn=cmd_run)
+
+    ce_p = sub.add_parser(
+        "census", help="every project end to end: clone at the pinned commit, pipeline, "
+                       "validate, schema, join, cleanup; resumable")
+    ce_p.add_argument("--manifest", default="manifest.tsv")
+    ce_p.add_argument("--workers", "--jobs", dest="workers", type=int, default=2,
+                      help="projects at once (default 2)")
+    ce_p.add_argument("--retries", type=int, default=1,
+                      help="retries per failed project, counted across restarts (default 1)")
+    ce_p.add_argument("--only", help="comma-separated project names to restrict to")
+    ce_p.add_argument("--latest", action="store_true",
+                      help="pin each project to the remote head of its default branch when "
+                           "its first attempt starts, not to the manifest commit. The ledger "
+                           "records both; state/<name>/latest.json keeps the choice for "
+                           "later attempts (delete it to read the head again)")
+    ce_p.add_argument("--min-free-mem-gb", type=float, default=MIN_FREE_MEM_GB, metavar="G",
+                      help=f"start a project only with this much MemAvailable "
+                           f"(default {MIN_FREE_MEM_GB})")
+    ce_p.add_argument("--disk-floor-gb", type=int, default=DISK_FLOOR_GB, metavar="G",
+                      help=f"start a project only with this much free disk in the output "
+                           f"directory (default {DISK_FLOOR_GB})")
+    ce_p.add_argument("--stop-file", default="", metavar="PATH",
+                      help="touch this file to stop after the running projects "
+                           "(default: STOP in this repository)")
+    ce_p.add_argument("--poll", type=float, default=POLL_S, metavar="S",
+                      help=f"seconds between gate and stop checks (default {POLL_S:g})")
+    add_project_options(ce_p)
+    ce_p.set_defaults(fn=cmd_census)
 
     st_p = sub.add_parser("status", help="one-screen pipeline status")
     st_p.add_argument("--manifest", default="manifest.tsv")
@@ -1012,7 +1999,14 @@ def main() -> int:
                       help="how many finished projects to list (default 5)")
     pr_p.set_defaults(fn=cmd_progress)
 
+    au_p = sub.add_parser("audit", help="one project's ledger rows")
+    au_p.add_argument("project")
+    au_p.add_argument("--json", action="store_true", help="print each row whole")
+    au_p.set_defaults(fn=cmd_audit)
+
     db_p = sub.add_parser("db", help="rebuild ctp.duckdb (tracking table + unified tokens view)")
+    db_p.add_argument("--manifest", action="append", metavar="PATH",
+                      help="manifest to index, repeatable (default manifest.tsv)")
     db_p.set_defaults(fn=cmd_db)
 
     args = ap.parse_args()
