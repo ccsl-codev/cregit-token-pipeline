@@ -1500,3 +1500,31 @@ def test_the_sql_macro_gives_the_known_answers():
     for space, value, expected in KNOWN_TOKENS:
         assert con.execute("SELECT anon_t(?, ?)", [space, value]).fetchone()[0] == expected
     con.close()
+
+
+def test_main_hides_the_text_of_an_unexpected_error(tmp_path, capsys, monkeypatch):
+    f = tmp_path / "in" / "a.parquet"
+    f.parent.mkdir()
+    f.write_bytes(b"x")
+    fake_secret = "fake-secret-value-123"
+
+    def boom(*a, **k):
+        raise KeyError(fake_secret)
+
+    monkeypatch.setattr(P, "build_registry", boom)
+    salt = _salt_file(tmp_path)
+    rc = P.main(["registry", "--salt-file", salt, "--registry", str(tmp_path / "p" / "r.parquet"),
+                 str(f)])
+    err = capsys.readouterr()
+    assert rc == 2
+    assert "KeyError" in err.err and "sha256" in err.err
+    assert fake_secret not in err.err + err.out and "Traceback" not in err.err
+
+    def boom_own(*a, **k):
+        raise ValueError(fake_secret)
+
+    monkeypatch.setattr(P, "build_registry", boom_own)
+    rc = P.main(["registry", "--salt-file", salt, "--registry", str(tmp_path / "p" / "r.parquet"),
+                 str(f)])
+    err = capsys.readouterr()
+    assert rc == 2 and fake_secret not in err.err + err.out

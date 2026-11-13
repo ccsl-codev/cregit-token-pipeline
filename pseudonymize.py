@@ -279,16 +279,17 @@ OWN_ERRORS = (PseudonymizeError, A.SaltError, A.UnknownColumnError,
               A.MissingColumnError, ValueError)
 
 
-def safe_error(e: BaseException, keys: tuple[str, str] | None) -> str:
+def safe_error(e: BaseException, keys: tuple[str, str] | None, *, own_text: bool = True) -> str:
     """The text of an error for a report or the terminal.
 
     The tool's own errors carry counts, column names and tokens only, so their
     text is kept (without the keys). Another error (DuckDB, the OS) can quote a
     data value, so only its class and a hash of its text are shown. Run the
-    file alone in Python to see the full text.
+    file alone in Python to see the full text. own_text=False hides the text of
+    every error, also the tool's own (the last resort of main).
     """
     text = redact(str(e), keys)
-    if isinstance(e, OWN_ERRORS) and type(e).__module__ != "_duckdb":
+    if own_text and isinstance(e, OWN_ERRORS) and type(e).__module__ != "_duckdb":
         return f"{type(e).__name__}: {text}"
     digest = hashlib.sha256(text.encode()).hexdigest()[:12]
     return f"{type(e).__name__}: text not shown (sha256 {digest})"
@@ -1794,6 +1795,9 @@ def main(argv: list[str] | None = None) -> int:
                            "registry_sha256": meta["registry_sha256"]})
     except (A.SaltError, RegistryError, A.UnknownColumnError, A.MissingColumnError) as e:
         print(f"error: {safe_error(e, keys)}", file=sys.stderr)
+        return 2
+    except Exception as e:
+        print(f"error: {safe_error(e, keys, own_text=False)}", file=sys.stderr)
         return 2
     if a.report:
         write_report(a.report, report)
