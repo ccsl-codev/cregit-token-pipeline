@@ -793,15 +793,18 @@ def build_registry(paths: list[str], keys: tuple[str, str], registry_out: str, *
         for s in ALL_SPACES:
             kv[f"n_{s}"] = str(counts.get(s, 0))
         tmp = registry_out + ".tmp"
-        old = os.umask(0o077)
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
         try:
             con.execute(f"COPY (SELECT {', '.join(REGISTRY_COLUMNS)} FROM anon_reg "
                         f"ORDER BY space, identity) TO {sql_str(tmp)} (FORMAT PARQUET, "
                         f"COMPRESSION ZSTD, KV_METADATA {_kv_sql(kv)})")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, registry_out)
         finally:
-            os.umask(old)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, registry_out)
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
     except RegistryError:
         raise
     except Exception as e:

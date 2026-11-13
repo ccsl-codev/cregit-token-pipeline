@@ -1528,3 +1528,41 @@ def test_main_hides_the_text_of_an_unexpected_error(tmp_path, capsys, monkeypatc
                  str(f)])
     err = capsys.readouterr()
     assert rc == 2 and fake_secret not in err.err + err.out
+
+
+@requires_duckdb
+def test_a_failed_registry_write_leaves_no_temporary_file(files, monkeypatch):
+    tmp, paths = files
+    reg = str(tmp / "private" / "registry.parquet")
+    real = os.replace
+
+    def failing(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(P.os, "replace", failing)
+    with pytest.raises(P.RegistryError):
+        P.build_registry(paths, P.derive_keys(SALT), reg, threads=1, memory_limit="2GB",
+                         out=io.StringIO())
+    monkeypatch.setattr(P.os, "replace", real)
+    assert sorted(os.listdir(tmp / "private")) == []
+
+
+@requires_duckdb
+def test_the_registry_temporary_file_has_mode_0600_from_the_start(files, monkeypatch):
+    tmp, paths = files
+    reg = str(tmp / "private" / "registry.parquet")
+    modes = []
+    real = P.os.open
+
+    def spy(path, flags, mode=0o777, **kw):
+        fd = real(path, flags, mode, **kw)
+        if str(path).endswith(".tmp"):
+            modes.append((mode, stat.S_IMODE(os.fstat(fd).st_mode)))
+        return fd
+
+    monkeypatch.setattr(P.os, "open", spy)
+    P.build_registry(paths, P.derive_keys(SALT), reg, threads=1, memory_limit="2GB",
+                     out=io.StringIO())
+    assert modes == [(0o600, 0o600)]
+    assert stat.S_IMODE(os.stat(reg).st_mode) == 0o600
+    assert not os.path.exists(reg + ".tmp")
