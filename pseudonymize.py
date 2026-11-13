@@ -1446,6 +1446,18 @@ def run_file(job: dict) -> dict:
     return entry
 
 
+def check_output_dir(paths: list[str], outdir: str) -> None:
+    """Refuse an output folder that is, holds or lies inside an input folder.
+
+    Real paths are compared, so a link cannot hide the same folder.
+    """
+    out = Path(outdir).expanduser().resolve()
+    for d in {Path(p).expanduser().resolve().parent for p in paths}:
+        if _inside(out, d) or _inside(d, out):
+            raise RegistryError("the output folder is the input folder, lies inside it, "
+                                "or holds it; use a separate output folder")
+
+
 def run_write(paths: list[str], outdir: str, *, keys: tuple[str, str], registry: str,
               jobs: int = 1, threads: int = 1, memory_limit: str = "4GB",
               temp_dir: str | None = None, summary_mode: str = DEFAULT_SUMMARY_MODE,
@@ -1457,6 +1469,7 @@ def run_write(paths: list[str], outdir: str, *, keys: tuple[str, str], registry:
     """Write and check each input file. email_domain: default the rule of the
     registry; another rule is refused, as is another Public Suffix List."""
     check_registry_path(registry, (outdir, *release_roots))
+    check_output_dir(paths, outdir)
     os.makedirs(outdir, exist_ok=True)
     psl_data = load_psl(psl)
     con = connect("1GB", 1)
@@ -1757,6 +1770,8 @@ def main(argv: list[str] | None = None) -> int:
     report: dict = {"tool": "pseudonymize.py", "scheme_version": SCHEME_VERSION,
                     "command": a.cmd, "inputs": len(paths)}
     try:
+        if a.cmd in ("write", "run"):
+            check_output_dir(paths, a.outdir)
         if a.cmd in ("registry", "write", "run"):
             keys = derive_keys(A.load_salt(path=a.salt_file, env={}))
         if a.cmd in ("registry", "run"):

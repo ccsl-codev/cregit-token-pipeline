@@ -82,7 +82,8 @@ def _make(tmp: Path, name: str, *, rows: int = ROWS, people: int = PEOPLE,
           replace: dict[str, str] | None = None) -> str:
     """One synthetic file. `replace` maps a column to a SQL expression that
     plants a value (the other rows keep the synthetic value)."""
-    path = str(tmp / name)
+    (tmp / "in").mkdir(exist_ok=True)
+    path = str(tmp / "in" / name)
     con = P.connect("2GB", 2)
     try:
         base = P.synthetic_select(rows, people=people, commits=commits, schema2=schema2,
@@ -1566,3 +1567,30 @@ def test_the_registry_temporary_file_has_mode_0600_from_the_start(files, monkeyp
     assert modes == [(0o600, 0o600)]
     assert stat.S_IMODE(os.stat(reg).st_mode) == 0o600
     assert not os.path.exists(reg + ".tmp")
+
+
+def test_the_output_folder_must_not_be_an_input_folder(tmp_path):
+    src = tmp_path / "in"
+    src.mkdir()
+    f = src / "a.parquet"
+    f.write_bytes(b"raw")
+    keys = P.derive_keys(SALT)
+    reg = str(tmp_path / "private" / "reg.parquet")
+    for outdir in (src, src / "sub", tmp_path):
+        with pytest.raises(P.RegistryError, match="output folder"):
+            P.run_write([str(f)], str(outdir), keys=keys, registry=reg, out=io.StringIO())
+    link = tmp_path / "link"
+    link.symlink_to(src)
+    with pytest.raises(P.RegistryError, match="output folder"):
+        P.run_write([str(f)], str(link), keys=keys, registry=reg, out=io.StringIO())
+    assert f.read_bytes() == b"raw" and sorted(os.listdir(src)) == ["a.parquet"]
+
+
+def test_the_cli_refuses_the_input_folder_as_output(tmp_path, capsys):
+    f = tmp_path / "a.parquet"
+    f.write_bytes(b"raw")
+    salt = _salt_file(tmp_path)
+    rc = P.main(["run", "--salt-file", salt, "--registry", str(tmp_path / "p" / "r.parquet"),
+                 "--outdir", str(tmp_path), str(f)])
+    assert rc == 2 and "output folder" in capsys.readouterr().err
+    assert f.read_bytes() == b"raw" and not (tmp_path / "p").exists()
