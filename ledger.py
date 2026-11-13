@@ -30,6 +30,16 @@ STATES = (DONE, DONE_DIRTY, FAILED, DEFERRED, SKIPPED)
 _thread_lock = threading.Lock()
 
 
+def _lacks_final_newline(path: Path) -> bool:
+    """True when a crash left a torn last line, so the next row must start a new one."""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        if fh.tell() == 0:
+            return False
+        fh.seek(-1, os.SEEK_END)
+        return fh.read(1) != b"\n"
+
+
 def append(path: Path, row: dict) -> None:
     """Append one row. Raises OSError when the row could not be made durable."""
     data = (json.dumps(row, ensure_ascii=False, default=str) + "\n").encode("utf-8")
@@ -38,6 +48,8 @@ def append(path: Path, row: dict) -> None:
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
+            if _lacks_final_newline(path):
+                data = b"\n" + data
             view = memoryview(data)
             while view:
                 written = os.write(fd, view)

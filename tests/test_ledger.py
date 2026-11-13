@@ -91,3 +91,18 @@ def test_project_rows_filters_by_name():
 @pytest.mark.parametrize("state", ledger.STATES)
 def test_every_state_is_a_plain_string(state):
     assert state == state.strip().lower()
+
+
+def test_append_after_a_torn_line_keeps_both_neighbors(tmp_path, capsys):
+    path = tmp_path / "ledger.jsonl"
+    path.write_bytes(b'{"a": 1}\n{"b": ')
+    ledger.append(path, {"c": 3})
+    assert ledger.read(path) == [{"a": 1}, {"c": 3}]
+    assert "skipped" in capsys.readouterr().err
+
+
+def test_append_adds_no_blank_line_after_a_whole_line(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    path.write_bytes(b'{"a": 1}\n')
+    ledger.append(path, {"b": 2})
+    assert path.read_bytes() == b'{"a": 1}\n{"b": 2}\n'
