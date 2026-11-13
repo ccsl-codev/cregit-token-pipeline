@@ -1460,3 +1460,43 @@ def test_a_registry_name_domain_does_not_make_a_published_domain_a_leak(tmp_path
     sc = P.leak_scan(con, dst, reg)
     assert sc["failures"] == [], sc["failures"]
     con.close()
+
+
+KNOWN_SALT = b"known-answer-fake-salt-0000000000000000"
+KNOWN_KEYS = ("9cc0bbd47bdf10b1022349515220da7f28271dfb32ed9a9482f4613094ce13d6",
+              "018859fe9c0c35ce9a3a937c1a00441ccbdaedc781b605481eda2dbf01b55157")
+KNOWN_TOKENS = (
+    ("name", "ada example", "9e5d50c9e07763"),
+    ("email", "ada" + AT + "corp1.example", "a3e576cdbb2fe2"),
+    ("footer", "grace example", "d1c09354b6bafc"),
+)
+
+
+def _reference_token(salt: bytes, space: str, value: str) -> str:
+    import hashlib
+    key = hashlib.blake2b(salt, digest_size=64).digest().hex()
+    k1, k2 = key[:64], key[64:]
+    inner = hashlib.sha256((k1 + space + ":" + value).encode()).hexdigest()
+    return hashlib.sha256((k2 + inner).encode()).hexdigest()[:14]
+
+
+def test_known_answers_for_a_fixed_salt():
+    assert P.derive_keys(KNOWN_SALT) == KNOWN_KEYS
+    for space, value, expected in KNOWN_TOKENS:
+        assert P.token_py(KNOWN_KEYS, space, value) == expected
+        assert _reference_token(KNOWN_SALT, space, value) == expected
+
+
+def test_known_answers_fail_for_swapped_keys_or_a_wrong_space():
+    swapped = (KNOWN_KEYS[1], KNOWN_KEYS[0])
+    for space, value, expected in KNOWN_TOKENS:
+        assert P.token_py(swapped, space, value) != expected
+        assert P.token_py(KNOWN_KEYS, "other", value) != expected
+
+
+@requires_duckdb
+def test_the_sql_macro_gives_the_known_answers():
+    con = _con(KNOWN_KEYS)
+    for space, value, expected in KNOWN_TOKENS:
+        assert con.execute("SELECT anon_t(?, ?)", [space, value]).fetchone()[0] == expected
+    con.close()
