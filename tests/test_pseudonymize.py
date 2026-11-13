@@ -1503,6 +1503,71 @@ def test_the_sql_macro_gives_the_known_answers():
     con.close()
 
 
+def test_the_output_folder_must_not_be_an_input_folder(tmp_path):
+    src = tmp_path / "in"
+    src.mkdir()
+    f = src / "a.parquet"
+    f.write_bytes(b"raw")
+    keys = P.derive_keys(SALT)
+    reg = str(tmp_path / "private" / "reg.parquet")
+    for outdir in (src, src / "sub", tmp_path):
+        with pytest.raises(P.RegistryError, match="output folder"):
+            P.run_write([str(f)], str(outdir), keys=keys, registry=reg, out=io.StringIO())
+    link = tmp_path / "link"
+    link.symlink_to(src)
+    with pytest.raises(P.RegistryError, match="output folder"):
+        P.run_write([str(f)], str(link), keys=keys, registry=reg, out=io.StringIO())
+    assert f.read_bytes() == b"raw" and sorted(os.listdir(src)) == ["a.parquet"]
+
+
+def test_the_cli_refuses_the_input_folder_as_output(tmp_path, capsys):
+    f = tmp_path / "a.parquet"
+    f.write_bytes(b"raw")
+    salt = _salt_file(tmp_path)
+    rc = P.main(["run", "--salt-file", salt, "--registry", str(tmp_path / "p" / "r.parquet"),
+                 "--outdir", str(tmp_path), str(f)])
+    assert rc == 2 and "output folder" in capsys.readouterr().err
+    assert f.read_bytes() == b"raw" and not (tmp_path / "p").exists()
+
+
+def test_the_spill_folder_defaults_to_the_system_temp_folder(tmp_path):
+    out = tmp_path / "out"
+    got = P.resolve_temp_dir(None, str(out))
+    assert got == str(Path(__import__("tempfile").gettempdir()).resolve())
+    assert not Path(got).is_relative_to(out)
+
+
+def test_the_spill_folder_is_refused_in_the_output_or_a_release_root(tmp_path):
+    out = tmp_path / "out"
+    with pytest.raises(P.RegistryError, match="spill"):
+        P.resolve_temp_dir(str(out / "tmp"), str(out))
+    root = tmp_path / "rel"
+    with pytest.raises(P.RegistryError, match="spill"):
+        P.resolve_temp_dir(str(root / "tmp"), str(out), (str(root),))
+    (root2 := tmp_path / "rel2" / "parquet").mkdir(parents=True)
+    (tmp_path / "rel2" / "SHA256SUMS").write_text("")
+    with pytest.raises(P.RegistryError, match="spill"):
+        P.resolve_temp_dir(str(root2.parent / "work"), str(out))
+
+
+@requires_duckdb
+def test_a_job_spills_outside_the_output_folder(registry, monkeypatch):
+    tmp, paths, reg = registry
+    seen = []
+    real = P.connect
+
+    def spy(memory_limit, threads, temp_dir=None):
+        seen.append(temp_dir)
+        return real(memory_limit, threads, temp_dir)
+
+    monkeypatch.setattr(P, "connect", spy)
+    outdir, res = _written(tmp, paths[:1], reg, outname="spillout")
+    assert not res["failures"]
+    spills = [s for s in seen if s and ".anon-spill-" in s]
+    assert spills and all(not Path(s).is_relative_to(outdir) for s in spills)
+    assert not any(n.startswith(".anon-spill-") for n in os.listdir(outdir))
+
+
 def test_main_hides_the_text_of_an_unexpected_error(tmp_path, capsys, monkeypatch):
     f = tmp_path / "in" / "a.parquet"
     f.parent.mkdir()
@@ -1567,30 +1632,3 @@ def test_the_registry_temporary_file_has_mode_0600_from_the_start(files, monkeyp
     assert modes == [(0o600, 0o600)]
     assert stat.S_IMODE(os.stat(reg).st_mode) == 0o600
     assert not os.path.exists(reg + ".tmp")
-
-
-def test_the_output_folder_must_not_be_an_input_folder(tmp_path):
-    src = tmp_path / "in"
-    src.mkdir()
-    f = src / "a.parquet"
-    f.write_bytes(b"raw")
-    keys = P.derive_keys(SALT)
-    reg = str(tmp_path / "private" / "reg.parquet")
-    for outdir in (src, src / "sub", tmp_path):
-        with pytest.raises(P.RegistryError, match="output folder"):
-            P.run_write([str(f)], str(outdir), keys=keys, registry=reg, out=io.StringIO())
-    link = tmp_path / "link"
-    link.symlink_to(src)
-    with pytest.raises(P.RegistryError, match="output folder"):
-        P.run_write([str(f)], str(link), keys=keys, registry=reg, out=io.StringIO())
-    assert f.read_bytes() == b"raw" and sorted(os.listdir(src)) == ["a.parquet"]
-
-
-def test_the_cli_refuses_the_input_folder_as_output(tmp_path, capsys):
-    f = tmp_path / "a.parquet"
-    f.write_bytes(b"raw")
-    salt = _salt_file(tmp_path)
-    rc = P.main(["run", "--salt-file", salt, "--registry", str(tmp_path / "p" / "r.parquet"),
-                 "--outdir", str(tmp_path), str(f)])
-    assert rc == 2 and "output folder" in capsys.readouterr().err
-    assert f.read_bytes() == b"raw" and not (tmp_path / "p").exists()

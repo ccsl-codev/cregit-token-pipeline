@@ -1410,7 +1410,7 @@ def run_file(job: dict) -> dict:
     name = os.path.basename(src)
     dst = os.path.join(outdir, name)
     tmp = os.path.join(outdir, f".{name}.anon-tmp")
-    spill = tempfile.mkdtemp(prefix=".anon-spill-", dir=job.get("temp_dir") or outdir)
+    spill = tempfile.mkdtemp(prefix=".anon-spill-", dir=job["temp_dir"])
     keys = job["keys"]
     entry = {"file": name, "status": "fail", "problems": []}
     t0 = time.time()
@@ -1458,6 +1458,25 @@ def check_output_dir(paths: list[str], outdir: str) -> None:
                                 "or holds it; use a separate output folder")
 
 
+def resolve_temp_dir(temp_dir: str | None, outdir: str,
+                     release_roots: tuple[str, ...] = ()) -> str:
+    """The spill folder: the one given, else the system temp folder.
+
+    It is refused inside the output folder, inside a release root, or inside a
+    folder that has the layout of a release root.
+    """
+    chosen = Path(temp_dir or tempfile.gettempdir()).expanduser().resolve()
+    for root in (outdir, *release_roots):
+        if root and _inside(chosen, Path(root).expanduser().resolve()):
+            raise RegistryError("the spill folder is under the output folder or a release "
+                                "root; use a private folder")
+    for d in (chosen, *chosen.parents):
+        if (d / "parquet").is_dir() and any((d / m).exists() for m in RELEASE_MARKERS):
+            raise RegistryError("the spill folder is under a release root; use a private "
+                                "folder")
+    return str(chosen)
+
+
 def run_write(paths: list[str], outdir: str, *, keys: tuple[str, str], registry: str,
               jobs: int = 1, threads: int = 1, memory_limit: str = "4GB",
               temp_dir: str | None = None, summary_mode: str = DEFAULT_SUMMARY_MODE,
@@ -1470,6 +1489,7 @@ def run_write(paths: list[str], outdir: str, *, keys: tuple[str, str], registry:
     registry; another rule is refused, as is another Public Suffix List."""
     check_registry_path(registry, (outdir, *release_roots))
     check_output_dir(paths, outdir)
+    temp_dir = resolve_temp_dir(temp_dir, outdir, release_roots)
     os.makedirs(outdir, exist_ok=True)
     psl_data = load_psl(psl)
     con = connect("1GB", 1)
