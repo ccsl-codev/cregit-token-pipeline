@@ -89,7 +89,7 @@ tokenized, blamed, validated, schema-checked, joined into `ctp.duckdb` and
 cleaned down to its Parquet. Every step appends a row to `ledger.jsonl`.
 
 ```sh
-./build_manifest.py frame.csv --manifest manifest.census.tsv \
+./build_manifest.py frame.csv --salt "$SALT" --manifest manifest.census.tsv \
     --project-meta project_meta.census.json
 ./ctp.py census --manifest manifest.census.tsv \
     --project-meta project_meta.census.json --workers 3 --skip-html

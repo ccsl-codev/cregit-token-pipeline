@@ -15,6 +15,7 @@ import validate_schema
 from file_mask import UNIVERSAL_MASK
 
 FIXTURE = Path(__file__).parent / "fixtures" / "frame.sample.csv"
+SALT = "test-salt:"
 
 
 def write_frame(tmp_path: Path, rows: list[dict], name: str = "frame.csv") -> Path:
@@ -28,7 +29,7 @@ def write_frame(tmp_path: Path, rows: list[dict], name: str = "frame.csv") -> Pa
 
 def frame_row(slug: str = "jqlang/jq", **over) -> dict:
     row = dict(slug=slug, host="github.com", repo_url=f"https://github.com/{slug}.git",
-               head_oid="a" * 40, u=repr(bm.u_of(slug)), size_class="S", labels="community")
+               head_oid="a" * 40, u=repr(bm.u_of(slug, SALT)), size_class="S", labels="community")
     row.update(over)
     return row
 
@@ -36,27 +37,27 @@ def frame_row(slug: str = "jqlang/jq", **over) -> dict:
 def build_files(tmp_path: Path, frame: Path, *extra: str) -> tuple[Path, Path, Path]:
     manifest, meta = tmp_path / "m.tsv", tmp_path / "meta.json"
     assert bm.main([str(frame), "--manifest", str(manifest),
-                    "--project-meta", str(meta), *extra]) == 0
+                    "--project-meta", str(meta), "--salt", SALT, *extra]) == 0
     return manifest, meta, manifest.with_suffix(".order.tsv")
 
 
 def test_u_is_the_first_53_bits_of_the_salted_sha256():
-    digest = hashlib.sha256(b"20261110:jqlang/jq").digest()
-    assert bm.u_of("jqlang/jq") == (int.from_bytes(digest[:8], "big") >> 11) / 2**53
+    digest = hashlib.sha256((SALT + "jqlang/jq").encode()).digest()
+    assert bm.u_of("jqlang/jq", SALT) == (int.from_bytes(digest[:8], "big") >> 11) / 2**53
 
 
 def test_u_is_always_below_one():
-    assert all(0 <= bm.u_of(f"o/r{i}") < 1 for i in range(2000))
+    assert all(0 <= bm.u_of(f"o/r{i}", SALT) < 1 for i in range(2000))
 
 
 def test_the_fixture_builds_a_manifest_in_u_order(tmp_path):
     manifest, _, _ = build_files(tmp_path, FIXTURE)
     projects = ctp.read_manifest(manifest, None)
     assert [p["name"] for p in projects] == [
-        "zserge__jsmn", "DaveGamble__cJSON",
-        "gitlab.com__example-group__example-lib", "antirez__kilo"]
-    us = [bm.u_of(s) for s in ("zserge/jsmn", "DaveGamble/cJSON",
-                               "example-group/example-lib", "antirez/kilo")]
+        "antirez__kilo", "DaveGamble__cJSON",
+        "gitlab.com__example-group__example-lib", "zserge__jsmn"]
+    us = [bm.u_of(s, SALT) for s in ("antirez/kilo", "DaveGamble/cJSON",
+                                     "example-group/example-lib", "zserge/jsmn")]
     assert us == sorted(us)
 
 
@@ -108,14 +109,14 @@ def test_the_order_file_maps_queue_position_to_slug_and_u(tmp_path):
     _, _, order = build_files(tmp_path, FIXTURE)
     rows = list(csv.DictReader(order.open(), delimiter="\t"))
     assert [r["queue_pos"] for r in rows] == ["1", "2", "3", "4"]
-    assert rows[0]["slug"] == "zserge/jsmn"
-    assert float(rows[0]["u"]) == bm.u_of("zserge/jsmn")
+    assert rows[0]["slug"] == "antirez/kilo"
+    assert float(rows[0]["u"]) == bm.u_of("antirez/kilo", SALT)
 
 
 def test_limit_keeps_the_lowest_u_rows(tmp_path):
     manifest, meta, _ = build_files(tmp_path, FIXTURE, "--limit", "2")
     assert [p["name"] for p in ctp.read_manifest(manifest, None)] == [
-        "zserge__jsmn", "DaveGamble__cJSON"]
+        "antirez__kilo", "DaveGamble__cJSON"]
     assert len(json.loads(meta.read_text())) == 2
 
 
@@ -148,7 +149,7 @@ def test_a_broken_row_stops_the_build_and_names_the_line(tmp_path, capsys, over,
     row = frame_row(slug, **{k: v for k, v in over.items() if k != "slug"})
     frame = write_frame(tmp_path, [row])
     assert bm.main([str(frame), "--manifest", str(tmp_path / "m.tsv"),
-                    "--project-meta", str(tmp_path / "p.json")]) == 1
+                    "--project-meta", str(tmp_path / "p.json"), "--salt", SALT]) == 1
     err = capsys.readouterr().err
     assert message in err and "frame.csv:2" in err
     assert not (tmp_path / "m.tsv").exists()
@@ -158,7 +159,7 @@ def test_a_missing_column_is_named(tmp_path, capsys):
     row = frame_row()
     del row["head_oid"]
     assert bm.main([str(write_frame(tmp_path, [row])), "--manifest", str(tmp_path / "m"),
-                    "--project-meta", str(tmp_path / "p")]) == 1
+                    "--project-meta", str(tmp_path / "p"), "--salt", SALT]) == 1
     assert "missing column(s): head_oid" in capsys.readouterr().err
 
 
@@ -166,14 +167,14 @@ def test_a_frame_without_a_slug_column_is_refused(tmp_path, capsys):
     row = frame_row()
     del row["slug"]
     assert bm.main([str(write_frame(tmp_path, [row])), "--manifest", str(tmp_path / "m"),
-                    "--project-meta", str(tmp_path / "p")]) == 1
+                    "--project-meta", str(tmp_path / "p"), "--salt", SALT]) == 1
     assert "slug or name_with_owner" in capsys.readouterr().err
 
 
 def test_two_rows_with_one_name_are_refused(tmp_path):
     frame = write_frame(tmp_path, [frame_row("a/b"), frame_row("A/B")])
     with pytest.raises(bm.FrameError, match="repeats"):
-        bm.build(frame)
+        bm.build(frame, SALT)
 
 
 def test_a_slug_that_is_not_a_plain_name_is_refused():
@@ -197,10 +198,22 @@ def test_a_repository_at_the_root_of_a_non_github_host_is_named_after_the_host()
 def test_limit_below_one_is_a_usage_error(tmp_path):
     with pytest.raises(SystemExit):
         bm.main([str(FIXTURE), "--manifest", str(tmp_path / "m"),
-                 "--project-meta", str(tmp_path / "p"), "--limit", "0"])
+                 "--project-meta", str(tmp_path / "p"), "--salt", SALT, "--limit", "0"])
 
 
 def test_a_missing_frame_fails_cleanly(tmp_path, capsys):
     assert bm.main([str(tmp_path / "absent.csv"), "--manifest", str(tmp_path / "m"),
-                    "--project-meta", str(tmp_path / "p")]) == 1
+                    "--project-meta", str(tmp_path / "p"), "--salt", SALT]) == 1
     assert "FAIL" in capsys.readouterr().err
+
+
+def test_the_salt_is_required(tmp_path):
+    with pytest.raises(SystemExit):
+        bm.main([str(FIXTURE), "--manifest", str(tmp_path / "m"),
+                 "--project-meta", str(tmp_path / "p")])
+
+
+def test_a_frame_made_with_another_salt_is_refused(tmp_path, capsys):
+    assert bm.main([str(FIXTURE), "--manifest", str(tmp_path / "m"),
+                    "--project-meta", str(tmp_path / "p"), "--salt", "other-salt:"]) == 1
+    assert "does not match" in capsys.readouterr().err

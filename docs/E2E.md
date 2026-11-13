@@ -9,9 +9,12 @@ to one joined, cleaned Parquet per project, with an audit record for each step.
 manifest, the `project_meta.json` sidecar, and an order file.
 
 ```sh
-./build_manifest.py frame.csv --manifest manifest.census.tsv \
+./build_manifest.py frame.csv --salt "$SALT" --manifest manifest.census.tsv \
     --project-meta project_meta.census.json
 ```
+
+`--salt` is required and has no default. Give the same salt that made the
+frame's `u` column, and keep it with the run's record.
 
 Do not build a manifest for a new run from `candidates.csv`. The frame is the
 only input.
@@ -34,7 +37,7 @@ The frame is a UTF-8 CSV file with a header row.
 | `included` | no | When present, only rows with `1`, `true` or `yes` are kept. |
 | any of the 29 provenance fields | no | Fills that field of the sidecar. |
 
-`u` is `sha256("20261110:" + slug)`, read as a fraction: the first 53 bits
+`u` is `sha256(salt + slug)`, read as a fraction: the first 53 bits
 divided by 2^53. The value is exact in a float and always below 1. The builder
 computes `u` itself and stops when the frame's value differs, because a
 different salt or formula would change the run order.

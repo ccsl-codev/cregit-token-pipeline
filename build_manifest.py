@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a pinned manifest and its project_meta.json from a selection frame.
 Usage: build_manifest.py FRAME.csv --manifest OUT.tsv --project-meta OUT.json
-       [--order OUT.order.tsv] [--limit N]
+       --salt SALT [--order OUT.order.tsv] [--limit N]
 
 The frame is a CSV file with a header row. This script reads these columns:
 
@@ -11,7 +11,7 @@ The frame is a CSV file with a header row. This script reads these columns:
   repo_url       the clone URL
   head_oid       the commit to analyse: 40 lowercase hex digits
   u              the permanent random number of the row, a float in [0, 1).
-                 It must equal u_of(slug), see below, or the build stops.
+                 It must equal u_of(slug, salt), see below, or the build stops.
   size_class     S, M or L, as in the manifest
   labels         free text. It becomes the manifest category, unless the
                  frame also has a category column.
@@ -20,8 +20,9 @@ Optional columns: category, file_filter (blank means the universal mask), and
 included. When included is present, only rows where it is 1, true or yes are
 kept. Any column named like one of the 29 provenance fields fills that field.
 
-u_of(slug) takes sha256 of "20261110:" + slug, and reads its first 53 bits as
-a fraction of 2**53. So u is exact in a float, and always below 1.
+u_of(slug, salt) takes sha256 of salt + slug, and reads its first 53 bits as
+a fraction of 2**53. So u is exact in a float, and always below 1. The salt has
+no default: the caller gives it with --salt, and it is part of the run's record.
 
 The manifest lists the rows in u order, lowest first, so any finished prefix
 of a run is a random sample of the frame. Its sixth column pins each project to
@@ -40,7 +41,6 @@ from pathlib import Path
 
 from file_mask import UNIVERSAL_MASK
 
-SALT = "20261110:"
 U_BITS = 53
 U_TOLERANCE = 1e-12
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -71,8 +71,8 @@ class FrameError(ValueError):
     """The frame breaks the input contract. The message names the row."""
 
 
-def u_of(slug: str) -> float:
-    digest = hashlib.sha256((SALT + slug).encode("utf-8")).digest()
+def u_of(slug: str, salt: str) -> float:
+    digest = hashlib.sha256((salt + slug).encode("utf-8")).digest()
     return (int.from_bytes(digest[:8], "big") >> (64 - U_BITS)) / 2**U_BITS
 
 
@@ -99,7 +99,7 @@ def plain(value: str, what: str, where: str) -> str:
     return value
 
 
-def read_frame(path: Path) -> tuple[list[dict], int]:
+def read_frame(path: Path, salt: str) -> tuple[list[dict], int]:
     """(kept rows, rows dropped by `included`). Raises FrameError on a broken row."""
     with path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
@@ -115,11 +115,11 @@ def read_frame(path: Path) -> tuple[list[dict], int]:
             if "included" in columns and row["included"].strip().lower() not in TRUE_WORDS:
                 dropped += 1
                 continue
-            rows.append(check_row(row, slug_col, f"{path}:{lineno}"))
+            rows.append(check_row(row, slug_col, f"{path}:{lineno}", salt))
     return rows, dropped
 
 
-def check_row(row: dict, slug_col: str, where: str) -> dict:
+def check_row(row: dict, slug_col: str, where: str, salt: str) -> dict:
     slug = row[slug_col].strip()
     host = row["host"].strip().lower() or DEFAULT_HOST
     sha = row["head_oid"].strip()
@@ -131,9 +131,9 @@ def check_row(row: dict, slug_col: str, where: str) -> dict:
         raise FrameError(f"{where}: u {row['u']!r} is not a number") from None
     if not 0 <= u < 1:
         raise FrameError(f"{where}: u {u} is outside [0, 1)")
-    expected = u_of(slug)
+    expected = u_of(slug, salt)
     if abs(u - expected) > U_TOLERANCE:
-        raise FrameError(f"{where}: u {u!r} does not match u_of({slug!r}) = {expected!r}. "
+        raise FrameError(f"{where}: u {u!r} does not match u_of({slug!r}, salt) = {expected!r}. "
                          "The frame used another salt or another formula.")
     size_class = row["size_class"].strip()
     if size_class not in SIZE_CLASSES:
@@ -196,9 +196,9 @@ def write_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def build(frame: Path, limit: int | None = None) -> tuple[str, dict, str, dict]:
+def build(frame: Path, salt: str, limit: int | None = None) -> tuple[str, dict, str, dict]:
     """(manifest text, project_meta dict, order text, summary)."""
-    rows, dropped = read_frame(frame)
+    rows, dropped = read_frame(frame, salt)
     queue = ordered(rows)
     if limit is not None:
         queue = queue[:limit]
@@ -208,7 +208,7 @@ def build(frame: Path, limit: int | None = None) -> tuple[str, dict, str, dict]:
     header = (
         f"# Built by build_manifest.py from {frame.name} (sha256 {digest}) at {stamp}.\n"
         f"# {len(queue)} projects in u order; u = first {U_BITS} bits of "
-        f"sha256({SALT!r} + slug).\n"
+        f"sha256({salt!r} + slug).\n"
         "# Columns: name  url  category  file_filter  size_class  commit\n")
     lines = [f"{r['name']}\t{r['url']}\t{r['category']}\t{r['file_filter']}\t"
              f"{r['size_class']}\t{r['sha']}\n" for r in queue]
@@ -224,6 +224,9 @@ def build(frame: Path, limit: int | None = None) -> tuple[str, dict, str, dict]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("frame", type=Path)
+    ap.add_argument("--salt", required=True,
+                    help="the string put before each slug to seed u; the frame's u "
+                         "values must come from the same salt")
     ap.add_argument("--manifest", required=True, type=Path)
     ap.add_argument("--project-meta", required=True, type=Path)
     ap.add_argument("--order", type=Path,
@@ -235,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit is not None and args.limit < 1:
         ap.error("--limit must be at least 1")
     try:
-        manifest, meta, order, summary = build(args.frame, args.limit)
+        manifest, meta, order, summary = build(args.frame, args.salt, args.limit)
     except (FrameError, OSError) as exc:
         print(f"FAIL {exc}", file=sys.stderr)
         return 1
